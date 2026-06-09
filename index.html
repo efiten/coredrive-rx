@@ -39,12 +39,7 @@
   <div class="card">
     <label>Companion pubkey (temporary — will auto-fill from SELF_INFO)</label>
     <input id="pubkey" placeholder="hex pubkey" />
-    <label>MQTT WSS URL</label>
-    <input id="mqttUrl" placeholder="wss://broker:8084/mqtt" />
-    <label>MQTT username</label>
-    <input id="mqttUser" />
-    <label>MQTT password</label>
-    <input id="mqttPass" type="password" />
+    <p style="font-size:11px;color:#9aa4b2;margin:8px 0 0">Broker URL + credentials come from the build (<code>.env.local</code>) — not entered here.</p>
     <button id="btnBroker">Connect broker</button>
   </div>
   <div class="card">

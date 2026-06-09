@@ -92,12 +92,23 @@ async function connectCompanion() {
   refreshCounters();
 }
 
+// MQTT config comes from build-time env (Vite), never the UI — the end user
+// never sees or types broker credentials. NOTE: VITE_* values are embedded in
+// the JS bundle and are recoverable by inspection; treat this as a shared,
+// publish-only ingest account constrained by an EMQX ACL, not a secret. The
+// robust option (companion-signed identity) is a later hardening.
+const MQTT_CFG = {
+  url: import.meta.env.VITE_MQTT_URL,
+  username: import.meta.env.VITE_MQTT_USERNAME,
+  password: import.meta.env.VITE_MQTT_PASSWORD,
+};
+
 async function connectBroker() {
   state.companionPubkey = els('pubkey').value.trim().toLowerCase();
-  state.publisher = new Publisher({
-    url: els('mqttUrl').value.trim(), username: els('mqttUser').value.trim(), password: els('mqttPass').value,
-  });
-  try { await state.publisher.connect(); log('broker connected.'); dbg('MQTT connected'); }
+  if (!state.companionPubkey) { dbg('set companion pubkey first'); return; }
+  if (!MQTT_CFG.url) { dbg('MQTT not configured (set VITE_MQTT_URL in .env.local)'); return; }
+  state.publisher = new Publisher({ ...MQTT_CFG, clientId: state.companionPubkey });
+  try { await state.publisher.connect(); log('broker connected.'); dbg('MQTT connected as ' + state.companionPubkey.slice(0, 12) + '…'); }
   catch (e) { log('broker failed: ' + e.message); dbg('MQTT failed: ' + e.message); }
 }
 

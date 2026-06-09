@@ -11,6 +11,7 @@ export class Publisher {
     this.client = mqtt.connect(this.opts.url, {
       username: this.opts.username,
       password: this.opts.password,
+      clientId: this.opts.clientId, // = companion pubkey; EMQX ACL can bind topics to ${clientid}
       reconnectPeriod: 4000,
       clean: true,
     });
