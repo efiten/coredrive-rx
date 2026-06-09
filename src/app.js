@@ -5,7 +5,7 @@
 // the user never types it.
 import { WebBluetoothTransport } from './transport.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
-import { parsePacket, deriveHeardKey, bytesToHex, hexToBytes } from './meshpacket.js';
+import { parsePacket, deriveHeardKey, bytesToHex } from './meshpacket.js';
 import { requestSelfInfo } from './selfinfo.js';
 import { Gps } from './gps.js';
 import { Queue } from './queue.js';
@@ -13,9 +13,6 @@ import { Publisher } from './publisher.js';
 
 const els = (id) => document.getElementById(id);
 const state = { transport: null, gps: new Gps(), queue: new Queue(), publisher: null, heard: 0, companionPubkey: '', connected: false };
-
-const SIM_RAW =
-  '11451000D818206D3AAC152C8A91F89957E6D30CA51F36E28790228971C473B755F244F718754CF5EE4A2FD58D944466E42CDED140C66D0CC590183E32BAF40F112BE8F3F2BDF6012B4B2793C52F1D36F69EE054D9A05593286F78453E56C0EC4A3EB95DDA2A7543FCCC00B939CACC009278603902FC12BCF84B706120526F6F6620536F6C6172';
 
 // MQTT config from build-time env (Vite); never the UI. Treat as a shared,
 // publish-only ingest account (EMQX ACL); not a real secret.
@@ -56,7 +53,7 @@ async function refreshCounters() {
 }
 
 function currentFix() {
-  return state.gps.latest() || (els('mockGps').checked ? { lat: 51.05, lon: 3.72, acc_m: 10 } : null);
+  return state.gps.latest();
 }
 
 async function processFrame(dv) {
@@ -98,6 +95,10 @@ async function connectAll() {
   try {
     state.transport = new WebBluetoothTransport();
     state.transport.onFrame(processFrame);
+    state.transport.onStatus((s) => {
+      dbg('BLE: ' + s);
+      if (state.connected) log(s === 'connected' ? 'capturing' : 'BLE ' + s + '…');
+    });
     await state.transport.connect();
     s1.textContent = '① Companion connected ✓';
     s1.className = '';
@@ -147,22 +148,13 @@ async function disconnectAll(keepProgress) {
   setButton();
 }
 
-function simulate() {
-  const raw = hexToBytes(SIM_RAW);
-  const frame = new Uint8Array(3 + raw.length);
-  frame[0] = PUSH_CODE_LOG_RX_DATA;
-  frame[1] = (-7 * 4) & 0xff;
-  frame[2] = -92 & 0xff;
-  frame.set(raw, 3);
-  dbg('— simulate 0x88 —');
-  processFrame(new DataView(frame.buffer));
-}
-
 window.addEventListener('DOMContentLoaded', () => {
   setButton();
   els('btnConnect').addEventListener('click', () => (state.connected ? disconnectAll() : connectAll()));
-  els('btnSim').addEventListener('click', simulate);
   els('btnClear').addEventListener('click', () => { els('log').textContent = ''; });
   refreshCounters();
   drainLoop();
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }
 });

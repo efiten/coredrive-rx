@@ -4,6 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>CoreScope RX — coverage capture</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#0f1115" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
   <style>
     body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; background: #0f1115; color: #e6e6e6; }
     h1 { font-size: 18px; }
@@ -44,11 +47,7 @@
     <div class="muted" id="status"></div>
   </div>
   <div class="card">
-    <label class="inline"><input type="checkbox" id="mockGps" /> use mock GPS (desktop testing)</label>
-    <div class="row">
-      <button id="btnSim" class="btn2">Simulate RX</button>
-      <button id="btnClear" class="btn2">Clear log</button>
-    </div>
+    <button id="btnClear" class="btn2">Clear log</button>
     <label>Debug log (frames in, parsed result, outgoing payload)</label>
     <pre id="log"></pre>
   </div>
