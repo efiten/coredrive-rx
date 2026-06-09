@@ -1,0 +1,19 @@
+{
+  "name": "corescope-rx",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mobile RX coverage capture for CoreScope: BLE companion → MQTT (GPS + SNR/RSSI + multibyte)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "mqtt": "^5.10.1"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0"
+  }
+}

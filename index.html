@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>CoreScope RX — coverage capture</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; background: #0f1115; color: #e6e6e6; }
+    h1 { font-size: 18px; }
+    .card { background: #1a1d24; border: 1px solid #2a2f3a; border-radius: 8px; padding: 12px; margin: 10px 0; }
+    label { display: block; font-size: 12px; color: #9aa4b2; margin: 6px 0 2px; }
+    input { width: 100%; box-sizing: border-box; padding: 8px; background: #0f1115; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 6px; }
+    button { width: 100%; padding: 12px; margin-top: 10px; font-size: 15px; border: 0; border-radius: 8px; background: #2ecc71; color: #07120a; font-weight: 600; }
+    .stats { display: flex; gap: 16px; font-size: 28px; font-weight: 700; }
+    .stats div { flex: 1; text-align: center; }
+    .stats small { display: block; font-size: 11px; color: #9aa4b2; font-weight: 400; }
+    #status { font-size: 13px; color: #9aa4b2; min-height: 18px; }
+  </style>
+</head>
+<body>
+  <h1>📡 CoreScope RX</h1>
+  <div class="card">
+    <div class="stats">
+      <div><span id="heard">0</span><small>nodes heard</small></div>
+      <div><span id="pending">0</span><small>pending upload</small></div>
+      <div><span id="gps">…</span><small>gps</small></div>
+    </div>
+  </div>
+  <div class="card">
+    <button id="btnConnect">Connect companion (BLE)</button>
+    <div id="status"></div>
+  </div>
+  <div class="card">
+    <label>Companion pubkey (temporary — will auto-fill from SELF_INFO)</label>
+    <input id="pubkey" placeholder="hex pubkey" />
+    <label>MQTT WSS URL</label>
+    <input id="mqttUrl" placeholder="wss://broker:8084/mqtt" />
+    <label>MQTT username</label>
+    <input id="mqttUser" />
+    <label>MQTT password</label>
+    <input id="mqttPass" type="password" />
+    <button id="btnBroker">Connect broker</button>
+  </div>
+  <script type="module" src="/src/app.js"></script>
+</body>
+</html>
