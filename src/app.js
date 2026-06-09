@@ -7,7 +7,7 @@ import { WebBluetoothTransport } from './transport.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex } from './meshpacket.js';
 import { requestSelfInfo } from './selfinfo.js';
-import { loadNodeNames, nameFor } from './names.js';
+import { resolveName } from './names.js';
 import { Gps } from './gps.js';
 import { Queue } from './queue.js';
 import { Publisher } from './publisher.js';
@@ -30,10 +30,15 @@ function snrColor(snr) {
 function noteHeard(key, keylen, snr, rssi, src) {
   let e = state.recent.find((x) => x.key === key);
   if (e) state.recent = state.recent.filter((x) => x !== e);
-  else e = { key, keylen, count: 0, src };
+  else e = { key, keylen, count: 0, src }; // name resolved on the fly below
   e.count++; e.snr = snr; e.rssi = rssi; e.last = Date.now();
   state.recent.unshift(e);
   state.recent = state.recent.slice(0, RECENT_MAX);
+  // Resolve the name once per node (ID shown first, replaced when it arrives).
+  if (e.name === undefined && !e._req) {
+    e._req = true;
+    resolveName(key).then((nm) => { e.name = nm || ''; renderRecent(); }).catch(() => { e._req = false; });
+  }
   renderRecent();
 }
 
@@ -46,8 +51,7 @@ function renderRecent() {
   if (!state.recent.length) { el.innerHTML = '<div class="muted">— nothing yet —</div>'; return; }
   el.innerHTML = state.recent.map((e) => {
     const snr = e.snr != null ? e.snr.toFixed(1) + ' dB' : 'no sig';
-    const name = nameFor(e.key, e.keylen);
-    const label = name ? esc(name) : '<span class="rk">' + e.key + '</span>';
+    const label = e.name ? esc(e.name) : '<span class="rk">' + e.key + '</span>';
     return '<div class="rr">' +
       '<span class="dot" style="background:' + snrColor(e.snr) + '"></span>' +
       '<span class="rname">' + label + '</span>' +
@@ -153,9 +157,6 @@ async function connectAll() {
     s2.className = '';
     els('companionInfo').textContent = state.companionPubkey.slice(0, 20) + '…';
     dbg('SELF_INFO → ' + (info.name || '(unnamed)') + ' ' + state.companionPubkey);
-
-    // Load node names (via corsproxy) in the background; re-render the list when ready.
-    loadNodeNames().then(() => { dbg('node names loaded'); renderRecent(); }).catch((e) => dbg('names unavailable: ' + e.message));
 
     state.gps.start();
 
