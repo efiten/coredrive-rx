@@ -9,18 +9,23 @@
     h1 { font-size: 18px; }
     .card { background: #1a1d24; border: 1px solid #2a2f3a; border-radius: 8px; padding: 12px; margin: 10px 0; }
     label { display: block; font-size: 12px; color: #9aa4b2; margin: 6px 0 2px; }
-    input { width: 100%; box-sizing: border-box; padding: 8px; background: #0f1115; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 6px; }
-    button { width: 100%; padding: 12px; margin-top: 10px; font-size: 15px; border: 0; border-radius: 8px; background: #2ecc71; color: #07120a; font-weight: 600; }
+    button { width: 100%; padding: 12px; margin-top: 4px; font-size: 15px; border: 0; border-radius: 8px; background: #2ecc71; color: #07120a; font-weight: 600; }
+    button.danger { background: #e74c3c; color: #fff; }
+    button:disabled { opacity: .6; }
+    .btn2 { background: #3b82f6; color: #fff; }
     .stats { display: flex; gap: 16px; font-size: 28px; font-weight: 700; }
     .stats div { flex: 1; text-align: center; }
     .stats small { display: block; font-size: 11px; color: #9aa4b2; font-weight: 400; }
-    #status { font-size: 13px; color: #9aa4b2; min-height: 18px; }
+    .muted { font-size: 12px; color: #9aa4b2; margin-top: 6px; }
+    .progress { margin-top: 10px; font: 12px/1.7 ui-monospace, monospace; }
+    .progress div { color: #9fe6b8; }
+    .progress div.pending { color: #9aa4b2; }
+    .progress div.err { color: #ff8b7a; }
     .row { display: flex; gap: 8px; }
     .row button { flex: 1; }
-    .btn2 { background: #3b82f6; color: #fff; }
     label.inline { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; font-size: 13px; color: #e6e6e6; }
     label.inline input { width: auto; }
-    #log { background: #0a0c10; border: 1px solid #2a2f3a; border-radius: 6px; padding: 8px; font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; max-height: 320px; overflow: auto; color: #9fe6b8; }
+    #log { background: #0a0c10; border: 1px solid #2a2f3a; border-radius: 6px; padding: 8px; font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow: auto; color: #9fe6b8; }
   </style>
 </head>
 <body>
@@ -34,16 +39,12 @@
   </div>
   <div class="card">
     <button id="btnConnect">Connect companion (BLE)</button>
-    <div id="status"></div>
+    <div class="progress" id="progress"></div>
+    <div class="muted" id="companionInfo"></div>
+    <div class="muted" id="status"></div>
   </div>
   <div class="card">
-    <label>Companion pubkey (temporary — will auto-fill from SELF_INFO)</label>
-    <input id="pubkey" placeholder="hex pubkey" />
-    <p style="font-size:11px;color:#9aa4b2;margin:8px 0 0">Broker URL + credentials come from the build (<code>.env.local</code>) — not entered here.</p>
-    <button id="btnBroker">Connect broker</button>
-  </div>
-  <div class="card">
-    <label class="inline"><input type="checkbox" id="mockGps" checked /> use mock GPS (desktop testing)</label>
+    <label class="inline"><input type="checkbox" id="mockGps" /> use mock GPS (desktop testing)</label>
     <div class="row">
       <button id="btnSim" class="btn2">Simulate RX</button>
       <button id="btnClear" class="btn2">Clear log</button>

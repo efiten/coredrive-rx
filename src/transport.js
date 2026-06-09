@@ -11,11 +11,13 @@ export class WebBluetoothTransport {
   constructor() {
     this.device = null;
     this.writeChar = null;
-    this._onFrame = null;
+    this._listeners = [];
   }
 
-  // onFrame(cb): cb receives a DataView per incoming frame.
-  onFrame(cb) { this._onFrame = cb; }
+  // onFrame(cb): register a listener; cb receives a DataView per incoming frame.
+  // Multiple listeners are supported (the main pipeline + one-shot SELF_INFO).
+  onFrame(cb) { this._listeners.push(cb); }
+  offFrame(cb) { this._listeners = this._listeners.filter((f) => f !== cb); }
 
   async connect() {
     if (!navigator.bluetooth) throw new Error('Web Bluetooth not available (use Android Chrome)');
@@ -29,7 +31,7 @@ export class WebBluetoothTransport {
     const notifyChar = await service.getCharacteristic(NUS_NOTIFY);
     await notifyChar.startNotifications();
     notifyChar.addEventListener('characteristicvaluechanged', (e) => {
-      if (this._onFrame) this._onFrame(e.target.value); // DataView, one full frame
+      this._listeners.forEach((cb) => cb(e.target.value)); // DataView, one full frame
     });
     return true;
   }

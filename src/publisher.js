@@ -23,6 +23,8 @@ export class Publisher {
 
   connected() { return !!(this.client && this.client.connected); }
 
+  end() { try { if (this.client) this.client.end(true); } catch (e) {} this.client = null; }
+
   // buildPayload assembles one reception in the ingestor's expected shape.
   static buildPayload(rxPubkey, rec) {
     return {
