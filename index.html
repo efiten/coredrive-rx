@@ -38,10 +38,16 @@
     .rr .rname { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .rr .rsnr { margin-left: auto; font-weight: 600; flex: 0 0 auto; }
     .rr .rc { color: #9aa4b2; font-size: 11px; min-width: 34px; text-align: right; }
+    body { padding-bottom: 70px; }
+    .bottombar { position: fixed; bottom: 0; left: 0; right: 0; height: 56px; display: flex; background: #1a1d24; border-top: 1px solid #2a2f3a; z-index: 1000; }
+    .bottombar .tab { flex: 1; background: transparent; color: #9aa4b2; border: 0; border-radius: 0; margin: 0; font-size: 14px; font-weight: 600; }
+    .bottombar .tab.active { color: #2ecc71; }
+    #view-map #liveMap { height: calc(100vh - 140px); min-height: 300px; border: 1px solid #2a2f3a; border-radius: 6px; }
   </style>
 </head>
 <body>
   <h1>📡 CoreScope RX</h1>
+  <div id="view-home">
   <div class="card">
     <div class="stats">
       <div><span id="heard">0</span><small>nodes heard</small></div>
@@ -56,10 +62,6 @@
     <div class="muted" id="status"></div>
   </div>
   <div class="card">
-    <label>Live coverage (this session) — hexes persist until you reload</label>
-    <div id="liveMap" style="height:44vh;min-height:300px;border:1px solid #2a2f3a;border-radius:6px"></div>
-  </div>
-  <div class="card">
     <label>Recently heard nodes (latest SNR)</label>
     <div id="recent" class="recent"><div class="muted">— nothing yet —</div></div>
     <div class="row" style="margin-top:10px">
@@ -68,6 +70,15 @@
     </div>
     <pre id="log" style="display:none"></pre>
   </div>
+  </div><!-- /view-home -->
+  <div id="view-map" style="display:none">
+    <label>Live coverage (this session) — hexes persist until you reload</label>
+    <div id="liveMap"></div>
+  </div>
+  <nav class="bottombar">
+    <button id="tabHome" class="tab active">🏠 Home</button>
+    <button id="tabMap" class="tab">🗺️ Map</button>
+  </nav>
   <script type="module" src="/src/app.js"></script>
 </body>
 </html>

@@ -77,6 +77,17 @@ function dbg(msg) {
   if (el.textContent.length > 8000) el.textContent = el.textContent.slice(0, 8000);
 }
 
+// switchView toggles between the Home view (capture UI) and the full-screen Map
+// view via the bottom bar. Leaflet must be invalidated when its container becomes
+// visible, otherwise the tiles render at the wrong size.
+function switchView(v) {
+  els('view-home').style.display = v === 'home' ? 'block' : 'none';
+  els('view-map').style.display = v === 'map' ? 'block' : 'none';
+  els('tabHome').classList.toggle('active', v === 'home');
+  els('tabMap').classList.toggle('active', v === 'map');
+  if (v === 'map' && state.localMap) state.localMap.invalidate();
+}
+
 function setButton() {
   const b = els('btnConnect');
   b.textContent = state.connected ? 'Disconnect' : 'Connect companion (BLE)';
@@ -211,7 +222,9 @@ window.addEventListener('DOMContentLoaded', () => {
   refreshCounters();
   drainLoop();
   state.localMap = createLocalMap('liveMap');
-  state.localMap.invalidate();
+  els('tabHome').addEventListener('click', () => switchView('home'));
+  els('tabMap').addEventListener('click', () => switchView('map'));
+  switchView('home');
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   }
