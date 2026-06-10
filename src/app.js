@@ -17,6 +17,8 @@ const els = (id) => document.getElementById(id);
 const state = { transport: null, gps: new Gps(), queue: new Queue(), publisher: null, heard: 0, companionPubkey: '', companionName: '', connected: false, recent: [], localMap: null };
 
 const RECENT_MAX = 20;
+// Build version, injected from package.json by Vite (see vite.config.js).
+const VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev';
 
 // SNR → colour bucket (LoRa-ish). Returns a CSS colour.
 function snrColor(snr) {
@@ -210,6 +212,7 @@ async function disconnectAll(keepProgress) {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
+  els('appver').textContent = 'v' + VERSION;
   setButton();
   els('btnConnect').addEventListener('click', () => (state.connected ? disconnectAll() : connectAll()));
   els('btnClear').addEventListener('click', () => { els('log').textContent = ''; });
