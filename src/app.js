@@ -14,7 +14,9 @@ import { Queue } from './queue.js';
 import { Publisher } from './publisher.js';
 
 const els = (id) => document.getElementById(id);
-const state = { transport: null, gps: new Gps(), queue: new Queue(), publisher: null, heard: 0, companionPubkey: '', companionName: '', connected: false, recent: [], localMap: null };
+const state = { transport: null, gps: new Gps(), queue: new Queue(), publisher: null, heard: 0, companionPubkey: '', companionName: '', connected: false, recent: [], localMap: null, pingOn: false, pingTimer: null };
+
+const PING_INTERVAL_MS = 15000;
 
 const RECENT_MAX = 20;
 // Build version, injected from package.json by Vite (see vite.config.js).
@@ -90,6 +92,40 @@ function switchView(v) {
   if (v === 'map' && state.localMap) state.localMap.invalidate();
 }
 
+// --- Discover / Ping ---
+// Both send a ZERO-HOP self-advert (CMD_SEND_SELF_ADVERT=7, byte1=0): only the
+// directly-surrounding nodes hear it (and can reply/advert back). Deliberately
+// NOT flood, which would propagate network-wide.
+function sendSelfAdvert() {
+  if (!state.transport || !state.connected) { dbg('not connected — cannot send'); return false; }
+  state.transport.send(new Uint8Array([0x07, 0x00])).catch((e) => dbg('advert send failed: ' + e.message));
+  return true;
+}
+
+function schedulePing() {
+  clearTimeout(state.pingTimer);
+  state.pingTimer = setTimeout(firePing, PING_INTERVAL_MS);
+}
+function firePing() {
+  if (!state.pingOn) return;
+  if (sendSelfAdvert()) dbg('ping → zero-hop advert (no packet heard in 15s)');
+  schedulePing();
+}
+function setPing(on) {
+  state.pingOn = on && state.connected;
+  const b = els('btnPing');
+  b.classList.toggle('on', state.pingOn);
+  b.textContent = state.pingOn ? 'Ping: ON' : 'Ping: off';
+  clearTimeout(state.pingTimer);
+  if (state.pingOn) schedulePing();
+}
+// Enable Discover/Ping only while a companion is connected.
+function setActionsEnabled(on) {
+  els('btnDiscover').disabled = !on;
+  els('btnPing').disabled = !on;
+  if (!on) setPing(false);
+}
+
 function setButton() {
   const b = els('btnConnect');
   b.textContent = state.connected ? 'Disconnect' : 'Connect companion (BLE)';
@@ -126,6 +162,7 @@ async function processFrame(dv) {
   if (!hk) { dbg('  → not attributable (tx / 1-byte hop / no advert) — skip'); return; }
   dbg('  → heard ' + hk.heardKey + ' (' + hk.heardKeyLen + 'B, ' + hk.src + ')');
   noteHeard(hk.heardKey, hk.heardKeyLen, f.snr, f.rssi, hk.src); // show in the list even without a GPS fix
+  if (state.pingOn) schedulePing(); // a heard multibyte packet resets the ping timer
   const fix = currentFix();
   if (!fix) { dbg('  → no GPS fix — skip'); return; }
   const rec = { rx_at: new Date().toISOString(), raw: rawHex, snr: f.snr, rssi: f.rssi, lat: fix.lat, lon: fix.lon, acc_m: fix.acc_m };
@@ -190,6 +227,7 @@ async function connectAll() {
     step('✅ All connected — capturing');
     state.connected = true;
     setButton();
+    setActionsEnabled(true);
     log('capturing as ' + (info.name || state.companionPubkey.slice(0, 12)));
   } catch (e) {
     step('✗ ' + e.message, 'err');
@@ -202,6 +240,7 @@ async function connectAll() {
 }
 
 async function disconnectAll(keepProgress) {
+  setActionsEnabled(false); // also stops ping
   if (state.publisher) { state.publisher.end(); state.publisher = null; }
   try { state.gps.stop(); } catch (e) {}
   if (state.transport) { try { await state.transport.disconnect(); } catch (e) {} state.transport = null; }
@@ -216,6 +255,8 @@ window.addEventListener('DOMContentLoaded', () => {
   setButton();
   els('btnConnect').addEventListener('click', () => (state.connected ? disconnectAll() : connectAll()));
   els('btnClear').addEventListener('click', () => { els('log').textContent = ''; });
+  els('btnDiscover').addEventListener('click', () => { if (sendSelfAdvert()) dbg('discover → zero-hop advert sent'); });
+  els('btnPing').addEventListener('click', () => setPing(!state.pingOn));
   els('btnDbg').addEventListener('click', () => {
     const log = els('log');
     const show = log.style.display === 'none';

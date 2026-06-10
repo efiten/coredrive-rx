@@ -18,6 +18,7 @@
     button.danger { background: #e74c3c; color: #fff; }
     button:disabled { opacity: .6; }
     .btn2 { background: #3b82f6; color: #fff; }
+    .btn2.on { background: #2ecc71; color: #07120a; }
     .stats { display: flex; gap: 16px; font-size: 28px; font-weight: 700; }
     .stats div { flex: 1; text-align: center; }
     .stats small { display: block; font-size: 11px; color: #9aa4b2; font-weight: 400; }
@@ -60,6 +61,13 @@
     <div class="progress" id="progress"></div>
     <div class="muted" id="companionInfo"></div>
     <div class="muted" id="status"></div>
+  </div>
+  <div class="card">
+    <div class="row">
+      <button id="btnDiscover" class="btn2" disabled>📣 Discover</button>
+      <button id="btnPing" class="btn2" disabled>Ping: off</button>
+    </div>
+    <div class="muted">Discover wakes nearby repeaters (flood advert). Ping repeats every 15&nbsp;s until a packet is heard, then resets.</div>
   </div>
   <div class="card">
     <label>Recently heard nodes (latest SNR)</label>
