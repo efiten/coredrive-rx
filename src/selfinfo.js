@@ -29,6 +29,32 @@ export function requestSelfInfo(transport, appName = 'corescope-rx', timeoutMs =
   });
 }
 
+const CMD_DEVICE_QUERY = 0x16;   // [0x16, 0x03] -> RESP_CODE_DEVICE_INFO
+const RESP_DEVICE_INFO = 0x0d;
+const CMD_SET_PATH_HASH_MODE = 0x3d; // [0x3D, 0x00, mode]  (mode 0=1B,1=2B,2=3B)
+
+// requestDeviceInfo resolves { fwVer, pathHashMode } from the companion.
+// pathHashMode is at DEVICE_INFO byte 81 (firmware v10+); null if absent.
+export function requestDeviceInfo(transport, timeoutMs = 6000) {
+  return new Promise((resolve, reject) => {
+    const onFrame = (dv) => {
+      const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+      if (b[0] !== RESP_DEVICE_INFO) return;
+      cleanup();
+      resolve({ fwVer: b[1], pathHashMode: b.length > 81 ? b[81] : null });
+    };
+    const timer = setTimeout(() => { cleanup(); reject(new Error('DEVICE_INFO timeout')); }, timeoutMs);
+    function cleanup() { clearTimeout(timer); transport.offFrame(onFrame); }
+    transport.onFrame(onFrame);
+    transport.send(new Uint8Array([CMD_DEVICE_QUERY, 0x03])).catch((e) => { cleanup(); reject(e); });
+  });
+}
+
+// setPathHashMode sets the companion's advert path-hash size (1=2-byte). Fire-and-forget.
+export function setPathHashMode(transport, mode) {
+  return transport.send(new Uint8Array([CMD_SET_PATH_HASH_MODE, 0x00, mode]));
+}
+
 // parseSelfInfo: pubkey at bytes 4-35 (32 bytes), device name at bytes 58+.
 function parseSelfInfo(b) {
   if (b.length < 36) return null;

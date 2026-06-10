@@ -6,7 +6,7 @@
 import { WebBluetoothTransport } from './transport.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex } from './meshpacket.js';
-import { requestSelfInfo } from './selfinfo.js';
+import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
 import { resolveName } from './names.js';
 import { createLocalMap } from './localmap.js';
 import { Gps } from './gps.js';
@@ -189,6 +189,7 @@ async function connectAll() {
   els('btnConnect').disabled = true;
   progressReset();
   els('companionInfo').textContent = '';
+  els('hashinfo').textContent = '';
   log('');
   const s1 = step('① Connecting to companion…', 'pending');
   try {
@@ -210,6 +211,20 @@ async function connectAll() {
     s2.className = '';
     els('companionInfo').textContent = state.companionPubkey.slice(0, 20) + '…';
     dbg('SELF_INFO → ' + (info.name || '(unnamed)') + ' ' + state.companionPubkey);
+
+    // Ensure the companion adverts with 2-byte path hashes — 1-byte mode produces
+    // collision-prone IDs that our capture rule rejects, so the contribution is useless.
+    try {
+      const di = await requestDeviceInfo(state.transport);
+      if (di.pathHashMode === 0 || di.pathHashMode == null) {
+        await setPathHashMode(state.transport, 1);
+        els('hashinfo').textContent = '⚙️ Set companion to 2-byte path-hash mode';
+        dbg('path-hash mode was ' + di.pathHashMode + ' → set to 1 (2-byte)');
+      } else {
+        els('hashinfo').textContent = 'Path-hash mode: ' + (di.pathHashMode + 1) + '-byte ✓';
+        dbg('path-hash mode already ' + di.pathHashMode + ' (' + (di.pathHashMode + 1) + '-byte)');
+      }
+    } catch (e) { dbg('hash-mode check skipped: ' + e.message); }
 
     state.gps.start((fix) => { if (state.localMap) state.localMap.setPosition(fix.lat, fix.lon); });
 
@@ -246,6 +261,7 @@ async function disconnectAll(keepProgress) {
   if (state.transport) { try { await state.transport.disconnect(); } catch (e) {} state.transport = null; }
   state.connected = false;
   els('companionInfo').textContent = '';
+  els('hashinfo').textContent = '';
   if (!keepProgress) { progressReset(); log('disconnected.'); }
   setButton();
 }
