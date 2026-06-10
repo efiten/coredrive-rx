@@ -31,7 +31,10 @@
     .row button { flex: 1; }
     label.inline { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; font-size: 13px; color: #e6e6e6; }
     label.inline input { width: auto; }
-    #log { background: #0a0c10; border: 1px solid #2a2f3a; border-radius: 6px; padding: 8px; font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow: auto; color: #9fe6b8; margin-top: 8px; }
+    #log { background: #0a0c10; border: 1px solid #2a2f3a; border-radius: 6px; padding: 8px; font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow: auto; margin-top: 8px; }
+    #log .lg-ok { color: #9fe6b8; } /* forwarded / sent */
+    #log .lg-no { color: #ff8b7a; } /* held back / failed */
+    #log .lg-st { color: #9aa4b2; } /* status */
     .recent { display: flex; flex-direction: column; gap: 4px; }
     .rr { display: flex; align-items: center; gap: 8px; padding: 7px 9px; background: #11141a; border: 1px solid #2a2f3a; border-radius: 6px; font-size: 13px; }
     .rr .dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }

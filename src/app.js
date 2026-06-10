@@ -75,10 +75,15 @@ const MQTT_CFG = {
 
 function log(msg) { els('status').textContent = msg; }
 
-function dbg(msg) {
+// dbg(msg, level): newest-first log line. level 'ok'=green (forwarded/sent),
+// 'no'=red (held back/failed), default=grey (status).
+function dbg(msg, level) {
   const el = els('log');
-  el.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg + '\n' + el.textContent;
-  if (el.textContent.length > 8000) el.textContent = el.textContent.slice(0, 8000);
+  const line = document.createElement('div');
+  line.className = level === 'ok' ? 'lg-ok' : level === 'no' ? 'lg-no' : 'lg-st';
+  line.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+  el.insertBefore(line, el.firstChild);
+  while (el.childNodes.length > 200) el.removeChild(el.lastChild);
 }
 
 // switchView toggles between the Home view (capture UI) and the full-screen Map
@@ -97,8 +102,8 @@ function switchView(v) {
 // directly-surrounding nodes hear it (and can reply/advert back). Deliberately
 // NOT flood, which would propagate network-wide.
 function sendSelfAdvert() {
-  if (!state.transport || !state.connected) { dbg('not connected — cannot send'); return false; }
-  state.transport.send(new Uint8Array([0x07, 0x00])).catch((e) => dbg('advert send failed: ' + e.message));
+  if (!state.transport || !state.connected) { dbg('not connected — cannot send', 'no'); return false; }
+  state.transport.send(new Uint8Array([0x07, 0x00])).catch((e) => dbg('advert send failed: ' + e.message, 'no'));
   return true;
 }
 
@@ -108,7 +113,7 @@ function schedulePing() {
 }
 function firePing() {
   if (!state.pingOn) return;
-  if (sendSelfAdvert()) dbg('ping → zero-hop advert (no packet heard in 15s)');
+  if (sendSelfAdvert()) dbg('ping → zero-hop advert (no packet heard in 15s)', 'ok');
   schedulePing();
 }
 function setPing(on) {
@@ -159,12 +164,12 @@ async function processFrame(dv) {
   dbg('0x88 RX  snr=' + f.snr + ' rssi=' + f.rssi + ' raw=' + rawHex.slice(0, 32) + (rawHex.length > 32 ? '…' : ''));
   const pkt = parsePacket(f.raw);
   const hk = deriveHeardKey('rx', pkt);
-  if (!hk) { dbg('  → not attributable (tx / 1-byte hop / no advert) — skip'); return; }
-  dbg('  → heard ' + hk.heardKey + ' (' + hk.heardKeyLen + 'B, ' + hk.src + ')');
+  if (!hk) { dbg('  → not attributable (tx / 1-byte hop / no advert) — skip', 'no'); return; }
+  dbg('  → heard ' + hk.heardKey + ' (' + hk.heardKeyLen + 'B, ' + hk.src + ')', 'ok');
   noteHeard(hk.heardKey, hk.heardKeyLen, f.snr, f.rssi, hk.src); // show in the list even without a GPS fix
   if (state.pingOn) schedulePing(); // a heard multibyte packet resets the ping timer
   const fix = currentFix();
-  if (!fix) { dbg('  → no GPS fix — skip'); return; }
+  if (!fix) { dbg('  → no GPS fix — skip', 'no'); return; }
   const rec = { rx_at: new Date().toISOString(), raw: rawHex, snr: f.snr, rssi: f.rssi, lat: fix.lat, lon: fix.lon, acc_m: fix.acc_m };
   await state.queue.add(rec);
   if (state.localMap) state.localMap.addPoint(fix.lat, fix.lon, f.snr); // live hex on the map
@@ -178,8 +183,8 @@ async function drainLoop() {
       const rows = await state.queue.takeAll();
       const done = [];
       for (const r of rows) { await state.publisher.publish(state.companionPubkey, r, state.companionName); done.push(r.id); }
-      if (done.length) { await state.queue.remove(done); dbg('published ' + done.length + ' record(s)'); }
-    } catch (e) { dbg('publish error (kept buffered): ' + e.message); }
+      if (done.length) { await state.queue.remove(done); dbg('published ' + done.length + ' record(s)', 'ok'); }
+    } catch (e) { dbg('publish error (kept buffered): ' + e.message, 'no'); }
     refreshCounters();
   }
   setTimeout(drainLoop, 5000);
@@ -246,7 +251,7 @@ async function connectAll() {
     log('capturing as ' + (info.name || state.companionPubkey.slice(0, 12)));
   } catch (e) {
     step('✗ ' + e.message, 'err');
-    dbg('connect failed: ' + e.message);
+    dbg('connect failed: ' + e.message, 'no');
     log('connect failed: ' + e.message);
     await disconnectAll(true);
   }
@@ -271,7 +276,7 @@ window.addEventListener('DOMContentLoaded', () => {
   setButton();
   els('btnConnect').addEventListener('click', () => (state.connected ? disconnectAll() : connectAll()));
   els('btnClear').addEventListener('click', () => { els('log').textContent = ''; });
-  els('btnDiscover').addEventListener('click', () => { if (sendSelfAdvert()) dbg('discover → zero-hop advert sent'); });
+  els('btnDiscover').addEventListener('click', () => { if (sendSelfAdvert()) dbg('discover → zero-hop advert sent', 'ok'); });
   els('btnPing').addEventListener('click', () => setPing(!state.pingOn));
   els('btnDbg').addEventListener('click', () => {
     const log = els('log');
