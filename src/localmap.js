@@ -71,15 +71,23 @@ export function createLocalMap(containerId) {
     if (nr !== res) { res = nr; rebuild(); }
   });
 
+  // setPos moves the "you are here" marker and (when following) keeps it centred.
+  // Called continuously from GPS — independent of RX — so the position is live.
+  function setPos(lat, lon) {
+    if (lat == null || lon == null) return;
+    if (!me) me = L.circleMarker([lat, lon], { radius: 5, color: '#fff', weight: 2, fillColor: '#3b82f6', fillOpacity: 1 }).addTo(map);
+    else me.setLatLng([lat, lon]);
+    if (!centered) { centered = true; map.setView([lat, lon], 15); } // initial zoom
+    else if (follow) map.panTo([lat, lon]); // follow GPS, keep current zoom
+  }
+
   return {
-    addPoint(lat, lon, snr) {
+    setPosition(lat, lon) { setPos(lat, lon); }, // live GPS, no hex
+    addPoint(lat, lon, snr) {                     // an RX: add a hex + sync position
       points.push({ lat, lon, snr });
       if (points.length > POINT_CAP) points.shift();
       upsert(lat, lon, snr);
-      if (!me) me = L.circleMarker([lat, lon], { radius: 5, color: '#fff', weight: 2, fillColor: '#3b82f6', fillOpacity: 1 }).addTo(map);
-      else me.setLatLng([lat, lon]);
-      if (!centered) { centered = true; map.setView([lat, lon], 15); } // initial zoom
-      else if (follow) map.panTo([lat, lon]); // follow GPS, keep current zoom
+      setPos(lat, lon);
     },
     invalidate() { setTimeout(() => { try { map.invalidateSize(); } catch (e) {} }, 150); },
     destroy() { try { map.remove(); } catch (e) {} },

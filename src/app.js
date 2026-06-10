@@ -174,7 +174,7 @@ async function connectAll() {
     els('companionInfo').textContent = state.companionPubkey.slice(0, 20) + '…';
     dbg('SELF_INFO → ' + (info.name || '(unnamed)') + ' ' + state.companionPubkey);
 
-    state.gps.start();
+    state.gps.start((fix) => { if (state.localMap) state.localMap.setPosition(fix.lat, fix.lon); });
 
     const s3 = step('③ Connecting to ON8AR CoreScope…', 'pending');
     if (MQTT_CFG.url) {

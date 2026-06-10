@@ -3,10 +3,15 @@
 export class Gps {
   constructor() { this._last = null; this._watchId = null; }
 
-  start() {
+  // start(onFix): begins watching; onFix (optional) fires on every position
+  // update so the UI can track GPS continuously, independent of RX packets.
+  start(onFix) {
     if (!navigator.geolocation) throw new Error('geolocation unavailable');
     this._watchId = navigator.geolocation.watchPosition(
-      (p) => { this._last = { lat: p.coords.latitude, lon: p.coords.longitude, acc_m: p.coords.accuracy }; },
+      (p) => {
+        this._last = { lat: p.coords.latitude, lon: p.coords.longitude, acc_m: p.coords.accuracy };
+        if (onFix) onFix(this._last);
+      },
       () => {},
       { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
     );
