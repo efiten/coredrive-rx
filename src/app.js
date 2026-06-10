@@ -8,12 +8,13 @@ import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex } from './meshpacket.js';
 import { requestSelfInfo } from './selfinfo.js';
 import { resolveName } from './names.js';
+import { createLocalMap } from './localmap.js';
 import { Gps } from './gps.js';
 import { Queue } from './queue.js';
 import { Publisher } from './publisher.js';
 
 const els = (id) => document.getElementById(id);
-const state = { transport: null, gps: new Gps(), queue: new Queue(), publisher: null, heard: 0, companionPubkey: '', connected: false, recent: [] };
+const state = { transport: null, gps: new Gps(), queue: new Queue(), publisher: null, heard: 0, companionPubkey: '', connected: false, recent: [], localMap: null };
 
 const RECENT_MAX = 20;
 
@@ -116,6 +117,7 @@ async function processFrame(dv) {
   if (!fix) { dbg('  → no GPS fix — skip'); return; }
   const rec = { rx_at: new Date().toISOString(), raw: rawHex, snr: f.snr, rssi: f.rssi, lat: fix.lat, lon: fix.lon, acc_m: fix.acc_m };
   await state.queue.add(rec);
+  if (state.localMap) state.localMap.addPoint(fix.lat, fix.lon, f.snr); // live hex on the map
   state.heard++;
   refreshCounters();
 }
@@ -208,6 +210,8 @@ window.addEventListener('DOMContentLoaded', () => {
   renderRecent();
   refreshCounters();
   drainLoop();
+  state.localMap = createLocalMap('liveMap');
+  state.localMap.invalidate();
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   }

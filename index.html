@@ -7,6 +7,8 @@
   <link rel="manifest" href="/manifest.webmanifest" />
   <meta name="theme-color" content="#0f1115" />
   <link rel="apple-touch-icon" href="/icon-192.png" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
     body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; background: #0f1115; color: #e6e6e6; }
     h1 { font-size: 18px; }
@@ -52,6 +54,10 @@
     <div class="progress" id="progress"></div>
     <div class="muted" id="companionInfo"></div>
     <div class="muted" id="status"></div>
+  </div>
+  <div class="card">
+    <label>Live coverage (this session) — hexes persist until you reload</label>
+    <div id="liveMap" style="height:44vh;min-height:300px;border:1px solid #2a2f3a;border-radius:6px"></div>
   </div>
   <div class="card">
     <label>Recently heard nodes (latest SNR)</label>
