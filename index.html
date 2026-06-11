@@ -32,9 +32,10 @@
     label.inline { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; font-size: 13px; color: #e6e6e6; }
     label.inline input { width: auto; }
     #log { background: #0a0c10; border: 1px solid #2a2f3a; border-radius: 6px; padding: 8px; font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow: auto; margin-top: 8px; }
-    #log .lg-ok { color: #9fe6b8; } /* forwarded / sent */
+    #log .lg-ok { color: #9fe6b8; } /* captured / published (the data product) */
     #log .lg-no { color: #ff8b7a; } /* held back / failed */
     #log .lg-st { color: #9aa4b2; } /* status */
+    #log .lg-tx { color: #e6a23c; } /* our own outbound radio sends (discover / flood) */
     .recent { display: flex; flex-direction: column; gap: 4px; }
     .rr { display: flex; align-items: center; gap: 8px; padding: 7px 9px; background: #11141a; border: 1px solid #2a2f3a; border-radius: 6px; font-size: 13px; }
     .rr .dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
@@ -68,10 +69,10 @@
   </div>
   <div class="card">
     <div class="row">
-      <button id="btnDiscover" class="btn2" disabled>📣 Discover</button>
-      <button id="btnPing" class="btn2" disabled>Ping: off</button>
+      <button id="btnDiscover" class="btn2" disabled>🎯 Discover nearby</button>
+      <button id="btnFlood" class="btn2" disabled>📡 Flood probe</button>
     </div>
-    <div class="muted">Discover wakes nearby repeaters (flood advert). Ping repeats every 15&nbsp;s until a packet is heard, then resets.</div>
+    <div class="muted">Discover probes every 30&nbsp;s (zero-hop) — nodes in direct range reply with their ID, local only. Flood probe sends one mesh-wide advert so every repeater re-broadcasts it: maps repeaters beyond direct range (60&nbsp;s cooldown).</div>
   </div>
   <div class="card">
     <label>Recently heard nodes (latest SNR)</label>
@@ -80,6 +81,7 @@
       <button id="btnDbg" class="btn2">Show debug log</button>
       <button id="btnClear" class="btn2">Clear log</button>
     </div>
+    <label class="inline"><input type="checkbox" id="chkVerbose"> Verbose (raw packet bytes + unattributable frames)</label>
     <pre id="log" style="display:none"></pre>
   </div>
   </div><!-- /view-home -->

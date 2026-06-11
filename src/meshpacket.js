@@ -7,6 +7,9 @@ export const ROUTE_FLOOD = 1;
 export const ROUTE_DIRECT = 2;
 export const ROUTE_TRANSPORT_DIRECT = 3;
 export const PAYLOAD_TYPE_ADVERT = 4;
+export const PAYLOAD_TYPE_TRACE = 9;   // path bytes are per-hop SNR, NOT hop hashes
+export const PAYLOAD_TYPE_CONTROL = 11; // 0x0B — control data (e.g. node-discover)
+export const CTRL_DISCOVER_RESP = 0x9;  // sub_type nibble (flags >> 4) of a DISCOVER_RESP
 
 function isTransportRoute(rt) {
   return rt === ROUTE_TRANSPORT_FLOOD || rt === ROUTE_TRANSPORT_DIRECT;
@@ -56,7 +59,20 @@ export function parsePacket(bytes) {
   if (isAdvert && off + 32 <= bytes.length) {
     advertPubkey = bytesToHex(bytes.slice(off, off + 32)); // advert payload starts with the 32-byte pubkey
   }
-  return { routeType, payloadType, isAdvert, hops, advertPubkey };
+
+  // node-discover reply (CONTROL/DISCOVER_RESP): payload is [flags][snr][tag×4][pubkey].
+  // The pubkey (8-byte prefix or full 32) is the responder's identity — a direct, high-quality
+  // heard_key, better than a path hash. Control payload bytes are unencrypted (firmware payloads.md).
+  let isDiscoverResp = false;
+  let discoverPubkey = null;
+  if (payloadType === PAYLOAD_TYPE_CONTROL && off < bytes.length && (bytes[off] >> 4) === CTRL_DISCOVER_RESP) {
+    isDiscoverResp = true;
+    const pkOff = off + 6; // skip flags(1) + snr(1) + tag(4)
+    const pkLen = bytes.length - pkOff;
+    if (pkLen === 8 || pkLen === 32) discoverPubkey = bytesToHex(bytes.slice(pkOff, pkOff + pkLen));
+  }
+
+  return { routeType, payloadType, isAdvert, hops, advertPubkey, isDiscoverResp, discoverPubkey };
 }
 
 // deriveHeardKey applies the capture HARD RULE: record only the node heard
@@ -65,6 +81,10 @@ export function parsePacket(bytes) {
 // Returns { heardKey, heardKeyLen, src } or null.
 export function deriveHeardKey(direction, pkt) {
   if (direction !== 'rx' || !pkt) return null;
+  // TRACE repurposes the header path bytes as per-hop SNR values, so path[last] is NOT a node id.
+  // Refuse to attribute it (matches CoreScope's PathBytesAreHops guard) — otherwise we'd record
+  // a garbage heard_key built from SNR bytes.
+  if (pkt.payloadType === PAYLOAD_TYPE_TRACE) return null;
   if (pkt.hops.length > 0) {
     const last = pkt.hops[pkt.hops.length - 1].toLowerCase();
     const keylen = last.length / 2;
@@ -74,6 +94,10 @@ export function deriveHeardKey(direction, pkt) {
   if (pkt.isAdvert && pkt.advertPubkey) {
     const pk = pkt.advertPubkey.toLowerCase();
     return { heardKey: pk, heardKeyLen: pk.length / 2, src: 'advert' };
+  }
+  if (pkt.isDiscoverResp && pkt.discoverPubkey) {
+    const pk = pkt.discoverPubkey.toLowerCase();
+    return { heardKey: pk, heardKeyLen: pk.length / 2, src: 'discover' };
   }
   return null;
 }

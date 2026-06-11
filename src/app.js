@@ -14,9 +14,10 @@ import { Queue } from './queue.js';
 import { Publisher } from './publisher.js';
 
 const els = (id) => document.getElementById(id);
-const state = { transport: null, gps: new Gps(), queue: new Queue(), publisher: null, heard: 0, companionPubkey: '', companionName: '', connected: false, recent: [], localMap: null, pingOn: false, pingTimer: null };
+const state = { transport: null, gps: new Gps(), queue: new Queue(), publisher: null, heard: 0, companionPubkey: '', companionName: '', connected: false, recent: [], localMap: null, discoverOn: false, discoverTimer: null, discoverLeft: 0, floodTimer: null, floodLeft: 0, verbose: false };
 
-const PING_INTERVAL_MS = 15000;
+const DISCOVER_INTERVAL_S = 30;
+const FLOOD_COOLDOWN_S = 60;
 
 const RECENT_MAX = 20;
 // Build version, injected from package.json by Vite (see vite.config.js).
@@ -75,12 +76,12 @@ const MQTT_CFG = {
 
 function log(msg) { els('status').textContent = msg; }
 
-// dbg(msg, level): newest-first log line. level 'ok'=green (forwarded/sent),
-// 'no'=red (held back/failed), default=grey (status).
+// dbg(msg, level): newest-first log line. level 'ok'=green (captured/published),
+// 'tx'=orange (our own discover/flood sends), 'no'=red (held back/failed), default=grey (status).
 function dbg(msg, level) {
   const el = els('log');
   const line = document.createElement('div');
-  line.className = level === 'ok' ? 'lg-ok' : level === 'no' ? 'lg-no' : 'lg-st';
+  line.className = level === 'ok' ? 'lg-ok' : level === 'no' ? 'lg-no' : level === 'tx' ? 'lg-tx' : 'lg-st';
   line.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
   el.insertBefore(line, el.firstChild);
   while (el.childNodes.length > 200) el.removeChild(el.lastChild);
@@ -97,38 +98,90 @@ function switchView(v) {
   if (v === 'map' && state.localMap) state.localMap.invalidate();
 }
 
-// --- Discover / Ping ---
-// Both send a ZERO-HOP self-advert (CMD_SEND_SELF_ADVERT=7, byte1=0): only the
-// directly-surrounding nodes hear it (and can reply/advert back). Deliberately
-// NOT flood, which would propagate network-wide.
-function sendSelfAdvert() {
-  if (!state.transport || !state.connected) { dbg('not connected — cannot send', 'no'); return false; }
-  state.transport.send(new Uint8Array([0x07, 0x00])).catch((e) => dbg('advert send failed: ' + e.message, 'no'));
+// --- Discover (inbound: who can I hear?) ---
+// Sends a ZERO-HOP CONTROL/DISCOVER_REQ (CMD_SEND_CONTROL_DATA=0x37). Every node in DIRECT
+// RF range (repeater, companion, room server, sensor) replies with a DISCOVER_RESP carrying
+// its pubkey, which arrives as a 0x88 frame and is attributed by deriveHeardKey (src=discover).
+// Zero-hop, so it is NOT re-broadcast across the mesh (unlike a flood advert) — only local
+// airtime. Wire format verified against meshcore_py commands/control_data.py + firmware payloads.md.
+const CMD_SEND_CONTROL_DATA = 0x37;
+const CTRL_NODE_DISCOVER_REQ = 0x80; // sub_type 0x8 in the upper nibble
+const DISCOVER_PREFIX_ONLY = 0x01;   // lowest flag bit: responders send an 8-byte pubkey prefix
+const DISCOVER_FILTER_ALL = 0xff;    // type_filter: bit per ADV_TYPE_*; all bits = every node type
+
+function sendNodeDiscover() {
+  if (!state.transport || !state.connected) { dbg('not connected — cannot discover', 'no'); return false; }
+  const tag = crypto.getRandomValues(new Uint8Array(4)); // reflected back in each DISCOVER_RESP
+  const frame = new Uint8Array([CMD_SEND_CONTROL_DATA, CTRL_NODE_DISCOVER_REQ | DISCOVER_PREFIX_ONLY, DISCOVER_FILTER_ALL, ...tag]);
+  state.transport.send(frame).catch((e) => dbg('discover send failed: ' + e.message, 'no'));
   return true;
 }
 
-function schedulePing() {
-  clearTimeout(state.pingTimer);
-  state.pingTimer = setTimeout(firePing, PING_INTERVAL_MS);
+function renderDiscoverBtn() {
+  const b = els('btnDiscover');
+  b.classList.toggle('on', state.discoverOn);
+  b.textContent = state.discoverOn ? '🎯 Discovering ' + state.discoverLeft + 's' : '🎯 Discover nearby';
 }
-function firePing() {
-  if (!state.pingOn) return;
-  if (sendSelfAdvert()) dbg('ping → zero-hop advert (no packet heard in 15s)', 'ok');
-  schedulePing();
+function fireDiscover() {
+  if (sendNodeDiscover()) dbg('discover → zero-hop node-discover req (all types)', 'tx');
+  state.discoverLeft = DISCOVER_INTERVAL_S;
+  renderDiscoverBtn();
 }
-function setPing(on) {
-  state.pingOn = on && state.connected;
-  const b = els('btnPing');
-  b.classList.toggle('on', state.pingOn);
-  b.textContent = state.pingOn ? 'Ping: ON' : 'Ping: off';
-  clearTimeout(state.pingTimer);
-  if (state.pingOn) schedulePing();
+// Discover is a toggle: an immediate sweep, then one every DISCOVER_INTERVAL_S, with the
+// countdown ticking down inside the button. Pressing again stops it.
+function setDiscover(on) {
+  state.discoverOn = on && state.connected;
+  clearInterval(state.discoverTimer);
+  if (state.discoverOn) {
+    fireDiscover();
+    state.discoverTimer = setInterval(() => {
+      state.discoverLeft--;
+      if (state.discoverLeft <= 0) fireDiscover();
+      else renderDiscoverBtn();
+    }, 1000);
+  }
+  renderDiscoverBtn();
 }
-// Enable Discover/Ping only while a companion is connected.
+
+// --- Flood probe (one-shot, wider reach) ---
+// Sends a single FLOOD self-advert (CMD_SEND_SELF_ADVERT=7, byte1=1). Every repeater in the mesh
+// re-broadcasts it once, appending its path hash; we overhear each re-broadcast (0x88) and attribute
+// the forwarder via path[last] — so this maps repeaters BEYOND direct range, unlike the zero-hop
+// Discover. A flood propagates network-wide, so it is deliberately one-shot with a cooldown.
+function sendFloodAdvert() {
+  if (!state.transport || !state.connected) { dbg('not connected — cannot flood', 'no'); return false; }
+  state.transport.send(new Uint8Array([0x07, 0x01])).catch((e) => dbg('flood send failed: ' + e.message, 'no'));
+  return true;
+}
+
+function renderFloodBtn() {
+  const b = els('btnFlood');
+  const cooling = state.floodLeft > 0;
+  b.disabled = cooling || !state.connected;
+  b.textContent = cooling ? '📡 Flood ' + state.floodLeft + 's' : '📡 Flood probe';
+}
+function fireFlood() {
+  if (state.floodLeft > 0 || !sendFloodAdvert()) return;
+  dbg('flood → network-wide advert (maps repeaters beyond direct range)', 'tx');
+  state.floodLeft = FLOOD_COOLDOWN_S;
+  renderFloodBtn();
+  clearInterval(state.floodTimer);
+  state.floodTimer = setInterval(() => {
+    state.floodLeft--;
+    renderFloodBtn();
+    if (state.floodLeft <= 0) clearInterval(state.floodTimer);
+  }, 1000);
+}
+
+// Enable the action buttons only while a companion is connected.
 function setActionsEnabled(on) {
   els('btnDiscover').disabled = !on;
-  els('btnPing').disabled = !on;
-  if (!on) setPing(false);
+  if (!on) {
+    setDiscover(false);
+    clearInterval(state.floodTimer);
+    state.floodLeft = 0;
+  }
+  renderFloodBtn();
 }
 
 function setButton() {
@@ -161,15 +214,23 @@ async function processFrame(dv) {
   const f = parseFrame(dv);
   if (!f || f.code !== PUSH_CODE_LOG_RX_DATA) return;
   const rawHex = bytesToHex(f.raw);
-  dbg('0x88 RX  snr=' + f.snr + ' rssi=' + f.rssi + ' raw=' + rawHex.slice(0, 32) + (rawHex.length > 32 ? '…' : ''));
+  const sig = ' snr=' + f.snr + ' rssi=' + f.rssi;
+  if (state.verbose) dbg('0x88 raw=' + rawHex + sig, 'st'); // raw bytes only when verbose-debugging
   const pkt = parsePacket(f.raw);
   const hk = deriveHeardKey('rx', pkt);
-  if (!hk) { dbg('  → not attributable (tx / 1-byte hop / no advert) — skip', 'no'); return; }
-  dbg('  → heard ' + hk.heardKey + ' (' + hk.heardKeyLen + 'B, ' + hk.src + ')', 'ok');
+  if (!hk) {
+    // 1-byte path-hash packets are called out explicitly (seen, but ignored — collision-prone, our
+    // capture rule rejects <2-byte hops). Other unattributable frames (tx / no advert) are pure
+    // noise, only shown in verbose.
+    const lastHop = pkt && pkt.hops.length ? pkt.hops[pkt.hops.length - 1] : null;
+    if (lastHop && lastHop.length === 2) dbg('1-byte path-hash (' + lastHop + ') — seen, ignored', 'st');
+    else if (state.verbose) dbg('not attributable (tx / no advert) — skip' + sig, 'no');
+    return;
+  }
   noteHeard(hk.heardKey, hk.heardKeyLen, f.snr, f.rssi, hk.src); // show in the list even without a GPS fix
-  if (state.pingOn) schedulePing(); // a heard multibyte packet resets the ping timer
   const fix = currentFix();
-  if (!fix) { dbg('  → no GPS fix — skip', 'no'); return; }
+  if (!fix) { dbg('heard ' + hk.heardKey + ' (' + hk.src + ')' + sig + ' — no GPS, not queued', 'no'); return; }
+  dbg('heard ' + hk.heardKey + ' (' + hk.heardKeyLen + 'B, ' + hk.src + ')' + sig, 'ok');
   const rec = { rx_at: new Date().toISOString(), raw: rawHex, snr: f.snr, rssi: f.rssi, lat: fix.lat, lon: fix.lon, acc_m: fix.acc_m };
   await state.queue.add(rec);
   if (state.localMap) state.localMap.addPoint(fix.lat, fix.lon, f.snr); // live hex on the map
@@ -260,7 +321,7 @@ async function connectAll() {
 }
 
 async function disconnectAll(keepProgress) {
-  setActionsEnabled(false); // also stops ping
+  setActionsEnabled(false); // also stops discover + flood cooldown
   if (state.publisher) { state.publisher.end(); state.publisher = null; }
   try { state.gps.stop(); } catch (e) {}
   if (state.transport) { try { await state.transport.disconnect(); } catch (e) {} state.transport = null; }
@@ -276,8 +337,9 @@ window.addEventListener('DOMContentLoaded', () => {
   setButton();
   els('btnConnect').addEventListener('click', () => (state.connected ? disconnectAll() : connectAll()));
   els('btnClear').addEventListener('click', () => { els('log').textContent = ''; });
-  els('btnDiscover').addEventListener('click', () => { if (sendSelfAdvert()) dbg('discover → zero-hop advert sent', 'ok'); });
-  els('btnPing').addEventListener('click', () => setPing(!state.pingOn));
+  els('chkVerbose').addEventListener('change', (e) => { state.verbose = e.target.checked; });
+  els('btnDiscover').addEventListener('click', () => setDiscover(!state.discoverOn));
+  els('btnFlood').addEventListener('click', () => fireFlood());
   els('btnDbg').addEventListener('click', () => {
     const log = els('log');
     const show = log.style.display === 'none';

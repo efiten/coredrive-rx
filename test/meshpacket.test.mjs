@@ -24,6 +24,24 @@ test('0-hop advert → full pubkey (advert)', () => {
   assert.deepStrictEqual(hk, { heardKey: pubkey, heardKeyLen: 32, src: 'advert' });
 });
 
+test('node-discover reply → responder pubkey prefix (discover)', () => {
+  // CONTROL packet, 0 hops. header: route DIRECT(2) | payload CONTROL(0x0B<<2) = 0x2E.
+  // payload: flags 0x90 (DISCOVER_RESP sub_type 9 | node_type 0), snr 0x14, tag deadbeef, 8-byte pubkey prefix.
+  const prefix = '1122334455667788';
+  const raw = '2e' + '00' + '90' + '14' + 'deadbeef' + prefix;
+  const pkt = parsePacket(hexToBytes(raw));
+  assert.strictEqual(pkt.isDiscoverResp, true);
+  const hk = deriveHeardKey('rx', pkt);
+  assert.deepStrictEqual(hk, { heardKey: prefix, heardKeyLen: 8, src: 'discover' });
+});
+
+test('TRACE packet is not attributed via path bytes (SNR, not hops)', () => {
+  // header: route FLOOD(1) | payload TRACE(0x09<<2) = 0x25. pathByte 0x03 (3 entries), 3 SNR bytes.
+  const raw = '25' + '03' + 'aabbcc' + 'deadbeef';
+  const pkt = parsePacket(hexToBytes(raw));
+  assert.strictEqual(deriveHeardKey('rx', pkt), null);
+});
+
 test('tx and 1-byte-last-hop are rejected', () => {
   const pkt = parsePacket(hexToBytes(RELAYED_ADVERT));
   assert.strictEqual(deriveHeardKey('tx', pkt), null);
