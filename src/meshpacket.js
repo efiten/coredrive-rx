@@ -15,6 +15,14 @@ function isTransportRoute(rt) {
   return rt === ROUTE_TRANSPORT_FLOOD || rt === ROUTE_TRANSPORT_DIRECT;
 }
 
+// isFloodRoute reports whether the route accumulates forwarders at the END of the path (FLOOD).
+// Only then is path[last] the immediate RF transmitter. DIRECT routes consume the next hop from
+// the FRONT (firmware Mesh.cpp removeSelfFromPath), so their path[last] is the route's
+// destination-side end — not who we heard.
+export function isFloodRoute(rt) {
+  return rt === ROUTE_TRANSPORT_FLOOD || rt === ROUTE_FLOOD;
+}
+
 export function bytesToHex(bytes) {
   let s = '';
   for (const b of bytes) s += b.toString(16).padStart(2, '0');
@@ -86,6 +94,10 @@ export function deriveHeardKey(direction, pkt) {
   // a garbage heard_key built from SNR bytes.
   if (pkt.payloadType === PAYLOAD_TYPE_TRACE) return null;
   if (pkt.hops.length > 0) {
+    // path[last] is only the immediate transmitter for FLOOD routes (forwarders append at the end).
+    // For DIRECT routes the transmitter removed itself from the front, so path[last] is the route's
+    // far (destination) end — not who we heard. We cannot recover the transmitter, so skip it.
+    if (!isFloodRoute(pkt.routeType)) return null;
     const last = pkt.hops[pkt.hops.length - 1].toLowerCase();
     const keylen = last.length / 2;
     if (keylen < 2) return null;

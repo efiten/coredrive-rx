@@ -35,6 +35,15 @@ test('node-discover reply → responder pubkey prefix (discover)', () => {
   assert.deepStrictEqual(hk, { heardKey: prefix, heardKeyLen: 8, src: 'discover' });
 });
 
+test('DIRECT packet with a path is not attributed (transmitter removed from front)', () => {
+  // header: route DIRECT(2) | payload TXT_MSG(2<<2) = 0x0A. pathByte 0x41 (2-byte hashes, 1 hop),
+  // hop 'aabb'. For direct routing path[last] is the route's far end, not the node we heard.
+  const pkt = parsePacket(hexToBytes('0a' + '41' + 'aabb' + 'deadbeef'));
+  assert.strictEqual(pkt.routeType, 2);
+  assert.strictEqual(pkt.hops.length, 1);
+  assert.strictEqual(deriveHeardKey('rx', pkt), null);
+});
+
 test('TRACE packet is not attributed via path bytes (SNR, not hops)', () => {
   // header: route FLOOD(1) | payload TRACE(0x09<<2) = 0x25. pathByte 0x03 (3 entries), 3 SNR bytes.
   const raw = '25' + '03' + 'aabbcc' + 'deadbeef';

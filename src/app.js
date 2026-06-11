@@ -5,7 +5,7 @@
 // the user never types it.
 import { WebBluetoothTransport } from './transport.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
-import { parsePacket, deriveHeardKey, bytesToHex } from './meshpacket.js';
+import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute } from './meshpacket.js';
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
 import { resolveName } from './names.js';
 import { createLocalMap } from './localmap.js';
@@ -219,11 +219,12 @@ async function processFrame(dv) {
   const pkt = parsePacket(f.raw);
   const hk = deriveHeardKey('rx', pkt);
   if (!hk) {
-    // 1-byte path-hash packets are called out explicitly (seen, but ignored — collision-prone, our
-    // capture rule rejects <2-byte hops). Other unattributable frames (tx / no advert) are pure
-    // noise, only shown in verbose.
+    // Explain why a frame wasn't attributed. Direct multi-hop packets can't be credited (the
+    // transmitter removed itself from the path's front), and 1-byte hops are collision-prone —
+    // both are called out. Everything else (tx / no advert) is pure noise, verbose only.
     const lastHop = pkt && pkt.hops.length ? pkt.hops[pkt.hops.length - 1] : null;
-    if (lastHop && lastHop.length === 2) dbg('1-byte path-hash (' + lastHop + ') — seen, ignored', 'st');
+    if (lastHop && pkt.hops.length && !isFloodRoute(pkt.routeType)) dbg('direct route — transmitter not in path, skipped', 'st');
+    else if (lastHop && lastHop.length === 2) dbg('1-byte path-hash (' + lastHop + ') — seen, ignored', 'st');
     else if (state.verbose) dbg('not attributable (tx / no advert) — skip' + sig, 'no');
     return;
   }
