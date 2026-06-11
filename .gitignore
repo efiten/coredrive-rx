@@ -6,3 +6,7 @@ dist/
 .env
 .env.local
 .env.*.local
+
+# Local announcement / promo copy — kept out of github by default
+announce*.txt
+promo*.txt
