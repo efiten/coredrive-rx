@@ -14,3 +14,7 @@ promo*.txt
 # Local planning / spec docs — not published
 docs/plan.md
 docs/superpowers/
+
+# Runtime deployment config — holds the publish password; never commit
+config.json
+public/config.json
