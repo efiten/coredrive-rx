@@ -10,3 +10,7 @@ dist/
 # Local announcement / promo copy — kept out of github by default
 announce*.txt
 promo*.txt
+
+# Local planning / spec docs — not published
+docs/plan.md
+docs/superpowers/
