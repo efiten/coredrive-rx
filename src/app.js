@@ -12,6 +12,7 @@ import { createLocalMap } from './localmap.js';
 import { Gps } from './gps.js';
 import { Queue } from './queue.js';
 import { Publisher } from './publisher.js';
+import { loadConfig, getConfig } from './config.js';
 
 const els = (id) => document.getElementById(id);
 const state = { transport: null, gps: new Gps(), queue: new Queue(), publisher: null, heard: 0, companionPubkey: '', companionName: '', connected: false, recent: [], localMap: null, discoverOn: false, discoverTimer: null, discoverLeft: 0, floodTimer: null, floodLeft: 0, verbose: false };
@@ -66,13 +67,9 @@ function renderRecent() {
   }).join('');
 }
 
-// MQTT config from build-time env (Vite); never the UI. Treat as a shared,
-// publish-only ingest account (EMQX ACL); not a real secret.
-const MQTT_CFG = {
-  url: import.meta.env.VITE_MQTT_URL,
-  username: import.meta.env.VITE_MQTT_USERNAME,
-  password: import.meta.env.VITE_MQTT_PASSWORD,
-};
+// MQTT config comes from the runtime config.json (loaded at startup via
+// loadConfig), never the UI. The publish account is a shared, publish-only
+// ingest account (EMQX ACL); not a real secret.
 
 function log(msg) { els('status').textContent = msg; }
 
@@ -295,14 +292,15 @@ async function connectAll() {
 
     state.gps.start((fix) => { if (state.localMap) state.localMap.setPosition(fix.lat, fix.lon); });
 
-    const s3 = step('③ Connecting to ON8AR CoreScope…', 'pending');
-    if (MQTT_CFG.url) {
-      state.publisher = new Publisher({ ...MQTT_CFG, clientId: state.companionPubkey });
+    const s3 = step('③ Connecting to CoreScope…', 'pending');
+    const cfg = getConfig();
+    if (cfg && cfg.mqttUrl) {
+      state.publisher = new Publisher({ url: cfg.mqttUrl, username: cfg.mqttUsername, password: cfg.mqttPassword, clientId: state.companionPubkey });
       await state.publisher.connect();
-      s3.textContent = '③ ON8AR CoreScope connected ✓';
+      s3.textContent = '③ CoreScope connected ✓';
       s3.className = '';
     } else {
-      s3.textContent = '③ MQTT not configured (.env.local)';
+      s3.textContent = '③ MQTT not configured (config.json)';
       s3.className = 'err';
     }
 
@@ -333,8 +331,13 @@ async function disconnectAll(keepProgress) {
   setButton();
 }
 
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
   els('appver').textContent = 'v' + VERSION;
+  try {
+    await loadConfig();
+  } catch (e) {
+    log('Config error: ' + e.message + ' — copy config.example.json to config.json and fill it in.');
+  }
   setButton();
   els('btnConnect').addEventListener('click', () => (state.connected ? disconnectAll() : connectAll()));
   els('btnClear').addEventListener('click', () => { els('log').textContent = ''; });
