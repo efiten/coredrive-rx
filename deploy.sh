@@ -1,17 +1,26 @@
 #!/usr/bin/env bash
-# Build and publish corescope-rx to https://rx.on8ar.eu
-# Reverse proxy: root@94.130.105.135 (nginx, serves /var/www/rx.on8ar.eu, TLS via certbot).
-# Content-only updates need just this script — no nginx/cert changes.
+# Example helper: build corescope-rx and upload dist/ to a static host over SSH.
+# This is OPTIONAL — host the built static files however you like (any HTTPS web
+# server). Configure via env vars; nothing here is deployment-specific.
+#
+#   RX_DEPLOY_HOST   user@host of the web server (required)
+#   RX_DEPLOY_DEST   absolute path of the served dir on the server (required)
+#   RX_DEPLOY_KEY    SSH private key (optional; default: ssh-agent / ~/.ssh/id_*)
+#
+# NOTE: this uploads dist/ only. It does NOT touch the server's config.json —
+# that file is owned by the sysop and lives on the host next to index.html.
 set -euo pipefail
 
-KEY="${RX_DEPLOY_KEY:-$HOME/.ssh/claude_mcp}"
-HOST="${RX_DEPLOY_HOST:-root@94.130.105.135}"
-DEST="/var/www/rx.on8ar.eu/"
+HOST="${RX_DEPLOY_HOST:?set RX_DEPLOY_HOST=user@host}"
+DEST="${RX_DEPLOY_DEST:?set RX_DEPLOY_DEST to the absolute path on the server}"
+KEY="${RX_DEPLOY_KEY:-}"
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new)
+[ -n "$KEY" ] && SSH_OPTS+=(-i "$KEY")
 
-echo "[rx] building (uses .env.local for VITE_MQTT_*)..."
+echo "[rx] building..."
 npm run build
 
-echo "[rx] uploading dist/ -> $HOST:$DEST ..."
-scp -i "$KEY" -o StrictHostKeyChecking=no -r dist/. "$HOST:$DEST"
+echo "[rx] uploading dist/ -> $HOST:$DEST (config.json left untouched) ..."
+scp "${SSH_OPTS[@]}" -r dist/. "$HOST:$DEST"
 
-echo "[rx] done. Live at https://rx.on8ar.eu"
+echo "[rx] done."
