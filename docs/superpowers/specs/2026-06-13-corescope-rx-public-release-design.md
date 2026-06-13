@@ -16,28 +16,55 @@ companion radio, captures directly-heard nodes (SNR/RSSI) tagged with the phone'
 to MQTT so a CoreScope ingestor stores it in `client_receptions` and renders per-node hex coverage.
 It currently lives in a **private** repo and is hard-wired to one deployment.
 
-Config model is **build-time** `VITE_*` (injected by Vite, embedded in the bundle). This is settled
-and kept — the publish credential is a shared, publish-only MQTT account constrained by an EMQX ACL,
-not a real secret (soft attribution; companion-signed challenge is a later hardening). No runtime
-config.json and no in-app settings screen.
+Config model is **runtime `config.json`**: the app ships as a prebuilt static bundle and fetches a
+`config.json` (sitting next to `index.html`) at startup. All per-deployment values live there — no
+build needed to configure, no values baked into the bundle, no source edits. A sysop drops in their
+`config.json` and serves the files; changing a value is a file edit + refresh. The publish credential
+is a shared, publish-only MQTT account constrained by an EMQX ACL, not a real secret (soft
+attribution; companion-signed challenge is a later hardening). No in-app settings screen.
+
+(This supersedes the earlier build-time `VITE_*` model the app was first built with — `VITE_*`/`.env`
+for deployment config is removed.)
 
 ## Scope (what changes)
 
-### A. Genericize configuration (single source: `.env.local`)
-The deployment-specific values live in exactly three tracked files plus `package.json`:
+### A. Runtime config (single source: `config.json`)
+Switch from build-time `VITE_*` to a runtime `config.json` the app fetches at startup. Sysops never
+edit source and never build to configure.
 
-- **`src/names.js`** — the only hardcoded endpoint in code. Replace the constant
-  `BASE` (the CORS-proxied CoreScope `/api/nodes/resolve` URL) with `import.meta.env.VITE_RESOLVE_URL`.
-  When unset/empty, node-name resolution is disabled gracefully and the UI shows the heard-key prefix
-  instead of a name.
-- **`.env.example`** — generic placeholders: `VITE_MQTT_URL` (e.g. `wss://broker.example:8084/ws`),
-  `VITE_MQTT_USERNAME`, `VITE_MQTT_PASSWORD`, and optional `VITE_RESOLVE_URL`. Keep the existing
-  warning that `VITE_*` values are embedded in the bundle (use a publish-only ACL'd account).
+- **New `src/config.js`** — a loader that `fetch`es `config.json` (relative to the app root) once at
+  startup and exposes the parsed object to the rest of the app. App init **awaits** it before
+  connecting MQTT. If `config.json` is missing or invalid, show a clear in-app error (what file is
+  expected and where) instead of failing silently.
+- **`public/config.example.json`** (committed) — documented placeholders:
+  ```json
+  {
+    "mqttUrl": "wss://broker.example:8084/ws",
+    "mqttUsername": "corescope-rx",
+    "mqttPassword": "<publish-only EMQX account password>",
+    "resolveUrl": "https://corescope.example/api/nodes/resolve"
+  }
+  ```
+  `resolveUrl` is optional — empty/absent disables node-name resolution (UI shows the heard-key
+  prefix instead of a name). The real `config.json` is **gitignored** (it holds the publish
+  password); sysops copy the example to `config.json` and fill it in.
+- **`src/publisher.js`, `src/names.js`, `src/app.js`** — read `mqttUrl`/`mqttUsername`/`mqttPassword`
+  and `resolveUrl` from the loaded config object. Remove the hardcoded `BASE` in `names.js` and all
+  `import.meta.env.VITE_MQTT_*` usage.
+- **Remove `VITE_*`/`.env` deployment machinery** — delete `.env.example`/`.env.local` usage for
+  config; `.gitignore` ignores `config.json` (and `public/config.json` used for local dev).
+  `vite.config.js` keeps only the version `define` (`__APP_VERSION__` from `package.json`), no MQTT.
+- **Dev** — a gitignored `public/config.json` (copied from `config.example.json`) is served by the
+  Vite dev server, so `npm run dev` works the same as prod with zero build-time secrets.
 - **`deploy.sh`** — fully env-driven (`RX_DEPLOY_HOST`, `RX_DEPLOY_DEST`, `RX_DEPLOY_KEY`); strip
-  deployment-specific host/path/URL from code and comments; document it as an *example* helper
-  (sysops may host the static `dist/` however they like).
-- **`package.json`** — set `"private": false` (or remove), add `license` (GPL-3.0-or-later),
+  deployment-specific host/path/URL; document as an *example* helper. It uploads `dist/` but must
+  **not** overwrite the server's `config.json` (the sysop owns that file on the host).
+- **`package.json`** — `"private": false` (or remove), add `license` (GPL-3.0-or-later),
   `repository`, `homepage`/`bugs`.
+
+**Sysop flow is config-only:** either build once (`npm install && npm run build`) or take a release
+artifact → host the static files over HTTPS → drop in `config.json`. No source file is ever touched;
+changing a value is a `config.json` edit + page refresh (no rebuild).
 
 ### B. README rewrite — generic + sysop self-host howto
 Sections:
@@ -50,14 +77,16 @@ Sections:
    3. **CoreScope server** — enable the coverage screen via its config flag (delivered by SP2) and
       ensure the ingestor subscribes to the client topic (`meshcore/#` or `meshcore/client/#`) so
       receptions land in `client_receptions`.
-   4. **Host the app** — `npm install`, set `.env.local`, `npm run build`, serve `dist/` over
-      **HTTPS on a subdomain** (e.g. `rx.<yourdomain>`). SPA fallback (`try_files … /index.html`).
-      Cache headers: `index.html` + `sw.js` + `manifest` = `no-cache`; `/assets/` = immutable —
-      required so new builds reach clients instead of a pinned stale `index.html`.
+   4. **Host the app** — `npm install && npm run build` (or grab a release artifact), serve the
+      static files over **HTTPS on a subdomain** (e.g. `rx.<yourdomain>`), then drop in `config.json`
+      (copy `config.example.json`, fill in MQTT URL/account/password + optional `resolveUrl`). SPA
+      fallback (`try_files … /index.html`). Cache headers: `index.html` + `sw.js` + `manifest` +
+      **`config.json`** = `no-cache`; `/assets/` = immutable — so new builds and config edits reach
+      clients instead of a pinned stale copy.
    5. **CORS (optional, for node names)** — the PWA calls the CoreScope `/api/nodes/resolve` endpoint
-      cross-origin. Set `VITE_RESOLVE_URL` to either a CORS-enabled reverse-proxy location in front
-      of the CoreScope API, or the API directly if it sends `Access-Control-Allow-Origin` for the
-      app's origin. Without it the app still works — it shows prefixes instead of names.
+      cross-origin. Set `resolveUrl` in `config.json` to either a CORS-enabled reverse-proxy location
+      in front of the CoreScope API, or the API directly if it sends `Access-Control-Allow-Origin`
+      for the app's origin. Omit it and the app still works — it shows prefixes instead of names.
 3. **Dev / build / deploy** — `npm run dev` (HTTPS/localhost for Web Bluetooth), `npm test`
    (`node --test`), `npm run deploy` (example helper).
 4. **Trust model** — publish-only shared account + EMQX ACL; clientId = companion pubkey
@@ -69,19 +98,22 @@ A standalone project (not governed by CoreScope's AGENTS.md). Capture the establ
 - Stack: vanilla JS + Vite + MQTT.js; tests via `node --test`.
 - **Semver** in `package.json`; tag each release `vX.Y.Z` and `git push --tags`.
 - Commit **and** push every change with a descriptive message (keep GitHub mirrored).
-- **Secrets only in `.env.local`** — never commit, never surface in the UI.
-- Build-time `VITE_*` configuration model (no runtime config, no in-app secrets entry).
+- **Secrets only in `config.json`** (gitignored) — never commit, never surface in the UI.
+- **Runtime `config.json` model** — fetched at startup; no build-time secrets, no `VITE_*`/`.env` for
+  deployment config, no in-app secrets entry.
 - **Direct-only capture rule**: record only `path[last]` (last forwarder) or a 0-hop advert's full
   pubkey; ≥2-byte path-hash; discard upstream hops. This is the data-integrity invariant.
 - MQTT payload contract = CoreScope `docs/client-rx-coverage.md` (changing it is a breaking/major bump).
 - PWA cache discipline (service worker network-first; `no-cache` on index/sw/manifest).
 
 ### D. Pre-public safety gate (mandatory, before flipping visibility)
-- Deep-scan the **entire git history** for the MQTT password, deployment credentials, and any
-  committed built `dist/` bundle that embeds `VITE_*` secrets. If anything is found → stop and scrub
-  (history rewrite) before going public.
-- Confirm `.env`, `.env.local`, `dist/`, `announce*.txt`, `promo*.txt` remain gitignored.
-- `.env.local` is already confirmed never tracked; `dist/` is gitignored.
+- Deep-scan the **entire git history** for the MQTT password, deployment credentials, any real
+  `config.json`, and any committed built `dist/` bundle that embedded `VITE_*` secrets (from the old
+  build-time model). If anything is found → stop and scrub (history rewrite) before going public.
+- Confirm `config.json`, `public/config.json`, `.env*`, `dist/`, `announce*.txt`, `promo*.txt`
+  remain gitignored.
+- `.env.local` is already confirmed never tracked; `dist/` is gitignored. The old build-time bundles
+  may have baked the password — history scan must verify none were committed.
 
 ### E. Flip to public
 `gh repo edit --visibility public` — performed **last**, only after D passes, with explicit user
@@ -93,8 +125,8 @@ confirmation (irreversible / outward-facing).
 - Identity hardening (companion-signed challenge) — future.
 
 ## Success criteria
-- Repo builds and runs from a fresh clone using only a documented `.env.local`; no on8ar-specific
-  value remains in tracked files.
+- Repo builds and runs from a fresh clone using only a documented `config.json`; no on8ar-specific
+  value remains in tracked files; no deployment value is baked into the bundle.
 - A sysop can follow the README to self-host against their own CoreScope + EMQX, end to end.
 - LICENSE (GPLv3) and AGENTS.md present; `package.json` public-ready.
 - Git history verified free of secrets; repo visibility flipped to public.
