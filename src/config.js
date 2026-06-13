@@ -7,7 +7,7 @@ let cfg = null;
 // a missing required field (mqttUrl). resolveUrl is optional (empty = node-name
 // resolution disabled).
 export function normalizeConfig(raw) {
-  if (!raw || typeof raw !== 'object') throw new Error('config.json: expected a JSON object');
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config.json: expected a JSON object');
   const c = {
     mqttUrl: String(raw.mqttUrl || '').trim(),
     mqttUsername: String(raw.mqttUsername || '').trim(),
@@ -21,10 +21,11 @@ export function normalizeConfig(raw) {
 // loadConfig fetches + normalizes config.json once and caches it. Throws if the
 // file is missing/unreadable or invalid JSON.
 export async function loadConfig(url = 'config.json') {
+  if (cfg) return cfg;
   const r = await fetch(url, { cache: 'no-store' });
   if (!r.ok) throw new Error('config.json not found (HTTP ' + r.status + ')');
   let raw;
-  try { raw = await r.json(); } catch (e) { throw new Error('config.json: invalid JSON'); }
+  try { raw = await r.json(); } catch (e) { throw new Error('config.json: invalid JSON — ' + e.message); }
   cfg = normalizeConfig(raw);
   return cfg;
 }

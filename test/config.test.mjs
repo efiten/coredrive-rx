@@ -23,3 +23,13 @@ test('normalizeConfig keeps resolveUrl when provided', () => {
 test('normalizeConfig rejects a non-object', () => {
   assert.throws(() => normalizeConfig(null), /JSON object/);
 });
+
+test('normalizeConfig does not trim mqttPassword', () => {
+  const c = normalizeConfig({ mqttUrl: 'wss://b/ws', mqttPassword: '  s3cr3t  ' });
+  assert.strictEqual(c.mqttPassword, '  s3cr3t  ');
+});
+
+test('normalizeConfig defaults mqttPassword to empty string when absent', () => {
+  const c = normalizeConfig({ mqttUrl: 'wss://b/ws' });
+  assert.strictEqual(c.mqttPassword, '');
+});
