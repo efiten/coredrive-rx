@@ -104,11 +104,21 @@ HTTPS (e.g. a dev tunnel) — Chrome blocks Web Bluetooth on plain HTTP origins.
 
 ## Deploy
 
-`deploy.sh` is an optional example helper that builds and `scp`s `dist/` to a host:
+Two optional SSH helpers — both leave the server's `config.json` intact:
+
+**From a prebuilt release — no Node/npm** (`deploy-release.sh`, needs only `curl` + `unzip`):
+```bash
+RX_DEPLOY_HOST=user@host RX_DEPLOY_DEST=/var/www/rx.yourdomain/ bash deploy-release.sh
+# defaults to the latest release; pin one with  RX_VERSION=v0.9.0
+```
+Downloads the latest release zip and `scp`s the static files to the host. The release zip
+contains no `config.json`, so your server config is never overwritten.
+
+**From source** (`deploy.sh`, builds locally then uploads):
 ```bash
 RX_DEPLOY_HOST=user@host RX_DEPLOY_DEST=/var/www/rx.yourdomain/ npm run deploy
 ```
-It uploads `dist/` only and never touches the server's `config.json`.
+Builds, drops `dist/config.json`, and uploads `dist/` — never touching the server's `config.json`.
 
 ## License
 
