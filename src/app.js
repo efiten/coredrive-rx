@@ -1,4 +1,4 @@
-// corescope-rx — wiring + minimal field UI + on-screen debug.
+// coredrive-rx — wiring + minimal field UI + on-screen debug.
 // Pipeline: companion BLE 0x88 frame → parse raw packet → direct-heard filter →
 // tag with phone GPS → IndexedDB queue → MQTT publish to CoreScope's ingestor.
 // The companion's own pubkey (from SELF_INFO) is the identity / clientId / topic;

@@ -7,7 +7,7 @@ const CMD_APP_START = 0x01;
 const RESP_SELF_INFO = 0x05;
 
 // requestSelfInfo resolves { pubkey, name } from the connected companion.
-export function requestSelfInfo(transport, appName = 'corescope-rx', timeoutMs = 6000) {
+export function requestSelfInfo(transport, appName = 'coredrive-rx', timeoutMs = 6000) {
   return new Promise((resolve, reject) => {
     const onFrame = (dv) => {
       const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);

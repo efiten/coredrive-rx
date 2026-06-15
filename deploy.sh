@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Example helper: build corescope-rx and upload dist/ to a static host over SSH.
+# Example helper: build coredrive-rx and upload dist/ to a static host over SSH.
 # This is OPTIONAL — host the built static files however you like (any HTTPS web
 # server). Configure via env vars; nothing here is deployment-specific.
 #

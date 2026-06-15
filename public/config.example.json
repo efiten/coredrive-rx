@@ -1,6 +1,6 @@
 {
   "mqttUrl": "wss://broker.example:8084/ws",
-  "mqttUsername": "corescope-rx",
+  "mqttUsername": "coredrive-rx",
   "mqttPassword": "<publish-only EMQX account password>",
   "resolveUrl": "https://corescope.example/api/nodes/resolve"
 }

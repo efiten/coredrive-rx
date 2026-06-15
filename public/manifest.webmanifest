@@ -1,6 +1,6 @@
 {
-  "name": "CoreScope RX",
-  "short_name": "CoreScope RX",
+  "name": "CoreDrive RX",
+  "short_name": "CoreDrive RX",
   "description": "Mobile RF coverage capture for CoreScope (BLE companion → MQTT)",
   "start_url": "/",
   "scope": "/",
