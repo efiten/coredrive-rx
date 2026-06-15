@@ -9,6 +9,7 @@ import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute } from './meshpac
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
 import { resolveName } from './names.js';
 import { upsertHeard, sameNode } from './recent.js';
+import { updateMotion } from './motion.js';
 import { createLocalMap } from './localmap.js';
 import { Gps } from './gps.js';
 import { Queue } from './queue.js';
@@ -16,7 +17,7 @@ import { Publisher } from './publisher.js';
 import { loadConfig, getConfig } from './config.js';
 
 const els = (id) => document.getElementById(id);
-const state = { transport: null, gps: new Gps(), queue: new Queue(), publisher: null, heard: 0, companionPubkey: '', companionName: '', connected: false, recent: [], localMap: null, discoverOn: false, discoverTimer: null, discoverLeft: 0, floodTimer: null, floodLeft: 0, verbose: false };
+const state = { transport: null, gps: new Gps(), queue: new Queue(), publisher: null, heard: 0, companionPubkey: '', companionName: '', connected: false, recent: [], localMap: null, discoverOn: false, discoverTimer: null, discoverLeft: 0, floodTimer: null, floodLeft: 0, verbose: false, motion: null, paused: false };
 
 const DISCOVER_INTERVAL_S = 30;
 const FLOOD_COOLDOWN_S = 60;
@@ -120,8 +121,38 @@ function sendNodeDiscover() {
 
 function renderDiscoverBtn() {
   const b = els('btnDiscover');
+  if (state.paused) { // suspended while parked — discover bursts are wasteful here
+    b.classList.remove('on');
+    b.disabled = true;
+    b.textContent = '🎯 Paused (stationary)';
+    return;
+  }
+  b.disabled = !state.connected;
   b.classList.toggle('on', state.discoverOn);
   b.textContent = state.discoverOn ? '🎯 Discovering ' + state.discoverLeft + 's' : '🎯 Discover nearby';
+}
+
+function renderPauseChip() {
+  const el = els('pausechip');
+  if (state.paused) { el.textContent = '⏸ Paused — stationary (resumes when you move)'; el.style.display = 'block'; }
+  else { el.style.display = 'none'; }
+}
+
+// setPaused reacts to a moving↔stationary transition: it shows/hides the chip and
+// suspends the Discover loop while parked (preserving discoverOn so it restarts on
+// movement). Capture itself is gated in processFrame on state.paused.
+function setPaused(paused) {
+  if (paused === state.paused) return;
+  state.paused = paused;
+  renderPauseChip();
+  if (paused) {
+    clearInterval(state.discoverTimer); // stop firing zero-hop bursts while parked
+    dbg('stationary — capture/upload paused', 'no');
+  } else {
+    if (state.discoverOn) setDiscover(true); // restart the loop from a fresh sweep
+    dbg('moving again — capture/upload resumed', 'ok');
+  }
+  renderDiscoverBtn();
 }
 function fireDiscover() {
   if (sendNodeDiscover()) dbg('discover → zero-hop node-discover req (all types)', 'tx');
@@ -232,6 +263,7 @@ async function processFrame(dv) {
   noteHeard(hk.heardKey, hk.heardKeyLen, f.snr, f.rssi, hk.src); // show in the list even without a GPS fix
   const fix = currentFix();
   if (!fix) { dbg('heard ' + hk.heardKey + ' (' + hk.src + ')' + sig + ' — no GPS, not queued', 'no'); return; }
+  if (state.paused) { dbg('heard ' + hk.heardKey + ' (' + hk.src + ')' + sig + ' — stationary, not queued', 'no'); return; }
   dbg('heard ' + hk.heardKey + ' (' + hk.heardKeyLen + 'B, ' + hk.src + ')' + sig, 'ok');
   const rec = { rx_at: new Date().toISOString(), raw: rawHex, snr: f.snr, rssi: f.rssi, lat: fix.lat, lon: fix.lon, acc_m: fix.acc_m };
   await state.queue.add(rec);
@@ -294,7 +326,11 @@ async function connectAll() {
       }
     } catch (e) { dbg('hash-mode check skipped: ' + e.message); }
 
-    state.gps.start((fix) => { if (state.localMap) state.localMap.setPosition(fix.lat, fix.lon); });
+    state.gps.start((fix) => {
+      if (state.localMap) state.localMap.setPosition(fix.lat, fix.lon);
+      state.motion = updateMotion(state.motion, fix, Date.now());
+      setPaused(state.motion.paused);
+    });
 
     const s3 = step('③ Connecting to CoreScope…', 'pending');
     const cfg = getConfig();
@@ -324,11 +360,14 @@ async function connectAll() {
 }
 
 async function disconnectAll(keepProgress) {
+  state.connected = false;
+  state.motion = null;
+  state.paused = false;
+  renderPauseChip();
   setActionsEnabled(false); // also stops discover + flood cooldown
   if (state.publisher) { state.publisher.end(); state.publisher = null; }
   try { state.gps.stop(); } catch (e) {}
   if (state.transport) { try { await state.transport.disconnect(); } catch (e) {} state.transport = null; }
-  state.connected = false;
   els('companionInfo').textContent = '';
   els('hashinfo').textContent = '';
   if (!keepProgress) { progressReset(); log('disconnected.'); }
