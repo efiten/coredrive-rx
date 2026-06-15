@@ -1,6 +1,7 @@
 // Real-time local coverage map: aggregates this session's received packets into
-// hex cells (same grid as the server) and draws them on Leaflet, live. Pure
-// client-side, no server round-trip — instant + works offline.
+// hex cells and draws them on Leaflet, live. Pure client-side, no server round-trip
+// — instant + works offline. The live grid is deliberately clamped one step coarser
+// than the analytical server grid (liveRes below) so cells stay visible while driving.
 import { hexCellAt, hexBoundary, hexResForZoom } from './hexgrid.js';
 
 function snrColor(snr) {
@@ -9,6 +10,12 @@ function snrColor(snr) {
   if (snr >= -3) return '#f1c40f';
   if (snr >= -10) return '#e67e22';
   return '#e74c3c';
+}
+
+// liveRes clamps the server-grid resolution to a coarser maximum so live cells are
+// big enough to see on the move (res 11 = 40 m hexes render too small at driving zoom).
+function liveRes(zoom) {
+  return Math.min(10, hexResForZoom(zoom));
 }
 
 const POINT_CAP = 5000;
@@ -20,7 +27,7 @@ export function createLocalMap(containerId) {
   const layer = L.layerGroup().addTo(map);
   const points = [];        // session raw points {lat,lon,snr}
   let cells = new Map();     // id -> {count, best, poly}
-  let res = hexResForZoom(map.getZoom());
+  let res = liveRes(map.getZoom());
   let me = null;             // current-position marker
   let centered = false;
   let follow = true;         // pan to keep current GPS centred (zoom preserved)
@@ -48,7 +55,7 @@ export function createLocalMap(containerId) {
   map.addControl(new FollowCtl());
 
   function styleFor(best) {
-    return { color: '#000', weight: 0.5, opacity: 0.25, fillColor: snrColor(best), fillOpacity: 0.5 };
+    return { color: '#000', weight: 1, opacity: 0.5, fillColor: snrColor(best), fillOpacity: 0.65 };
   }
 
   function upsert(lat, lon, snr) {
@@ -73,7 +80,7 @@ export function createLocalMap(containerId) {
   }
 
   map.on('zoomend', () => {
-    const nr = hexResForZoom(map.getZoom());
+    const nr = liveRes(map.getZoom());
     if (nr !== res) { res = nr; rebuild(); }
   });
 

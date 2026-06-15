@@ -1,4 +1,4 @@
-# AGENTS.md — corescope-rx contributor rules
+# AGENTS.md — coredrive-rx contributor rules
 
 Standalone companion app for [CoreScope](https://github.com/Kpa-clawbot/CoreScope). NOT governed by
 CoreScope's AGENTS.md — this repo has its own conventions below.

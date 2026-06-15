@@ -15,9 +15,9 @@ jobs:
       - run: npm ci
       - run: npm run build
       - name: Package dist
-        run: cd dist && zip -r "../corescope-rx-${GITHUB_REF_NAME}.zip" . && cd ..
+        run: cd dist && zip -r "../coredrive-rx-${GITHUB_REF_NAME}.zip" . && cd ..
       - name: Publish release with the built artifact
         uses: softprops/action-gh-release@v2
         with:
-          files: corescope-rx-*.zip
+          files: coredrive-rx-*.zip
           generate_release_notes: true

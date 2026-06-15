@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy-release.sh — install/update corescope-rx from a PREBUILT GitHub Release,
+# deploy-release.sh — install/update coredrive-rx from a PREBUILT GitHub Release,
 # over SSH. Same idea as deploy.sh, but it downloads a release zip instead of
 # building from source — so it needs NO Node/npm, only curl + unzip locally.
 #
@@ -17,7 +17,7 @@
 #   RX_DEPLOY_HOST=root@1.2.3.4 RX_DEPLOY_DEST=/var/www/rx.example/ bash deploy-release.sh
 set -euo pipefail
 
-REPO="${RX_REPO:-efiten/corescope-rx}"
+REPO="${RX_REPO:-efiten/coredrive-rx}"
 HOST="${RX_DEPLOY_HOST:?set RX_DEPLOY_HOST=user@host}"
 DEST="${RX_DEPLOY_DEST:?set RX_DEPLOY_DEST to the absolute served path on the server}"
 KEY="${RX_DEPLOY_KEY:-}"
@@ -34,7 +34,7 @@ if [ -z "$VER" ]; then
 fi
 [ -n "$VER" ] || { echo "[rx] could not resolve a release tag for $REPO"; exit 1; }
 
-ZIP="corescope-rx-${VER}.zip"
+ZIP="coredrive-rx-${VER}.zip"
 URL="https://github.com/$REPO/releases/download/${VER}/${ZIP}"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 

@@ -1,4 +1,4 @@
-# corescope-rx
+# coredrive-rx
 
 Mobile RX-coverage capture for [CoreScope](https://github.com/Kpa-clawbot/CoreScope). An Android PWA
 that connects over BLE to a MeshCore **companion** radio, captures which nodes it hears (SNR/RSSI),
@@ -51,8 +51,8 @@ The app sets `clientId` = the companion's pubkey, so the ACL binds each user to 
 Choose **(A) a prebuilt release** (no Node/npm) or **(B) build from source**:
 
 **(A) Download a release — recommended, no build:**
-Grab `corescope-rx-<version>.zip` from
-[Releases](https://github.com/efiten/corescope-rx/releases) and unzip it into your web root.
+Grab `coredrive-rx-<version>.zip` from
+[Releases](https://github.com/efiten/coredrive-rx/releases) and unzip it into your web root.
 
 **(B) Build from source:**
 ```bash
@@ -71,7 +71,7 @@ Put a `config.json` in the served directory (next to `index.html`). Start from t
 ```json
 {
   "mqttUrl": "wss://broker.yourdomain:8084/ws",
-  "mqttUsername": "corescope-rx",
+  "mqttUsername": "coredrive-rx",
   "mqttPassword": "<your publish-only EMQX account password>",
   "resolveUrl": "https://corescope.yourdomain/api/nodes/resolve"
 }
