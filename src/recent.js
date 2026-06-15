@@ -1,7 +1,7 @@
 // Pure merge logic for the "recently heard nodes" list.
 //
 // A node can be heard under several key representations: the 2-byte path hash
-// (rxlog, path[last]) and the full/8-byte pubkey (advert/discover). In MeshCore the
+// (rxlog, path[last]) and the pubkey (32-byte advert, or 8-byte discover prefix). In MeshCore the
 // path hash is the leading byte(s) of the node's public key, so one key is a prefix of
 // the other when they are the same node — exactly how names.js resolves prefixes.
 // We collapse prefix-related entries into one row: longest (most-specific) key kept,
@@ -25,17 +25,15 @@ export function upsertHeard(list, reception, max) {
   const matches = list.filter((e) => sameNode(e.key, key));
   const rest = list.filter((e) => !sameNode(e.key, key));
 
-  const merged = { key, keylen, count: 0, src };
+  // Identity/count come from the merged set; snr/rssi/src/last are the new reception's.
+  const merged = { key, keylen, count: 0, snr, rssi, src, last: now };
   for (const m of matches) {
     merged.count += m.count;
     if (m.key.length > merged.key.length) { merged.key = m.key; merged.keylen = m.keylen; }
+    // A resolved name is per-node, so any match's name is valid; later matches win (harmless).
     if (m.name !== undefined) merged.name = m.name;
     if (m._req) merged._req = m._req;
   }
   merged.count += 1;
-  merged.snr = snr;
-  merged.rssi = rssi;
-  merged.last = now;
-  merged.src = src;
   return [merged, ...rest].slice(0, max);
 }
