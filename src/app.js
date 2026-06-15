@@ -8,6 +8,7 @@ import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute } from './meshpacket.js';
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
 import { resolveName } from './names.js';
+import { upsertHeard } from './recent.js';
 import { createLocalMap } from './localmap.js';
 import { Gps } from './gps.js';
 import { Queue } from './queue.js';
@@ -33,18 +34,20 @@ function snrColor(snr) {
   return '#e74c3c';
 }
 
-// noteHeard upserts a heard node into the recent list (most-recent first).
+// noteHeard merges a heard node into the recent list (most-recent first). The same
+// node can arrive under different key representations (path hash vs pubkey); the merge
+// collapses them into one row. See src/recent.js.
 function noteHeard(key, keylen, snr, rssi, src) {
-  let e = state.recent.find((x) => x.key === key);
-  if (e) state.recent = state.recent.filter((x) => x !== e);
-  else e = { key, keylen, count: 0, src }; // name resolved on the fly below
-  e.count++; e.snr = snr; e.rssi = rssi; e.last = Date.now();
-  state.recent.unshift(e);
-  state.recent = state.recent.slice(0, RECENT_MAX);
-  // Resolve the name once per node (ID shown first, replaced when it arrives).
+  state.recent = upsertHeard(state.recent, { key, keylen, snr, rssi, src, now: Date.now() }, RECENT_MAX);
+  const e = state.recent[0]; // merged entry is at the front
+  // Resolve the name once per node, keyed on the canonical (longest) key. Look the
+  // entry up again in the callback so a later merge can't leave us writing a stale row.
   if (e.name === undefined && !e._req) {
     e._req = true;
-    resolveName(key).then((nm) => { e.name = nm || ''; renderRecent(); }).catch(() => { e._req = false; });
+    const canon = e.key;
+    resolveName(canon)
+      .then((nm) => { const cur = state.recent.find((x) => x.key === canon); if (cur) { cur.name = nm || ''; renderRecent(); } })
+      .catch(() => { const cur = state.recent.find((x) => x.key === canon); if (cur) cur._req = false; });
   }
   renderRecent();
 }
