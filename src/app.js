@@ -8,7 +8,7 @@ import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute } from './meshpacket.js';
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
 import { resolveName } from './names.js';
-import { upsertHeard } from './recent.js';
+import { upsertHeard, sameNode } from './recent.js';
 import { createLocalMap } from './localmap.js';
 import { Gps } from './gps.js';
 import { Queue } from './queue.js';
@@ -40,14 +40,15 @@ function snrColor(snr) {
 function noteHeard(key, keylen, snr, rssi, src) {
   state.recent = upsertHeard(state.recent, { key, keylen, snr, rssi, src, now: Date.now() }, RECENT_MAX);
   const e = state.recent[0]; // merged entry is at the front
-  // Resolve the name once per node, keyed on the canonical (longest) key. Look the
-  // entry up again in the callback so a later merge can't leave us writing a stale row.
+  // Resolve the name once per node, keyed on the canonical (longest) key. Re-find the
+  // entry in the callback by sameNode (not exact key) so a key promotion mid-flight
+  // (short hash → full pubkey) still writes the name to the merged row.
   if (e.name === undefined && !e._req) {
     e._req = true;
     const canon = e.key;
     resolveName(canon)
-      .then((nm) => { const cur = state.recent.find((x) => x.key === canon); if (cur) { cur.name = nm || ''; renderRecent(); } })
-      .catch(() => { const cur = state.recent.find((x) => x.key === canon); if (cur) cur._req = false; });
+      .then((nm) => { const cur = state.recent.find((x) => sameNode(x.key, canon)); if (cur) { cur.name = nm || ''; renderRecent(); } })
+      .catch(() => { const cur = state.recent.find((x) => sameNode(x.key, canon)); if (cur) cur._req = false; });
   }
   renderRecent();
 }
