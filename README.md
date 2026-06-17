@@ -1,9 +1,22 @@
 # coredrive-rx
 
-Mobile RX-coverage capture for [CoreScope](https://github.com/Kpa-clawbot/CoreScope). An Android PWA
+Mobile RX-coverage capture for [CoreScope](https://github.com/Kpa-clawbot/CoreScope). A mobile PWA
 that connects over BLE to a MeshCore **companion** radio, captures which nodes it hears (SNR/RSSI),
 tags each reception with the phone's GPS, and publishes to MQTT so a CoreScope ingestor stores it in
 `client_receptions` and renders per-node hex coverage on the Reach page.
+
+## Supported browsers
+
+The app needs **Web Bluetooth**, which not every browser has:
+
+- **Android:** Chrome.
+- **iOS / iPadOS:** the **[Bluefy](https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055)**
+  browser — Safari (and every other normal iOS browser) has **no Web Bluetooth**, so the app cannot
+  connect there. Opening the app in plain iOS Safari shows an in-app notice pointing to Bluefy.
+- **Desktop (for testing):** Chrome or Edge.
+
+The screen is kept awake while capturing (native Screen Wake Lock where available, with a video
+fallback for Bluefy), so the phone won't dim/lock mid-drive.
 
 ## How it works
 
