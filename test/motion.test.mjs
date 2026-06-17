@@ -29,7 +29,7 @@ test('continuous movement (each fix > radius) stays active and re-anchors', () =
 
 test('staying within the radius past the dwell time pauses', () => {
   let s = updateMotion(null, { lat: 50.85, lon: 4.5 }, 0);
-  s = updateMotion(s, { lat: 50.8501, lon: 4.5 }, 5 * MIN);  // ~11 m jitter, within radius
+  s = updateMotion(s, { lat: 50.8501, lon: 4.5 }, 3 * MIN);  // ~11 m jitter, within radius
   assert.strictEqual(s.paused, false);                       // not long enough yet
   s = updateMotion(s, { lat: 50.8501, lon: 4.5 }, 16 * MIN);
   assert.strictEqual(s.paused, true);
@@ -53,7 +53,7 @@ test('within-radius jitter does not reset the dwell timer', () => {
   assert.strictEqual(s.paused, true);                        // paused at arrival+16min, jitter didn't reset it
 });
 
-test('default thresholds are 75 m / 15 min', () => {
+test('default thresholds are 75 m / 5 min', () => {
   assert.strictEqual(DEFAULT_RADIUS_M, 75);
-  assert.strictEqual(DEFAULT_DWELL_MS, 15 * 60 * 1000);
+  assert.strictEqual(DEFAULT_DWELL_MS, 5 * 60 * 1000);
 });
