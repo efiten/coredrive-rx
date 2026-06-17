@@ -10,6 +10,7 @@ import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.
 import { resolveName } from './names.js';
 import { upsertHeard, sameNode } from './recent.js';
 import { updateMotion } from './motion.js';
+import { createWakeLock } from './wakelock.js';
 import { createLocalMap } from './localmap.js';
 import { Gps } from './gps.js';
 import { Queue } from './queue.js';
@@ -17,7 +18,7 @@ import { Publisher } from './publisher.js';
 import { loadConfig, getConfig } from './config.js';
 
 const els = (id) => document.getElementById(id);
-const state = { transport: null, gps: new Gps(), queue: new Queue(), publisher: null, heard: 0, companionPubkey: '', companionName: '', connected: false, recent: [], localMap: null, discoverOn: false, discoverTimer: null, discoverLeft: 0, floodTimer: null, floodLeft: 0, verbose: false, motion: null, paused: false };
+const state = { transport: null, gps: new Gps(), queue: new Queue(), publisher: null, heard: 0, companionPubkey: '', companionName: '', connected: false, recent: [], localMap: null, discoverOn: false, discoverTimer: null, discoverLeft: 0, floodTimer: null, floodLeft: 0, verbose: false, motion: null, paused: false, wakeLock: null };
 
 const DISCOVER_INTERVAL_S = 30;
 const FLOOD_COOLDOWN_S = 60;
@@ -364,6 +365,7 @@ async function disconnectAll(keepProgress) {
   state.motion = null;
   state.paused = false;
   renderPauseChip();
+  if (state.wakeLock) state.wakeLock.disable(); // let the screen sleep again
   setActionsEnabled(false); // also stops discover + flood cooldown
   if (state.publisher) { state.publisher.end(); state.publisher = null; }
   try { state.gps.stop(); } catch (e) {}
@@ -382,7 +384,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     log('Config error: ' + e.message + ' — copy config.example.json to config.json and fill it in.');
   }
   setButton();
-  els('btnConnect').addEventListener('click', () => (state.connected ? disconnectAll() : connectAll()));
+  state.wakeLock = createWakeLock();
+  // Web Bluetooth missing (e.g. iOS Safari) — point the user to a supported browser.
+  if (!navigator.bluetooth) els('btnotice').style.display = 'block';
+  els('btnConnect').addEventListener('click', () => {
+    if (state.connected) { disconnectAll(); return; }
+    state.wakeLock.enable(); // acquire in the user gesture (iOS needs it for video.play())
+    connectAll();
+  });
   els('btnClear').addEventListener('click', () => { els('log').textContent = ''; });
   els('chkVerbose').addEventListener('change', (e) => { state.verbose = e.target.checked; });
   els('btnDiscover').addEventListener('click', () => setDiscover(!state.discoverOn));

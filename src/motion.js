@@ -19,7 +19,7 @@ export function distanceM(a, b) {
 
 // ~10–30 m GPS scatter while parked stays inside this; driving exceeds it in seconds.
 export const DEFAULT_RADIUS_M = 75;
-export const DEFAULT_DWELL_MS = 15 * 60 * 1000;
+export const DEFAULT_DWELL_MS = 5 * 60 * 1000;
 
 // initMotion(fix, now): seed the gate at the first fix (active, not paused).
 export function initMotion(fix, now) {
