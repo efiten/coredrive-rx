@@ -85,11 +85,6 @@
   </div>
   <div id="pausechip" style="display:none;background:#3a2e10;color:#e6a23c;border:1px solid #6b5212;border-radius:8px;padding:10px 12px;margin:10px 0;font-size:13px;font-weight:600"></div>
   <div class="card">
-    <button id="btnConnect">Connect companion (BLE)</button>
-    <div class="progress" id="progress"></div>
-    <div class="muted" id="status"></div>
-  </div>
-  <div class="card">
     <label>Recently heard nodes (latest SNR)</label>
     <div id="recent" class="recent"><div class="muted">— nothing yet —</div></div>
   </div>
@@ -99,6 +94,11 @@
     <div id="liveMap"></div>
   </div>
   <div id="view-settings" style="display:none">
+    <div class="card">
+      <button id="btnConnect">Connect companion (BLE)</button>
+      <div class="progress" id="progress"></div>
+      <div class="muted" id="status"></div>
+    </div>
     <div class="card">
       <label>CoreScope</label>
       <div class="muted" id="brokerStatus">— not connected —</div>

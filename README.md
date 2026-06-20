@@ -46,8 +46,9 @@ phone GPS (gps.js) ────────────────────�
   receptions), a status strip (GPS accuracy, pending uploads, upload health + last-upload age,
   capture rate), the last reception's SNR on a peak-hold meter, and the recently-heard list.
 - **🗺️ Map** — live per-cell coverage for this session.
-- **⚙️ Settings** — CoreScope broker status + a **Push pending now** button, companion info, and
-  diagnostics (verbose toggle, debug log, share/mail the log).
+- **⚙️ Settings** — the **Connect/Disconnect** button (with connection progress), CoreScope broker
+  status + a **Push pending now** button, companion info, and diagnostics (verbose toggle, debug log,
+  share/mail the log). The app opens here until a companion is connected, then jumps to Home.
 
 ## Self-hosting (for a CoreScope sysop)
 

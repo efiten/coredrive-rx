@@ -211,8 +211,10 @@ async function renderStatusStrip() {
 function renderLastHeard() {
   if (!state.lastHeard) { els('lastHeardCard').style.display = 'none'; return; }
   els('lastHeardCard').style.display = 'block';
-  const { label, at } = state.lastHeard;
-  els('lhLine').textContent = label + ' — ' + agoText(at, Date.now());
+  // Derive the label live so it upgrades from ID → resolved name once names.js
+  // returns (the per-second tick re-renders this).
+  const { key, at } = state.lastHeard;
+  els('lhLine').textContent = nodeLabel(key) + ' — ' + agoText(at, Date.now());
 }
 
 function renderSnrMeter() {
@@ -280,7 +282,7 @@ async function processFrame(dv) {
   state.rxTotal++;
   state.rxTimes.push(Date.now());
   addNodeKey(state.nodeKeys, hk.heardKey);
-  state.lastHeard = { label: nodeLabel(hk.heardKey), snr: f.snr, at: Date.now() };
+  state.lastHeard = { key: hk.heardKey, snr: f.snr, at: Date.now() };
   noteSnr(f.snr); // sets bar/peak + colour from the now-current lastHeard
   renderCounters();
   renderLastHeard();
@@ -425,6 +427,8 @@ async function connectAll() {
     state.lastFireAt = 0; // fire a discover sweep immediately on the first tick
     state.tick = setInterval(monitorTick, 1000);
     log('capturing as ' + (info.name || state.companionPubkey.slice(0, 12)));
+    switchView('home'); // connected → jump to the live monitor
+
   } catch (e) {
     step('✗ ' + e.message, 'err');
     dbg('connect failed: ' + e.message, 'no');
@@ -492,7 +496,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   els('tabHome').addEventListener('click', () => switchView('home'));
   els('tabMap').addEventListener('click', () => switchView('map'));
   els('tabSettings').addEventListener('click', () => switchView('settings'));
-  switchView('home');
+  switchView(state.connected ? 'home' : 'settings'); // land on Settings (where Connect lives) until connected
   // Network came back (e.g. cellular→WiFi handoff) — kick a drain so backlog flushes
   // without waiting for the 5 s loop.
   window.addEventListener('online', () => { drain().then(refreshCounters).catch(() => {}); });
