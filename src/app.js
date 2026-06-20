@@ -1,29 +1,46 @@
-// coredrive-rx — wiring + minimal field UI + on-screen debug.
+// coredrive-rx — wiring + Home monitor UI + Settings + on-screen debug.
 // Pipeline: companion BLE 0x88 frame → parse raw packet → direct-heard filter →
 // tag with phone GPS → IndexedDB queue → MQTT publish to CoreScope's ingestor.
 // The companion's own pubkey (from SELF_INFO) is the identity / clientId / topic;
 // the user never types it.
+//
+// Home is a pure monitor (counters, status strip, last-reception SNR meter, recently
+// heard). Discover runs automatically with a traffic backoff (see monitor.js). Config
+// and diagnostics live on the Settings tab.
 import { WebBluetoothTransport } from './transport.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute } from './meshpacket.js';
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
 import { resolveName } from './names.js';
-import { upsertHeard, sameNode } from './recent.js';
+import { upsertHeard, sameNode, addNodeKey } from './recent.js';
 import { updateMotion } from './motion.js';
 import { createWakeLock } from './wakelock.js';
 import { createLocalMap } from './localmap.js';
+import { hexCellAt } from './hexgrid.js';
+import {
+  discoverDecision, isOrganicHeard, snrToPct, decayPeak, pruneTimestamps,
+} from './monitor.js';
+import { shareLog } from './sharelog.js';
 import { Gps } from './gps.js';
 import { Queue } from './queue.js';
 import { Publisher } from './publisher.js';
 import { loadConfig, getConfig } from './config.js';
 
 const els = (id) => document.getElementById(id);
-const state = { transport: null, gps: new Gps(), queue: new Queue(), publisher: null, heard: 0, companionPubkey: '', companionName: '', connected: false, recent: [], localMap: null, discoverOn: false, discoverTimer: null, discoverLeft: 0, floodTimer: null, floodLeft: 0, verbose: false, motion: null, paused: false, wakeLock: null };
-
-const DISCOVER_INTERVAL_S = 30;
-const FLOOD_COOLDOWN_S = 60;
+const state = {
+  transport: null, gps: new Gps(), queue: new Queue(), publisher: null,
+  companionPubkey: '', companionName: '', connected: false, recent: [],
+  localMap: null, verbose: false, motion: null, paused: false, wakeLock: null,
+  // monitor counters / state
+  rxTotal: 0, nodeKeys: [], hexCells: new Set(), rxTimes: [],
+  lastUploadAt: null, brokerState: 'offline',
+  lastHeard: null, snrBarPct: 0, snrPeakPct: 0,
+  // auto-discover
+  lastHeardAt: null, lastFireAt: 0, tick: null,
+};
 
 const RECENT_MAX = 20;
+const HEX_COUNT_RES = 10; // fixed res (~90 m cells) for the distinct-hex session counter
 // Build version, injected from package.json by Vite (see vite.config.js).
 const VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev';
 
@@ -80,7 +97,7 @@ function renderRecent() {
 function log(msg) { els('status').textContent = msg; }
 
 // dbg(msg, level): newest-first log line. level 'ok'=green (captured/published),
-// 'tx'=orange (our own discover/flood sends), 'no'=red (held back/failed), default=grey (status).
+// 'tx'=orange (our own discover sends), 'no'=red (held back/failed), default=grey (status).
 function dbg(msg, level) {
   const el = els('log');
   const line = document.createElement('div');
@@ -90,14 +107,16 @@ function dbg(msg, level) {
   while (el.childNodes.length > 200) el.removeChild(el.lastChild);
 }
 
-// switchView toggles between the Home view (capture UI) and the full-screen Map
-// view via the bottom bar. Leaflet must be invalidated when its container becomes
-// visible, otherwise the tiles render at the wrong size.
+// switchView cycles between Home (monitor), the full-screen Map, and Settings via the
+// bottom bar. Leaflet must be invalidated when its container becomes visible, otherwise
+// the tiles render at the wrong size.
 function switchView(v) {
   els('view-home').style.display = v === 'home' ? 'block' : 'none';
   els('view-map').style.display = v === 'map' ? 'block' : 'none';
+  els('view-settings').style.display = v === 'settings' ? 'block' : 'none';
   els('tabHome').classList.toggle('active', v === 'home');
   els('tabMap').classList.toggle('active', v === 'map');
+  els('tabSettings').classList.toggle('active', v === 'settings');
   if (v === 'map' && state.localMap) state.localMap.invalidate();
 }
 
@@ -105,32 +124,32 @@ function switchView(v) {
 // Sends a ZERO-HOP CONTROL/DISCOVER_REQ (CMD_SEND_CONTROL_DATA=0x37). Every node in DIRECT
 // RF range (repeater, companion, room server, sensor) replies with a DISCOVER_RESP carrying
 // its pubkey, which arrives as a 0x88 frame and is attributed by deriveHeardKey (src=discover).
-// Zero-hop, so it is NOT re-broadcast across the mesh (unlike a flood advert) — only local
-// airtime. Wire format verified against meshcore_py commands/control_data.py + firmware payloads.md.
+// Zero-hop, so it is NOT re-broadcast across the mesh — only local airtime. Wire format verified
+// against meshcore_py commands/control_data.py + firmware payloads.md.
 const CMD_SEND_CONTROL_DATA = 0x37;
 const CTRL_NODE_DISCOVER_REQ = 0x80; // sub_type 0x8 in the upper nibble
 const DISCOVER_PREFIX_ONLY = 0x01;   // lowest flag bit: responders send an 8-byte pubkey prefix
 const DISCOVER_FILTER_ALL = 0xff;    // type_filter: bit per ADV_TYPE_*; all bits = every node type
 
 function sendNodeDiscover() {
-  if (!state.transport || !state.connected) { dbg('not connected — cannot discover', 'no'); return false; }
+  if (!state.transport || !state.connected) return false;
   const tag = crypto.getRandomValues(new Uint8Array(4)); // reflected back in each DISCOVER_RESP
   const frame = new Uint8Array([CMD_SEND_CONTROL_DATA, CTRL_NODE_DISCOVER_REQ | DISCOVER_PREFIX_ONLY, DISCOVER_FILTER_ALL, ...tag]);
   state.transport.send(frame).catch((e) => dbg('discover send failed: ' + e.message, 'no'));
   return true;
 }
 
-function renderDiscoverBtn() {
-  const b = els('btnDiscover');
-  if (state.paused) { // suspended while parked — discover bursts are wasteful here
-    b.classList.remove('on');
-    b.disabled = true;
-    b.textContent = '🎯 Paused (stationary)';
-    return;
-  }
-  b.disabled = !state.connected;
-  b.classList.toggle('on', state.discoverOn);
-  b.textContent = state.discoverOn ? '🎯 Discovering ' + state.discoverLeft + 's' : '🎯 Discover nearby';
+// fireDiscover sends one zero-hop sweep and records the time so the next one is paced.
+function fireDiscover(now) {
+  if (sendNodeDiscover()) dbg('discover → zero-hop node-discover req (all types)', 'tx');
+  state.lastFireAt = now;
+}
+
+function renderDiscoverStatus(dec) {
+  const el = els('discStatus');
+  if (!state.connected || dec.state === 'paused') { el.textContent = ''; return; }
+  if (dec.state === 'backoff') { el.textContent = '🎯 Backoff (verkeer actief)'; return; }
+  el.textContent = dec.secs > 0 ? '🎯 Discover actief — volgende in ' + dec.secs + 's' : '🎯 Discover actief';
 }
 
 function renderPauseChip() {
@@ -139,82 +158,81 @@ function renderPauseChip() {
   else { el.style.display = 'none'; }
 }
 
-// setPaused reacts to a moving↔stationary transition: it shows/hides the chip and
-// suspends the Discover loop while parked (preserving discoverOn so it restarts on
-// movement). Capture itself is gated in processFrame on state.paused.
+// setPaused reacts to a moving↔stationary transition. Capture is gated in processFrame
+// on state.paused; the discover loop is gated via discoverDecision (state 'paused').
 function setPaused(paused) {
   if (paused === state.paused) return;
   state.paused = paused;
   renderPauseChip();
-  if (paused) {
-    clearInterval(state.discoverTimer); // stop firing zero-hop bursts while parked
-    dbg('stationary — capture/upload paused', 'no');
-  } else {
-    if (state.discoverOn) setDiscover(true); // restart the loop from a fresh sweep
-    dbg('moving again — capture/upload resumed', 'ok');
-  }
-  renderDiscoverBtn();
-}
-function fireDiscover() {
-  if (sendNodeDiscover()) dbg('discover → zero-hop node-discover req (all types)', 'tx');
-  state.discoverLeft = DISCOVER_INTERVAL_S;
-  renderDiscoverBtn();
-}
-// Discover is a toggle: an immediate sweep, then one every DISCOVER_INTERVAL_S, with the
-// countdown ticking down inside the button. Pressing again stops it.
-function setDiscover(on) {
-  state.discoverOn = on && state.connected;
-  clearInterval(state.discoverTimer);
-  if (state.discoverOn) {
-    fireDiscover();
-    state.discoverTimer = setInterval(() => {
-      state.discoverLeft--;
-      if (state.discoverLeft <= 0) fireDiscover();
-      else renderDiscoverBtn();
-    }, 1000);
-  }
-  renderDiscoverBtn();
+  dbg(paused ? 'stationary — capture/upload paused' : 'moving again — capture/upload resumed', paused ? 'no' : 'ok');
 }
 
-// --- Flood probe (one-shot, wider reach) ---
-// Sends a single FLOOD self-advert (CMD_SEND_SELF_ADVERT=7, byte1=1). Every repeater in the mesh
-// re-broadcasts it once, appending its path hash; we overhear each re-broadcast (0x88) and attribute
-// the forwarder via path[last] — so this maps repeaters BEYOND direct range, unlike the zero-hop
-// Discover. A flood propagates network-wide, so it is deliberately one-shot with a cooldown.
-function sendFloodAdvert() {
-  if (!state.transport || !state.connected) { dbg('not connected — cannot flood', 'no'); return false; }
-  state.transport.send(new Uint8Array([0x07, 0x01])).catch((e) => dbg('flood send failed: ' + e.message, 'no'));
-  return true;
+// --- Per-second monitor tick: drives auto-discover, the SNR-meter decay, and the
+// time-relative labels (last-heard / last-upload / rate / discover countdown). Runs only
+// while connected.
+function monitorTick() {
+  const now = Date.now();
+  const dec = discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused);
+  if (dec.fire) { fireDiscover(now); renderDiscoverStatus(discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused)); }
+  else renderDiscoverStatus(dec);
+  state.snrPeakPct = decayPeak(state.snrPeakPct, state.snrBarPct, 1000);
+  renderSnrMeter();
+  state.rxTimes = pruneTimestamps(state.rxTimes, now);
+  renderStatusStrip();
+  renderLastHeard();
 }
 
-function renderFloodBtn() {
-  const b = els('btnFlood');
-  const cooling = state.floodLeft > 0;
-  b.disabled = cooling || !state.connected;
-  b.textContent = cooling ? '📡 Flood ' + state.floodLeft + 's' : '📡 Flood probe';
-}
-function fireFlood() {
-  if (state.floodLeft > 0 || !sendFloodAdvert()) return;
-  dbg('flood → network-wide advert (maps repeaters beyond direct range)', 'tx');
-  state.floodLeft = FLOOD_COOLDOWN_S;
-  renderFloodBtn();
-  clearInterval(state.floodTimer);
-  state.floodTimer = setInterval(() => {
-    state.floodLeft--;
-    renderFloodBtn();
-    if (state.floodLeft <= 0) clearInterval(state.floodTimer);
-  }, 1000);
+// --- Home renderers ---
+function renderCounters() {
+  els('cNodes').textContent = String(state.nodeKeys.length);
+  els('cHex').textContent = String(state.hexCells.size);
+  els('cRx').textContent = String(state.rxTotal);
 }
 
-// Enable the action buttons only while a companion is connected.
-function setActionsEnabled(on) {
-  els('btnDiscover').disabled = !on;
-  if (!on) {
-    setDiscover(false);
-    clearInterval(state.floodTimer);
-    state.floodLeft = 0;
-  }
-  renderFloodBtn();
+function agoText(at, now) {
+  if (at == null) return '—';
+  const s = Math.max(0, Math.round((now - at) / 1000));
+  if (s < 60) return s + 's geleden';
+  return Math.floor(s / 60) + 'm geleden';
+}
+
+async function renderStatusStrip() {
+  const now = Date.now();
+  const fix = currentFix();
+  els('sGps').textContent = fix ? '✓ ' + Math.round(fix.acc_m) + 'm' : '… no fix';
+  els('sPending').textContent = (await state.queue.count()) + ' pending';
+  els('sRate').textContent = state.rxTimes.length + ' pkt/min';
+  const dot = els('uDot');
+  const color = state.brokerState === 'connect' ? '#2ecc71' : state.brokerState === 'reconnect' ? '#e6a23c' : '#9aa4b2';
+  dot.style.background = color;
+  els('sUpload').lastChild.textContent = state.lastUploadAt ? 'upload ' + agoText(state.lastUploadAt, now) : 'upload —';
+}
+
+function renderLastHeard() {
+  if (!state.lastHeard) { els('lastHeardCard').style.display = 'none'; return; }
+  els('lastHeardCard').style.display = 'block';
+  const { label, at } = state.lastHeard;
+  els('lhLine').textContent = label + ' — ' + agoText(at, Date.now());
+}
+
+function renderSnrMeter() {
+  els('snrFill').style.width = state.snrBarPct + '%';
+  els('snrFill').style.background = snrColor(state.lastHeard ? state.lastHeard.snr : null);
+  els('snrPeak').style.left = state.snrPeakPct + '%';
+  els('snrVal').textContent = state.lastHeard && state.lastHeard.snr != null ? state.lastHeard.snr.toFixed(1) + ' dB' : '';
+}
+
+// noteSnr updates the SNR meter from the latest reception (any packet, even no-GPS).
+function noteSnr(snr) {
+  state.snrBarPct = snrToPct(snr);
+  if (state.snrBarPct > state.snrPeakPct) state.snrPeakPct = state.snrBarPct;
+  renderSnrMeter();
+}
+
+// --- Settings renderers ---
+function renderBroker() {
+  const m = { connect: 'connected', reconnect: 'reconnecting…', offline: 'offline', close: 'disconnected' };
+  els('brokerStatus').textContent = state.publisher ? (m[state.brokerState] || state.brokerState) : '— not connected —';
 }
 
 function setButton() {
@@ -233,15 +251,7 @@ function step(msg, cls) {
   return d;
 }
 
-async function refreshCounters() {
-  els('heard').textContent = String(state.heard);
-  els('pending').textContent = String(await state.queue.count());
-  els('gps').textContent = currentFix() ? '✓ fix' : '… no fix';
-}
-
-function currentFix() {
-  return state.gps.latest();
-}
+function currentFix() { return state.gps.latest(); }
 
 async function processFrame(dv) {
   const f = parseFrame(dv);
@@ -261,35 +271,91 @@ async function processFrame(dv) {
     else if (state.verbose) dbg('not attributable (tx / no advert) — skip' + sig, 'no');
     return;
   }
+
+  // Organic traffic (an overheard forwarder/advert, not our own discover reply) means we're
+  // in an active area — back off discover so we don't poll on top of live traffic.
+  if (isOrganicHeard(hk)) state.lastHeardAt = Date.now();
+
   noteHeard(hk.heardKey, hk.heardKeyLen, f.snr, f.rssi, hk.src); // show in the list even without a GPS fix
+  state.rxTotal++;
+  state.rxTimes.push(Date.now());
+  addNodeKey(state.nodeKeys, hk.heardKey);
+  state.lastHeard = { label: nodeLabel(hk.heardKey), snr: f.snr, at: Date.now() };
+  noteSnr(f.snr); // sets bar/peak + colour from the now-current lastHeard
+  renderCounters();
+  renderLastHeard();
+
   const fix = currentFix();
   if (!fix) { dbg('heard ' + hk.heardKey + ' (' + hk.src + ')' + sig + ' — no GPS, not queued', 'no'); return; }
   if (state.paused) { dbg('heard ' + hk.heardKey + ' (' + hk.src + ')' + sig + ' — stationary, not queued', 'no'); return; }
   dbg('heard ' + hk.heardKey + ' (' + hk.heardKeyLen + 'B, ' + hk.src + ')' + sig, 'ok');
+  state.hexCells.add(hexCellAt(fix.lat, fix.lon, HEX_COUNT_RES));
+  renderCounters();
   const rec = { rx_at: new Date().toISOString(), raw: rawHex, snr: f.snr, rssi: f.rssi, lat: fix.lat, lon: fix.lon, acc_m: fix.acc_m };
   await state.queue.add(rec);
   if (state.localMap) state.localMap.addPoint(fix.lat, fix.lon, f.snr); // live hex on the map
-  state.heard++;
   refreshCounters();
 }
 
+// nodeLabel returns the resolved name for a heard key if known, else the key itself.
+function nodeLabel(key) {
+  const e = state.recent.find((x) => sameNode(x.key, key));
+  return e && e.name ? e.name : key;
+}
+
+async function refreshCounters() {
+  renderCounters();
+  renderStatusStrip();
+}
+
+// drain publishes all buffered receptions once. Returns the count published. Isolated
+// from the loop so the "Push pending now" button can call it directly.
+async function drain() {
+  if (!(state.publisher && state.publisher.connected() && state.companionPubkey)) return 0;
+  const rows = await state.queue.takeAll();
+  const done = [];
+  for (const r of rows) { await state.publisher.publish(state.companionPubkey, r, state.companionName); done.push(r.id); }
+  if (done.length) {
+    await state.queue.remove(done);
+    state.lastUploadAt = Date.now();
+    dbg('published ' + done.length + ' record(s)', 'ok');
+  }
+  return done.length;
+}
+
+// drainLoop runs forever every 5 s. A publish to a dead socket never acks, but
+// publisher.publish now times out (rejecting), and rescheduling lives in `finally`, so a
+// stalled send can never kill the loop (the +60-pending-on-WiFi bug).
 async function drainLoop() {
-  if (state.publisher && state.publisher.connected() && state.companionPubkey) {
-    try {
-      const rows = await state.queue.takeAll();
-      const done = [];
-      for (const r of rows) { await state.publisher.publish(state.companionPubkey, r, state.companionName); done.push(r.id); }
-      if (done.length) { await state.queue.remove(done); dbg('published ' + done.length + ' record(s)', 'ok'); }
-    } catch (e) { dbg('publish error (kept buffered): ' + e.message, 'no'); }
+  try {
+    await drain();
+    refreshCounters();
+  } catch (e) {
+    dbg('publish error (kept buffered): ' + e.message, 'no');
+  } finally {
+    setTimeout(drainLoop, 5000);
+  }
+}
+
+// pushNow is the Settings button: force one drain attempt and report the outcome.
+async function pushNow() {
+  const b = els('btnPush');
+  b.disabled = true;
+  try {
+    const n = await drain();
+    dbg(n ? 'pushed ' + n + ' record(s)' : 'nothing pending / not connected', n ? 'ok' : 'st');
+  } catch (e) {
+    dbg('push failed (kept buffered): ' + e.message, 'no');
+  } finally {
+    b.disabled = false;
     refreshCounters();
   }
-  setTimeout(drainLoop, 5000);
 }
 
 async function connectAll() {
   els('btnConnect').disabled = true;
   progressReset();
-  els('companionInfo').textContent = '';
+  els('companionInfo').textContent = '— not connected —';
   els('hashinfo').textContent = '';
   log('');
   const s1 = step('① Connecting to companion…', 'pending');
@@ -310,7 +376,7 @@ async function connectAll() {
     state.companionName = info.name || ''; // sent as "origin" so the server can name this observer
     s2.textContent = '② Companion: ' + (info.name || '(unnamed)') + ' ✓';
     s2.className = '';
-    els('companionInfo').textContent = state.companionPubkey.slice(0, 20) + '…';
+    els('companionInfo').textContent = (info.name ? info.name + ' · ' : '') + state.companionPubkey.slice(0, 20) + '…';
     dbg('SELF_INFO → ' + (info.name || '(unnamed)') + ' ' + state.companionPubkey);
 
     // Ensure the companion adverts with 2-byte path hashes — 1-byte mode produces
@@ -337,7 +403,15 @@ async function connectAll() {
     const cfg = getConfig();
     if (cfg && cfg.mqttUrl) {
       state.publisher = new Publisher({ url: cfg.mqttUrl, username: cfg.mqttUsername, password: cfg.mqttPassword, clientId: state.companionPubkey });
+      state.publisher.onStatus((s) => {
+        state.brokerState = s;
+        renderBroker();
+        renderStatusStrip();
+        if (s === 'connect') drain().then(refreshCounters).catch(() => {}); // flush backlog on (re)connect
+      });
       await state.publisher.connect();
+      state.brokerState = 'connect';
+      renderBroker();
       s3.textContent = '③ CoreScope connected ✓';
       s3.className = '';
     } else {
@@ -348,7 +422,8 @@ async function connectAll() {
     step('✅ All connected — capturing');
     state.connected = true;
     setButton();
-    setActionsEnabled(true);
+    state.lastFireAt = 0; // fire a discover sweep immediately on the first tick
+    state.tick = setInterval(monitorTick, 1000);
     log('capturing as ' + (info.name || state.companionPubkey.slice(0, 12)));
   } catch (e) {
     step('✗ ' + e.message, 'err');
@@ -365,12 +440,15 @@ async function disconnectAll(keepProgress) {
   state.motion = null;
   state.paused = false;
   renderPauseChip();
+  clearInterval(state.tick); state.tick = null;
+  els('discStatus').textContent = '';
   if (state.wakeLock) state.wakeLock.disable(); // let the screen sleep again
-  setActionsEnabled(false); // also stops discover + flood cooldown
   if (state.publisher) { state.publisher.end(); state.publisher = null; }
+  state.brokerState = 'offline';
+  renderBroker();
   try { state.gps.stop(); } catch (e) {}
   if (state.transport) { try { await state.transport.disconnect(); } catch (e) {} state.transport = null; }
-  els('companionInfo').textContent = '';
+  els('companionInfo').textContent = '— not connected —';
   els('hashinfo').textContent = '';
   if (!keepProgress) { progressReset(); log('disconnected.'); }
   setButton();
@@ -394,21 +472,30 @@ window.addEventListener('DOMContentLoaded', async () => {
   });
   els('btnClear').addEventListener('click', () => { els('log').textContent = ''; });
   els('chkVerbose').addEventListener('change', (e) => { state.verbose = e.target.checked; });
-  els('btnDiscover').addEventListener('click', () => setDiscover(!state.discoverOn));
-  els('btnFlood').addEventListener('click', () => fireFlood());
+  els('btnPush').addEventListener('click', pushNow);
+  els('btnShareLog').addEventListener('click', async () => {
+    const text = Array.from(els('log').childNodes).map((n) => n.textContent).join('\n');
+    try { await shareLog(text || '(empty log)'); } catch (e) { dbg('share failed: ' + e.message, 'no'); }
+  });
   els('btnDbg').addEventListener('click', () => {
-    const log = els('log');
-    const show = log.style.display === 'none';
-    log.style.display = show ? 'block' : 'none';
+    const logEl = els('log');
+    const show = logEl.style.display === 'none';
+    logEl.style.display = show ? 'block' : 'none';
     els('btnDbg').textContent = show ? 'Hide debug log' : 'Show debug log';
   });
   renderRecent();
-  refreshCounters();
+  renderCounters();
+  renderStatusStrip();
+  renderBroker();
   drainLoop();
   state.localMap = createLocalMap('liveMap');
   els('tabHome').addEventListener('click', () => switchView('home'));
   els('tabMap').addEventListener('click', () => switchView('map'));
+  els('tabSettings').addEventListener('click', () => switchView('settings'));
   switchView('home');
+  // Network came back (e.g. cellular→WiFi handoff) — kick a drain so backlog flushes
+  // without waiting for the 5 s loop.
+  window.addEventListener('online', () => { drain().then(refreshCounters).catch(() => {}); });
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   }

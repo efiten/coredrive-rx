@@ -34,8 +34,20 @@ phone GPS (gps.js) ────────────────────�
   received packet on stock firmware, carrying SNR + RSSI + the raw packet.
 - **Direct-only rule:** records only `path[last]` (last forwarder, FLOOD routes) or a 0-hop advert's
   full pubkey. Upstream hops are discarded.
+- **Auto-discover:** a zero-hop node-discover request is sent automatically while connected so nodes
+  in direct range reply with their ID. It backs off for 15 s whenever organic traffic is overheard
+  (no point polling a busy channel) and is suspended while stationary.
 - **GPS:** the phone's (`navigator.geolocation`), not the companion's.
 - **Trust:** the companion pubkey is the identity; the EMQX ACL binds each client to its own topic.
+
+## Screens
+
+- **🏠 Home** — a live monitor: session counters (distinct nodes / hex cells covered / total
+  receptions), a status strip (GPS accuracy, pending uploads, upload health + last-upload age,
+  capture rate), the last reception's SNR on a peak-hold meter, and the recently-heard list.
+- **🗺️ Map** — live per-cell coverage for this session.
+- **⚙️ Settings** — CoreScope broker status + a **Push pending now** button, companion info, and
+  diagnostics (verbose toggle, debug log, share/mail the log).
 
 ## Self-hosting (for a CoreScope sysop)
 

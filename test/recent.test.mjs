@@ -4,7 +4,18 @@
 // Run: node --test
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { sameNode, upsertHeard } from '../src/recent.js';
+import { sameNode, upsertHeard, addNodeKey } from '../src/recent.js';
+
+test('addNodeKey counts distinct nodes, collapsing prefix-related keys onto the longest', () => {
+  let keys = [];
+  keys = addNodeKey(keys, 'aabb');             // new node
+  keys = addNodeKey(keys, 'aabb');             // same → no growth
+  keys = addNodeKey(keys, 'aabbccddeeff');     // same node, longer key → promotes in place
+  keys = addNodeKey(keys, 'ffee');             // different node
+  assert.strictEqual(keys.length, 2);
+  assert.ok(keys.includes('aabbccddeeff'));    // most-specific key kept
+  assert.ok(keys.includes('ffee'));
+});
 
 test('sameNode matches a prefix relationship, case-insensitive', () => {
   assert.strictEqual(sameNode('aabb', 'AABBCCDD'), true); // 2-byte hash is a prefix of the pubkey

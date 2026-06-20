@@ -36,6 +36,14 @@
     #log .lg-no { color: #ff8b7a; } /* held back / failed */
     #log .lg-st { color: #9aa4b2; } /* status */
     #log .lg-tx { color: #e6a23c; } /* our own outbound radio sends (discover / flood) */
+    .statusstrip { font-size: 12px; color: #9aa4b2; margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .statusstrip .udot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #9aa4b2; margin-right: 3px; }
+    .discstatus { font-size: 12px; margin-top: 6px; min-height: 15px; color: #9aa4b2; }
+    .lh { font-size: 13px; }
+    .meter { position: relative; height: 18px; background: #0a0c10; border: 1px solid #2a2f3a; border-radius: 5px; overflow: hidden; margin-top: 6px; }
+    .meterfill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: #2ecc71; transition: width .2s linear; }
+    .meterpeak { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; left: 0; transition: left .2s linear; }
+    .meterval { font: 12px ui-monospace, monospace; color: #9aa4b2; margin-top: 4px; }
     .recent { display: flex; flex-direction: column; gap: 4px; }
     .rr { display: flex; align-items: center; gap: 8px; padding: 7px 9px; background: #11141a; border: 1px solid #2a2f3a; border-radius: 6px; font-size: 13px; }
     .rr .dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
@@ -57,44 +65,65 @@
   <div id="view-home">
   <div class="card">
     <div class="stats">
-      <div><span id="heard">0</span><small>nodes heard</small></div>
-      <div><span id="pending">0</span><small>pending upload</small></div>
-      <div><span id="gps">…</span><small>gps</small></div>
+      <div><span id="cNodes">0</span><small>nodes</small></div>
+      <div><span id="cHex">0</span><small>hex cells</small></div>
+      <div><span id="cRx">0</span><small>receptions</small></div>
     </div>
+    <div class="statusstrip">
+      <span id="sGps">… no fix</span><span>·</span>
+      <span id="sPending">0 pending</span><span>·</span>
+      <span id="sUpload"><span class="udot" id="uDot"></span>upload</span><span>·</span>
+      <span id="sRate">0 pkt/min</span>
+    </div>
+    <div class="discstatus" id="discStatus"></div>
+  </div>
+  <div class="card" id="lastHeardCard" style="display:none">
+    <label>Last reception</label>
+    <div class="lh" id="lhLine">—</div>
+    <div class="meter"><div class="meterfill" id="snrFill"></div><div class="meterpeak" id="snrPeak"></div></div>
+    <div class="meterval" id="snrVal"></div>
   </div>
   <div id="pausechip" style="display:none;background:#3a2e10;color:#e6a23c;border:1px solid #6b5212;border-radius:8px;padding:10px 12px;margin:10px 0;font-size:13px;font-weight:600"></div>
   <div class="card">
     <button id="btnConnect">Connect companion (BLE)</button>
     <div class="progress" id="progress"></div>
-    <div class="muted" id="companionInfo"></div>
     <div class="muted" id="status"></div>
-    <div class="muted" id="hashinfo"></div>
-  </div>
-  <div class="card">
-    <div class="row">
-      <button id="btnDiscover" class="btn2" disabled>🎯 Discover nearby</button>
-      <button id="btnFlood" class="btn2" disabled>📡 Flood probe</button>
-    </div>
-    <div class="muted">Discover probes every 30&nbsp;s (zero-hop) — nodes in direct range reply with their ID, local only. Flood probe sends one mesh-wide advert so every repeater re-broadcasts it: maps repeaters beyond direct range (60&nbsp;s cooldown).</div>
   </div>
   <div class="card">
     <label>Recently heard nodes (latest SNR)</label>
     <div id="recent" class="recent"><div class="muted">— nothing yet —</div></div>
-    <div class="row" style="margin-top:10px">
-      <button id="btnDbg" class="btn2">Show debug log</button>
-      <button id="btnClear" class="btn2">Clear log</button>
-    </div>
-    <label class="inline"><input type="checkbox" id="chkVerbose"> Verbose (raw packet bytes + unattributable frames)</label>
-    <pre id="log" style="display:none"></pre>
   </div>
   </div><!-- /view-home -->
   <div id="view-map" style="display:none">
     <label>Live coverage (this session) — hexes persist until you reload</label>
     <div id="liveMap"></div>
   </div>
+  <div id="view-settings" style="display:none">
+    <div class="card">
+      <label>CoreScope</label>
+      <div class="muted" id="brokerStatus">— not connected —</div>
+      <button id="btnPush" class="btn2" style="margin-top:8px">Push pending now</button>
+    </div>
+    <div class="card">
+      <label>Companion</label>
+      <div class="muted" id="companionInfo">— not connected —</div>
+      <div class="muted" id="hashinfo"></div>
+    </div>
+    <div class="card">
+      <label>Diagnostics</label>
+      <label class="inline"><input type="checkbox" id="chkVerbose"> Verbose (raw packet bytes + unattributable frames)</label>
+      <div class="row" style="margin-top:10px">
+        <button id="btnDbg" class="btn2">Show debug log</button>
+        <button id="btnClear" class="btn2">Clear log</button>
+      </div>
+      <button id="btnShareLog" class="btn2" style="margin-top:8px">📤 Share / mail debug log</button>
+      <pre id="log" style="display:none"></pre>
+    </div>
+  </div>
   <nav class="bottombar">
     <button id="tabHome" class="tab active">🏠 Home</button>
     <button id="tabMap" class="tab">🗺️ Map</button>
+    <button id="tabSettings" class="tab">⚙️ Settings</button>
   </nav>
   <script type="module" src="/src/app.js"></script>
 </body>

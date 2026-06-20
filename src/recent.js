@@ -15,6 +15,18 @@ export function sameNode(a, b) {
   return x === y || x.startsWith(y) || y.startsWith(x);
 }
 
+// addNodeKey tracks the set of DISTINCT nodes heard this session for the Home
+// counter. Keys that are prefix-related (same node under a path-hash vs pubkey) are
+// collapsed onto the longest (most-specific) key. Mutates and returns `keys`.
+export function addNodeKey(keys, key) {
+  const k = String(key).toLowerCase();
+  for (let i = 0; i < keys.length; i++) {
+    if (sameNode(keys[i], k)) { if (k.length > keys[i].length) keys[i] = k; return keys; }
+  }
+  keys.push(k);
+  return keys;
+}
+
 // upsertHeard returns a NEW list with `reception` merged in, most-recent first,
 // capped at `max`. reception = { key, keylen, snr, rssi, src, now }.
 // Any existing entries that refer to the same node (prefix-related) are merged into
