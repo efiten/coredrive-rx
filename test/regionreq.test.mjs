@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildRegionsRequest, parseRegionsResponse, selectNextTarget, CMD_SEND_ANON_REQ,
   parseSentAck, RESP_CODE_SENT, applyRegionsReply, TRUNCATION_WARN_BYTES, retryBackoffFor,
-  isTargetDue, heardAskEligible,
+  isTargetDue, heardAskEligible, pendingExpired, PENDING_TIMEOUT_MS,
 } from '../src/regionreq.js';
 import { REGION_INTERVAL_MS } from '../src/monitor.js';
 
@@ -292,7 +292,10 @@ test('heardAskEligible: an already-answered repeater is NOT eligible', () => {
 });
 
 test('heardAskEligible: an ask already pending blocks a heard target regardless of budget/backoff', () => {
-  const r = { pending: { target: B, advertTs: 1, tag: null }, lastAskAt: null, answered: new Map(), attempts: new Map(), lastAskedAt: new Map() };
+  // sentAt is what makes this pending genuinely in-flight rather than expired (see
+  // pendingExpired). The one-ask-at-a-time rule this asserts is unchanged; it is now
+  // bounded in time, which the expiry tests below cover.
+  const r = { pending: { target: B, advertTs: 1, tag: null, sentAt: 1_000_000 }, lastAskAt: null, answered: new Map(), attempts: new Map(), lastAskedAt: new Map() };
   assert.equal(heardAskEligible(A, 1, r, 1_000_000), false);
 });
 
@@ -341,3 +344,70 @@ test('a reply that is only padding yields no regions, not one empty name', () =>
   const padded = new Uint8Array([0x8c, 0, ...le32(1), ...le32(2), 0, 0, 0, 0, 0, 0, 0, 0]);
   assert.deepEqual(parseRegionsResponse(padded).regions, []);
 });
+
+// --- Pending-request expiry ---------------------------------------------------
+// Field regression (2026-09-11 commute log): 23 minutes, ~19 repeaters heard, one
+// single reply. Every ask in the log landed exactly on the 60s timer cadence and
+// not one "heard … directly — asking now" line appeared, even though repeaters
+// were being heard continuously. Cause: state.regions.pending was cleared in only
+// three places — a FLOOD send-ack, an accepted reply, and disconnect — so the
+// ordinary outcome on a moving receiver (sent DIRECT, never answered) left it set
+// forever. heardAskEligible's pending gate then disabled the event-driven path for
+// the rest of the session, leaving only the clock-picked ask that the module header
+// says cannot work while moving. A pending request must expire.
+
+test('pendingExpired: a request still inside its window has not expired', () => {
+  const p = { target: A, advertTs: null, tag: 1, sentAt: 1_000_000 };
+  assert.equal(pendingExpired(p, 1_000_000 + PENDING_TIMEOUT_MS - 1), false);
+});
+
+test('pendingExpired: a request outstanding past its window has expired', () => {
+  const p = { target: A, advertTs: null, tag: 1, sentAt: 1_000_000 };
+  assert.equal(pendingExpired(p, 1_000_000 + PENDING_TIMEOUT_MS), true);
+});
+
+test('pendingExpired: no pending request is not an expired one', () => {
+  assert.equal(pendingExpired(null, 1_000_000), false);
+});
+
+test('pendingExpired: a pending without a sentAt is treated as expired, never as a permanent block', () => {
+  // Asymmetric on purpose. A pending that wedges forever silently kills the whole
+  // event-driven path for a session; one that expires early costs at most one extra
+  // ask, and the shared 60s airtime budget bounds even that. Fail toward expiry.
+  assert.equal(pendingExpired({ target: A, advertTs: null, tag: null }, 1_000_000), true);
+});
+
+test('heardAskEligible: an EXPIRED pending no longer blocks a heard repeater', () => {
+  // The exact field scenario: an unanswered ask must not cost us every later one.
+  const r = {
+    pending: { target: B, advertTs: null, tag: 7, sentAt: 1_000_000 },
+    lastAskAt: null, answered: new Map(), attempts: new Map(), lastAskedAt: new Map(),
+  };
+  const stillInFlight = 1_000_000 + PENDING_TIMEOUT_MS - 1;
+  assert.equal(heardAskEligible(A, null, r, stillInFlight), false,
+    'one request at a time still holds while the reply could plausibly arrive');
+  const afterExpiry = 1_000_000 + PENDING_TIMEOUT_MS;
+  assert.equal(heardAskEligible(A, null, r, afterExpiry), true,
+    'but a silent request must not disable the heard path for the rest of the session');
+});
+
+test('a silent repeater does not wedge the heard path for every later repeater', () => {
+  // Regression at the level the field log showed it: ask B, hear nothing back, then
+  // drive into range of A. Before the fix this returned false forever.
+  const t0 = 1_000_000;
+  const r = {
+    pending: null, lastAskAt: null,
+    answered: new Map(), attempts: new Map(), lastAskedAt: new Map(),
+  };
+  // B is heard and asked.
+  assert.equal(heardAskEligible(B, null, r, t0), true);
+  r.lastAskAt = t0;
+  r.attempts.set(B, 1);
+  r.lastAskedAt.set(B, t0);
+  r.pending = { target: B, advertTs: null, tag: 7, sentAt: t0 };
+  // B never answers. A minute later we are past a different repeater.
+  const later = t0 + REGION_INTERVAL_MS;
+  assert.equal(heardAskEligible(A, null, r, later), true,
+    'A is due, the budget has elapsed, and B\'s silence is not A\'s problem');
+});
+

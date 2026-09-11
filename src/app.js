@@ -31,7 +31,7 @@ import { loadConfig, getConfig, featureEnabled } from './config.js';
 import { buildRfLogRecord } from './capture.js';
 import { heardKeyAfterVerify } from './advertsig.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
-import { buildRegionsRequest, parseRegionsResponse, selectNextTarget, parseSentAck, applyRegionsReply, heardAskEligible } from './regionreq.js';
+import { buildRegionsRequest, parseRegionsResponse, selectNextTarget, parseSentAck, applyRegionsReply, heardAskEligible, pendingExpired, PENDING_TIMEOUT_MS } from './regionreq.js';
 import { regionsRows } from './regionsview.js';
 import { uplinkState, uplinkWarning, pushOutcome, regionInertReason, buildLogHeader, REGION_DISCOVERY_MIN_FW } from './uplink.js';
 import {
@@ -206,6 +206,23 @@ function fireDiscover(now) {
 // backoff, so which path fires never changes the airtime spent — only the timing.
 const REGION_SENT_ACK_TIMEOUT_MS = 4000;
 
+// expireStalePendingAsk frees the single pending slot once its round is over. Driven
+// by the one-second tick rather than a setTimeout on purpose: this app is routinely
+// backgrounded on a phone mid-drive, where a timer fires late or not at all, and the
+// slot is exactly what must not be held hostage by a suspended page.
+function expireStalePendingAsk(now) {
+  const r = state.regions;
+  if (!pendingExpired(r.pending, now)) return;
+  const target = r.pending.target;
+  r.pending = null;
+  // A silent repeater is not a repeater that declared nothing, so it stays demoted
+  // and keeps its attempts count — the retry backoff, not this, decides when it is
+  // asked again. All this releases is the in-flight slot.
+  dbg('regions: no reply from ' + target.slice(0, 12) + '… within '
+    + Math.round(PENDING_TIMEOUT_MS / 1000) + 's — slot freed for the next repeater heard', 'st');
+  finishOverrideRound(target); // no-op unless this round overrode the contact's path
+}
+
 function maybeQueryRegions() {
   if (!state.transport) return;
   const r = state.regions;
@@ -224,16 +241,35 @@ function maybeQueryRegions() {
   // noteRegionInert says which gate is holding this, exactly once — the four
   // reasons were previously indistinguishable from an empty candidate pool.
   if (!featureEnabled(cfg, 'regionDiscovery') || !r.supported) { noteRegionInert(); return; }
+  // This path is the FALLBACK for a candidate heard once and never heard again, so it
+  // is bound by the same two invariants as the heard path — it just never enforced
+  // them, which went unnoticed only because a wedged pending slot meant the heard
+  // path never ran at all:
+  //   1. one request in flight. Asking over a live one overwrites pending.tag, and
+  //      applyRegionsReply then rejects the real reply as a tag mismatch — the timer
+  //      was destroying the very answers this feature exists to collect.
+  //   2. one ask per 60s of AIRTIME. simple_repeater rate-limits anon requests to 4
+  //      per 180s shared across all types and requesters, so two paths each asking
+  //      on their own clock makes a reply less likely, not more.
+  const nowMs = Date.now();
+  if (r.pending && !pendingExpired(r.pending, nowMs)) return;
+  if (!regionDiscoverDue(nowMs, r.lastAskAt)) return;
   const candidates = Array.from(r.candidates, ([pubkey, advertTs]) => ({ pubkey, advertTs }));
   const target = selectNextTarget({
     candidates, answered: r.answered, demoted: r.demoted, cursor: r.cursor,
-    attempts: r.attempts, lastAskedAt: r.lastAskedAt, now: Date.now(),
+    attempts: r.attempts, lastAskedAt: r.lastAskedAt, now: nowMs,
   });
   if (!target) {
-    // Silence here has two very different causes and they must not read alike.
+    // Silence here has three very different causes and they must not read alike.
+    // "already answered" used to be printed for all of them, which reads as a
+    // finished job — the field log that exposed the wedged-pending bug showed this
+    // line while exactly one of nineteen repeaters had ever answered.
+    const answeredCount = Array.from(r.candidates.keys()).filter((k) => r.answered.has(k)).length;
     const why = r.candidates.size === 0
       ? 'no repeater heard yet'
-      : 'every repeater heard so far has already answered';
+      : answeredCount === r.candidates.size
+        ? 'every repeater heard so far has already answered'
+        : answeredCount + ' of ' + r.candidates.size + ' answered; the rest are waiting out their retry backoff';
     dbg('regions: nothing to ask — ' + why, 'st');
     return; // do not transmit
   }
@@ -254,10 +290,8 @@ function maybeAskHeardTarget(target, advertTs) {
   if (!featureEnabled(cfg, 'regionDiscovery') || !r.supported) return;
   const now = Date.now();
   if (!heardAskEligible(target, advertTs, r, now)) return;
-  // Consume the shared budget here, same as the timer path — both paths stamp the
-  // SAME clock (r.lastAskAt) so the one-ask-per-60s ceiling holds no matter which
-  // path actually fires.
-  r.lastAskAt = now;
+  // The shared budget is consumed by commitAndAsk, the one site that transmits, so
+  // the one-ask-per-60s ceiling holds no matter which path fires.
   dbg('regions: heard ' + target.slice(0, 12) + '… directly — asking now', 'st');
   commitAndAsk(target, advertTs);
 }
@@ -275,13 +309,25 @@ function commitAndAsk(target, advertTs) {
   const frame = buildRegionsRequest(target);
   r.cursor++;
   r.attempts.set(target, (r.attempts.get(target) ?? 0) + 1);
-  r.lastAskedAt.set(target, Date.now());
   r.demoted.add(target); // demoted until it answers — silence must never look like "declared nothing"
+  const sentAt = Date.now();
+  r.lastAskedAt.set(target, sentAt);
+  // The shared one-ask-per-60s airtime budget is stamped HERE, at the one site that
+  // actually transmits, so it counts transmissions from BOTH paths. Stamping it only
+  // in maybeAskHeardTarget meant timer-path asks spent airtime without consuming the
+  // budget, so "which path fires never changes the airtime spent" was not true.
+  r.lastAskAt = sentAt;
   // tag starts null: the reply-matcher (applyRegionsReply) treats a null tag as
   // "not yet confirmed" and refuses to accept ANY reply until the RESP_CODE_SENT
   // ack (captured below) fills it in — a reply must never be attributed on the
   // sole evidence that a request happens to be pending.
-  r.pending = { target, advertTs, tag: null };
+  //
+  // sentAt bounds how long this occupies the single pending slot (pendingExpired in
+  // src/regionreq.js). Without it a request sent DIRECT and never answered — the
+  // ordinary outcome once we have driven past the repeater — held the slot for the
+  // whole session and, through heardAskEligible's pending gate, silently disabled
+  // every later event-driven ask.
+  r.pending = { target, advertTs, tag: null, sentAt };
   prepareAndAskRegions(target, frame);
 }
 
@@ -298,7 +344,10 @@ const CONTACT_WRITE_TIMEOUT_MS = 4000;
 // est_timeout (returned in the send-ack but otherwise unused here) is normally
 // shorter, but nothing tells us a reply is NEVER coming — this is the backstop that
 // guarantees restoreContact still runs even if the round never resolves any other way.
-const OVERRIDE_ROUND_TIMEOUT_MS = 20000;
+// Shares PENDING_TIMEOUT_MS by construction: once this restore runs the contact is
+// back on its stale path and no reply can arrive, so the pending slot must not
+// outlive the override that made the ask answerable in the first place.
+const OVERRIDE_ROUND_TIMEOUT_MS = PENDING_TIMEOUT_MS;
 
 // getContact reads one contact by pubkey. Resolves parseContactReply's result, or
 // null on a timeout/send failure — callers treat null the same as "not a contact":
@@ -632,6 +681,9 @@ function monitorTick() {
   else renderDiscoverStatus(dec);
   // Region discovery runs on its own clock and is NOT gated on dec.fire, so the
   // stationary pause cannot silence it — see regionDiscoverDue in monitor.js.
+  // Free a timed-out ask BEFORE the region paths run, so the slot is available to
+  // the very next repeater heard instead of one tick later.
+  expireStalePendingAsk(now);
   if (regionDiscoverDue(now, state.regions.lastEvalAt)) maybeQueryRegions();
   // A session that started without config must be able to heal without a restart:
   // retry once a minute (not per tick) for as long as it is missing.

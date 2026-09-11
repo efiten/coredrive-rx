@@ -109,9 +109,38 @@ export function selectNextTarget(state) {
 // budget. Layering demotion on top would be a second fairness mechanism solving a
 // problem this event ordering already solves.
 export function heardAskEligible(target, advertTs, r, now) {
-  if (r.pending) return false;
+  if (r.pending && !pendingExpired(r.pending, now)) return false;
   if (!regionDiscoverDue(now, r.lastAskAt)) return false;
   return isTargetDue(target, advertTs, r.answered, r.attempts, r.lastAskedAt, now);
+}
+
+// PENDING_TIMEOUT_MS: how long one outstanding request may hold the single pending
+// slot. This app deliberately keeps only ONE ask in flight, so that slot is also the
+// gate on the event-driven path (heardAskEligible above) — which means an ask that is
+// never released takes every LATER ask down with it.
+//
+// That is exactly what happened in the field (2026-09-11 commute): pending was
+// cleared on a FLOOD send-ack, on an accepted reply, and on disconnect — but the
+// ordinary outcome for a moving receiver is none of those. A request sent DIRECT to a
+// repeater we have already driven past is simply never answered, and that left the
+// slot occupied for the rest of the session: 23 minutes, ~19 repeaters heard, one
+// reply, and not a single event-driven ask after the first silent one.
+//
+// The value is the same horizon as the contact-path override backstop in app.js, and
+// that is not a coincidence worth letting drift: once the override is torn down the
+// contact is back on its stale path and the reply can no longer arrive, so a pending
+// request must never outlive its own override.
+export const PENDING_TIMEOUT_MS = 20000;
+
+// pendingExpired reports whether the outstanding request has been waiting long enough
+// that the round is over. A missing sentAt counts as EXPIRED, not as in-flight — the
+// asymmetry is deliberate: a wedged slot silently disables the heard path for a whole
+// session, while an early expiry costs at most one extra ask and the shared 60s
+// airtime budget (regionDiscoverDue) bounds even that. Fail toward expiry.
+export function pendingExpired(pending, now, opts = {}) {
+  if (!pending) return false;
+  if (pending.sentAt == null) return true;
+  return now - pending.sentAt >= (opts.timeoutMs ?? PENDING_TIMEOUT_MS);
 }
 
 export function parseRegionsResponse(bytes) {
