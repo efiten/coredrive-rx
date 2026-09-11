@@ -221,3 +221,33 @@ test('the header prints whether advert signatures were verified', () => {
 test('a missing config says advert verification is off, not silent about it', () => {
   assert.match(buildLogHeader({ ...BASE, config: null, uplink: 'no-config' }), /verifyAdverts=off/);
 });
+
+// --- path-hash resolve stats --------------------------------------------------
+// Forwarders are heard as a 2-4 byte path-hash prefix, which must be resolved to a
+// full pubkey before it can be asked for its regions. Whether that resolve usually
+// succeeds decides whether the whole path-hash candidate source is worth its
+// airtime, and a 200-line ring buffer cannot answer it — individual log lines roll
+// out long before the drive ends. It belongs in the header, next to the other
+// session-wide facts.
+
+test('the header reports how many path-hash prefixes resolved to a pubkey', () => {
+  const h = buildLogHeader({ ...BASE, pathResolve: { attempted: 15, resolved: 12 } });
+  assert.match(h, /path keys/);
+  assert.match(h, /12 of 15/);
+});
+
+test('the header names the unresolved remainder, which is the number that decides the feature', () => {
+  const h = buildLogHeader({ ...BASE, pathResolve: { attempted: 15, resolved: 12 } });
+  assert.match(h, /3 ambiguous or unknown/);
+});
+
+test('a session that resolved every prefix says so without an alarming zero-count', () => {
+  const h = buildLogHeader({ ...BASE, pathResolve: { attempted: 4, resolved: 4 } });
+  assert.match(h, /4 of 4/);
+  assert.doesNotMatch(h, /ambiguous or unknown/);
+});
+
+test('no path-hash prefix tried yet prints no row at all rather than a misleading 0 of 0', () => {
+  assert.doesNotMatch(buildLogHeader({ ...BASE, pathResolve: { attempted: 0, resolved: 0 } }), /path keys/);
+  assert.doesNotMatch(buildLogHeader(BASE), /path keys/);
+});

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildRegionsRequest, parseRegionsResponse, selectNextTarget, CMD_SEND_ANON_REQ,
   parseSentAck, RESP_CODE_SENT, applyRegionsReply, TRUNCATION_WARN_BYTES, retryBackoffFor,
-  isTargetDue, heardAskEligible, pendingExpired, PENDING_TIMEOUT_MS,
+  isTargetDue, heardAskEligible, pendingExpired, PENDING_TIMEOUT_MS, recordCandidate,
 } from '../src/regionreq.js';
 import { REGION_INTERVAL_MS } from '../src/monitor.js';
 
@@ -411,3 +411,63 @@ test('a silent repeater does not wedge the heard path for every later repeater',
     'A is due, the budget has elapsed, and B\'s silence is not A\'s problem');
 });
 
+// --- Candidate recording ------------------------------------------------------
+// Three sources now write candidates: a 0-hop advert (real advertTs), a discover
+// response (null) and a path-hash forwarder (null). The map value is the ANSWERED-KEY
+// that isTargetDue compares against, so a later source must never weaken what an
+// earlier one established — overwriting a real advertTs with null makes an
+// already-answered repeater look due again and re-asks it for nothing.
+
+test('recordCandidate: a new pubkey is recorded with whatever key it came with', () => {
+  const c = new Map();
+  recordCandidate(c, A, null);
+  assert.equal(c.get(A), null);
+  recordCandidate(c, B, 4242);
+  assert.equal(c.get(B), 4242);
+});
+
+test('recordCandidate: an advert timestamp UPGRADES a prefix-sourced null', () => {
+  const c = new Map([[A, null]]);
+  recordCandidate(c, A, 4242);
+  assert.equal(c.get(A), 4242, 'an advert carries strictly better information than a path hash');
+});
+
+test('recordCandidate: a prefix-sourced null must NOT downgrade a known advert timestamp', () => {
+  // The regression this exists to prevent: A adverts (ts 4242), is asked, answers,
+  // and answered[A] becomes 4242. Later we hear A forward a packet, which carries no
+  // timestamp. Writing null here would make answered.get(A) !== advertTs, so A reads
+  // as due and gets re-asked despite having already answered this session.
+  const c = new Map([[A, 4242]]);
+  recordCandidate(c, A, null);
+  assert.equal(c.get(A), 4242);
+});
+
+test('recordCandidate: a NEW advert timestamp replaces the old one — a re-advert must re-ask', () => {
+  // Deliberately not the same as the downgrade case. A changed advertTs is the
+  // documented signal to ask again (see the candidate-recording note in app.js).
+  const c = new Map([[A, 4242]]);
+  recordCandidate(c, A, 5353);
+  assert.equal(c.get(A), 5353);
+});
+
+test('recordCandidate: an answered repeater heard again as a forwarder stays not-due', () => {
+  // Same fact as the downgrade test, asserted through the rule that actually matters.
+  const c = new Map([[A, 4242]]);
+  const answered = new Map([[A, 4242]]);
+  recordCandidate(c, A, null);
+  assert.equal(isTargetDue(A, c.get(A), answered, new Map(), new Map(), 9_000_000), false);
+});
+
+test('recordCandidate returns the EFFECTIVE answered-key, not the one it was handed', () => {
+  // The ask decision and the stored candidate must use the SAME key or they disagree.
+  // Protecting only the map is not enough: a caller that then passes its own null to
+  // heardAskEligible asks isTargetDue(t, null, ...) while answered holds 4242, which
+  // reads as due and re-asks a repeater that already answered. Handing the effective
+  // key back makes that mismatch unrepresentable at the call site.
+  const c = new Map([[A, 4242]]);
+  assert.equal(recordCandidate(c, A, null), 4242, 'the kept timestamp wins over the null offered');
+
+  const fresh = new Map();
+  assert.equal(recordCandidate(fresh, B, null), null, 'a genuinely new prefix-sourced candidate is null');
+  assert.equal(recordCandidate(fresh, B, 5353), 5353, 'an upgrading advert returns its own timestamp');
+});

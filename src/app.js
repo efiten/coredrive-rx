@@ -31,7 +31,7 @@ import { loadConfig, getConfig, featureEnabled } from './config.js';
 import { buildRfLogRecord } from './capture.js';
 import { heardKeyAfterVerify } from './advertsig.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
-import { buildRegionsRequest, parseRegionsResponse, selectNextTarget, parseSentAck, applyRegionsReply, heardAskEligible, pendingExpired, PENDING_TIMEOUT_MS } from './regionreq.js';
+import { buildRegionsRequest, parseRegionsResponse, selectNextTarget, parseSentAck, applyRegionsReply, heardAskEligible, pendingExpired, PENDING_TIMEOUT_MS, recordCandidate } from './regionreq.js';
 import { regionsRows } from './regionsview.js';
 import { uplinkState, uplinkWarning, pushOutcome, regionInertReason, buildLogHeader, REGION_DISCOVERY_MIN_FW } from './uplink.js';
 import {
@@ -86,6 +86,13 @@ const state = {
     // resolveName returns (see noteRegionsAnswer).
     answers: [],
   },
+  // pathResolve: path-hash prefix -> whether it ever resolved to a full pubkey.
+  // A Map, not two counters, because resolvePubkey is called on EVERY reception from
+  // a forwarder and answers from its session cache — counting calls would report the
+  // busiest node many times over and say nothing about how many distinct forwarders
+  // could actually be identified. Last result wins, so a prefix that failed on a
+  // transient network error and resolved later ends up counted as resolved.
+  pathResolve: new Map(),
 };
 
 const RECENT_MAX = 20;
@@ -915,8 +922,8 @@ async function processFrame(dv) {
   // sends, and it keeps every stored list demonstrably current instead of assumed.
   const regionsCfg = getConfig();
   if (featureEnabled(regionsCfg, 'regionDiscovery') && hk.src === 'advert' && pkt.advertType === ADV_TYPE_REPEATER && pkt.advertTs != null) {
-    state.regions.candidates.set(hk.heardKey, pkt.advertTs);
-    maybeAskHeardTarget(hk.heardKey, pkt.advertTs);
+    const key = recordCandidate(state.regions.candidates, hk.heardKey, pkt.advertTs);
+    maybeAskHeardTarget(hk.heardKey, key);
   }
   // Discover responses are the common case (47h advert intervals mean real adverts are
   // rare) but carry only an 8-byte pubkey prefix in practice — resolve to the full
@@ -928,8 +935,35 @@ async function processFrame(dv) {
   if (featureEnabled(regionsCfg, 'regionDiscovery') && hk.src === 'discover' && pkt.discoverType === ADV_TYPE_REPEATER) {
     resolvePubkey(hk.heardKey).then((pk) => {
       if (!pk) return;
-      state.regions.candidates.set(pk, null);
-      maybeAskHeardTarget(pk, null);
+      // The effective key, never the null offered — see recordCandidate. Passing the
+      // null would re-ask a repeater that already answered via a real advert.
+      maybeAskHeardTarget(pk, recordCandidate(state.regions.candidates, pk, null));
+    });
+  }
+
+  // Forwarders as candidates. A 'rxlog' attribution only happens on a FLOOD route,
+  // where path[last] IS the node that transmitted to us (see deriveHeardKey) — one
+  // radio hop away, which is exactly the direct-neighbour relation a regions request
+  // needs. The hop carries only a 2-4 byte prefix of that node's pubkey (the app asks
+  // the companion for 2-byte mode on connect), so it has to be resolved first, the
+  // same way the discover path above already does; a prefix is not addressable.
+  //
+  // Node type is unknown here — a path hash carries none. That is acceptable rather
+  // than ignored: a node only appears in a path because it RETRANSMITTED the packet,
+  // and companions and sensors do not forward, so this population is repeaters (and
+  // possibly room servers, which forward but do not answer ANON_REQ_TYPE_REGIONS).
+  // A non-answerer costs one ask and is then held off by the existing 5/15/30-minute
+  // backoff, the same as a repeater that stays silent.
+  //
+  // This fills a real gap: isOrganicHeard backs the discover sweep off for 15s after
+  // any organic reception, so in busy areas — where forwarder traffic is densest —
+  // the sweep is suppressed and yields the FEWEST discover-sourced candidates exactly
+  // where there is the most to hear.
+  if (featureEnabled(regionsCfg, 'regionDiscovery') && hk.src === 'rxlog') {
+    resolvePubkey(hk.heardKey).then((pk) => {
+      state.pathResolve.set(hk.heardKey, !!pk);
+      if (!pk) return;
+      maybeAskHeardTarget(pk, recordCandidate(state.regions.candidates, pk, null));
     });
   }
 
@@ -1320,6 +1354,10 @@ window.addEventListener('DOMContentLoaded', async () => {
       companionPubkey: state.companionPubkey,
       uplink: currentUplink(),
       pending: state.pendingCount,
+      pathResolve: {
+        attempted: state.pathResolve.size,
+        resolved: Array.from(state.pathResolve.values()).filter(Boolean).length,
+      },
       lineCount: lines.length,
       lineCap: LOG_LINE_CAP,
     });

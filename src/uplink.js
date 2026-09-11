@@ -112,7 +112,7 @@ export function regionInertReason({ config, supported, fwVer }) {
 export function buildLogHeader(info) {
   const {
     version, nowISO, config, fwVer, regionsSupported,
-    companionName, companionPubkey, uplink, pending, lineCount, lineCap,
+    companionName, companionPubkey, uplink, pending, lineCount, lineCap, pathResolve,
   } = info;
   const row = (k, v) => k.padEnd(10) + ' ' + v;
   const onOff = (b) => (b ? 'on' : 'off');
@@ -139,6 +139,19 @@ export function buildLogHeader(info) {
 
   const inert = regionInertReason({ config, supported: regionsSupported, fwVer });
   lines.push(row('regions', inert ? 'inert — ' + inert : 'active'));
+
+  // A forwarder is heard as a 2-4 byte path-hash prefix and has to be resolved to a
+  // full pubkey before it can be asked anything. Whether that resolve usually lands
+  // is what decides if the path-hash candidate source pays for itself, and a
+  // per-prefix log line cannot answer it — the ring buffer rolls those out long
+  // before a drive ends. Omitted entirely when nothing was tried, because "0 of 0"
+  // reads as a failure rather than as an absence.
+  if (pathResolve && pathResolve.attempted > 0) {
+    const unresolved = pathResolve.attempted - pathResolve.resolved;
+    lines.push(row('path keys', pathResolve.resolved + ' of ' + pathResolve.attempted
+      + ' path-hash prefixes resolved to a pubkey'
+      + (unresolved > 0 ? ' (' + unresolved + ' ambiguous or unknown)' : '')));
+  }
 
   if (companionPubkey) {
     lines.push(row('companion', (companionName ? companionName + ' · ' : '') + companionPubkey.slice(0, 20) + '…'));

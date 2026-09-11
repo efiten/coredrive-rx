@@ -63,6 +63,27 @@ export function retryBackoffFor(attempts) {
   return RETRY_BACKOFF_MS[Math.min(attempts, RETRY_BACKOFF_MS.length - 1)];
 }
 
+// recordCandidate writes one candidate, keyed by full pubkey. The map VALUE is the
+// answered-key isTargetDue compares against, and three sources now write it with
+// different quality of information: a 0-hop advert carries a real advertTs, while a
+// discover response and a path-hash forwarder both carry null.
+//
+// So this is not a plain set: a null must never overwrite a timestamp we already know.
+// Doing so makes answered.get(t) !== advertTs for a repeater that HAS answered, which
+// reads as due and re-asks it for nothing. A different timestamp does overwrite — a
+// re-advert is the documented signal to ask again.
+//
+// Returns the EFFECTIVE answered-key, which callers must hand to the ask decision
+// instead of the value they offered. Otherwise the two disagree: a caller passing its
+// own null makes isTargetDue compare null against an answered 4242 and re-ask a
+// repeater that already answered.
+export function recordCandidate(candidates, pubkey, advertTs) {
+  const kept = candidates.get(pubkey);
+  if (advertTs == null && kept != null) return kept;
+  candidates.set(pubkey, advertTs);
+  return advertTs;
+}
+
 // isTargetDue is the per-target half of "worth asking": not already answered this
 // session and not sitting inside its retry backoff.
 //
