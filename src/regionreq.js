@@ -4,7 +4,7 @@
 // NOTE: the app sends NO timestamp. sendAnonReq (BaseChatMesh.cpp) prepends a
 // 4-byte tag itself from getCurrentTimeUnique(), which the repeater echoes back.
 
-import { regionDiscoverDue } from './monitor.js';
+import { regionDiscoverDue, REGION_INTERVAL_MS } from './monitor.js';
 
 export const CMD_SEND_ANON_REQ = 57;
 export const PUSH_CODE_BINARY_RESPONSE = 0x8c;
@@ -39,23 +39,17 @@ export function buildRegionsRequest(pubkeyHex) {
   return out;
 }
 
-// selectNextTarget picks the next repeater to ask, or null when there is nothing
-// worth asking. Fresh candidates come first; a repeater that has never answered is
-// DEMOTED rather than dropped, because silence is ambiguous — out of direct range,
-// rate-limited, firmware too old, or busy — so dropping loses a node that was merely
-// out of range for one stretch, while retrying at equal priority lets a permanent
-// non-answerer starve one that would answer.
 // RETRY_BACKOFF_MS: how long a target that did not answer must wait before it may
 // be asked again, indexed by how many times it has already been asked this session.
 // The last entry repeats for every further attempt.
 //
-// Demotion alone was not enough. It moves a silent target behind the answering
-// ones, but once every OTHER candidate has answered they are no longer due, the
-// pool falls back to "every due candidate", and the silent one is handed back
-// every single round — observed in the field as nine asks to one node in nine
-// minutes. That is not just wasted airtime: simple_repeater rate-limits anon
-// requests to 4 per 180s SHARED across all types and all requesters, so hammering
-// a node makes it LESS likely to ever answer, not more.
+// Silence is ambiguous — out of direct range, rate-limited, firmware too old, or
+// busy — so a silent target is held off rather than dropped: dropping loses a node
+// that was merely out of range for one stretch. The backoff is what stops the other
+// failure mode, observed in the field as nine asks to one node in nine minutes. That
+// is not just wasted airtime: simple_repeater rate-limits anon requests to 4 per 180s
+// SHARED across all types and all requesters, so hammering a node makes it LESS
+// likely to ever answer, not more.
 export const RETRY_BACKOFF_MS = [0, 5 * 60000, 15 * 60000, 30 * 60000];
 
 export function retryBackoffFor(attempts) {
@@ -84,61 +78,116 @@ export function recordCandidate(candidates, pubkey, advertTs) {
   return advertTs;
 }
 
+// dueDelayMs is how long this target must still wait before it may be asked:
+// 0 = right now, Infinity = it has already answered and there is nothing to wait for.
+// One function so "is it due" and "why not, and for how long" can never disagree.
+//
+// The advertTs comparison is an answered-key, not a freshness check. Discover- and
+// forwarder-sourced candidates carry null, so `answered.get(t) === null` after a reply
+// means "asked once this session" — which is the intended policy. An advert's
+// timestamp changes on every advert regardless of configuration, so it must not be
+// read as "the config changed"; see the note at the candidate-recording site in app.js.
+export function dueDelayMs(target, advertTs, answered, attempts, lastAskedAt, now) {
+  if (answered.get(target) === advertTs) return Infinity;
+  const last = lastAskedAt.get(target);
+  if (last == null) return 0;
+  return Math.max(0, retryBackoffFor(attempts.get(target) ?? 0) - (now - last));
+}
+
 // isTargetDue is the per-target half of "worth asking": not already answered this
 // session and not sitting inside its retry backoff.
-//
-// The advertTs comparison is an answered-key, not a freshness check. Discover-sourced
-// candidates carry null, so `answered.get(t) === null` after a reply means "asked
-// once this session" — which is the intended policy. An advert's timestamp changes on
-// every advert regardless of configuration, so it must not be read as "the config
-// changed"; see the note at the candidate-recording site in app.js. Shared by
-// selectNextTarget (the periodic pool scan) and heardAskEligible (the event-driven
-// ask for one specific just-heard target) so the two paths can never disagree about
-// whether a given target may be asked.
 export function isTargetDue(target, advertTs, answered, attempts, lastAskedAt, now) {
-  if (answered.get(target) === advertTs) return false;
-  const last = lastAskedAt.get(target);
-  if (last == null) return true;
-  return now - last >= retryBackoffFor(attempts.get(target) ?? 0);
+  return dueDelayMs(target, advertTs, answered, attempts, lastAskedAt, now) === 0;
 }
 
-// selectNextTarget picks the next repeater to ask, or null when nothing is worth
-// asking right now. `now` and the attempts/lastAskedAt maps are passed in so the
-// decision stays pure and testable.
-export function selectNextTarget(state) {
-  const now = state.now ?? 0;
-  const attempts = state.attempts ?? new Map();
-  const lastAskedAt = state.lastAskedAt ?? new Map();
-  const due = (c) => isTargetDue(c.pubkey, c.advertTs, state.answered, attempts, lastAskedAt, now);
-  const fresh = state.candidates.filter((c) => due(c) && !state.demoted.has(c.pubkey));
-  const pool = fresh.length ? fresh : state.candidates.filter(due);
-  if (!pool.length) return null;
-  return pool[state.cursor % pool.length].pubkey;
-}
+// Why an ask did not happen. These exist because the once-a-minute timer sweep that
+// used to narrate the scheduler is gone: without a reason code a quiet log is equally
+// consistent with an ask in flight, a spent airtime budget, a backed-off target and a
+// repeater that already answered, and tells the reader which of those it is: none.
+export const SKIP_IN_FLIGHT = 'in-flight';
+export const SKIP_BUDGET = 'budget';
+export const SKIP_ANSWERED = 'answered';
+export const SKIP_BACKOFF = 'backoff';
 
-// heardAskEligible is the event-driven twin of selectNextTarget: given a repeater
-// that was JUST heard directly, decide whether it may be asked right now instead of
-// waiting for the next timer tick. `r` is the same regions-state shape app.js keeps
-// (pending, lastAskAt, answered, attempts, lastAskedAt) — no DOM, no transport.
+// heardAskDecision decides whether a repeater we are hearing RIGHT NOW may be asked.
+// `r` is the regions-state shape app.js keeps (pending, lastAskAt, answered, attempts,
+// lastAskedAt) — no DOM, no transport. Returns { ask: true } or { ask: false, why, … }.
 //
-// Deliberately NOT here: any notion of `demoted`/fresh-pool priority. That machinery
-// exists in selectNextTarget to pick fairly AMONG MANY due candidates on a timer.
-// Here there is nothing to pick from — the target is already decided by physics (it's
-// the one whose radio we can currently hear), so which repeaters get asked and in
-// what order now falls out of which ones are actually in range at each moment, and
-// the retry backoff already stops one silent node from monopolising the shared
-// budget. Layering demotion on top would be a second fairness mechanism solving a
-// problem this event ordering already solves.
-export function heardAskEligible(target, advertTs, r, now) {
-  if (r.pending && !pendingExpired(r.pending, now)) return false;
-  if (!regionDiscoverDue(now, r.lastAskAt)) return false;
-  return isTargetDue(target, advertTs, r.answered, r.attempts, r.lastAskedAt, now);
+// This is now the only decision there is. A 60s timer used to pick a second target
+// from the whole session pool, which had no notion of range: the 2026-09-11 commute
+// log shows four such asks to repeaters last heard three to six minutes earlier, none
+// answered, while the one ask that fired on a live reception was answered in two
+// seconds. Worse than the wasted airtime, each blind ask charged its target an attempt
+// and pushed it into the 5/15/30-minute backoff, so the repeaters that WERE being
+// heard could not be asked when they came into range.
+//
+// Deliberately NOT here: any notion of fairness between candidates. There is nothing
+// to pick from — the target is decided by physics, it is the one whose radio we can
+// currently hear — so which repeaters get asked, and in what order, falls out of which
+// ones are actually in range at each moment.
+export function heardAskDecision(target, advertTs, r, now) {
+  if (r.pending && !pendingExpired(r.pending, now)) {
+    return { ask: false, why: SKIP_IN_FLIGHT, target: r.pending.target };
+  }
+  if (!regionDiscoverDue(now, r.lastAskAt)) {
+    return { ask: false, why: SKIP_BUDGET, waitMs: REGION_INTERVAL_MS - (now - r.lastAskAt) };
+  }
+  const delay = dueDelayMs(target, advertTs, r.answered, r.attempts, r.lastAskedAt, now);
+  if (delay === Infinity) return { ask: false, why: SKIP_ANSWERED };
+  if (delay > 0) return { ask: false, why: SKIP_BACKOFF, waitMs: delay };
+  return { ask: true };
+}
+
+// commitAsk books one ask: the target's attempt count and retry clock, the shared
+// airtime budget, and the single pending slot. It returns a RECEIPT — the values it
+// overwrote — because the write that follows can fail before anything reaches the
+// radio, and only the receipt can put the scheduler back where it was.
+//
+// tag starts null: the reply-matcher (applyRegionsReply) treats a null tag as "not yet
+// confirmed" and refuses to accept ANY reply until the RESP_CODE_SENT ack fills it in.
+// A reply must never be attributed on the sole evidence that a request is pending.
+export function commitAsk(r, target, advertTs, now) {
+  const receipt = {
+    target,
+    attempts: r.attempts.get(target),
+    lastAskedAt: r.lastAskedAt.get(target),
+    lastAskAt: r.lastAskAt,
+  };
+  r.attempts.set(target, (r.attempts.get(target) ?? 0) + 1);
+  r.lastAskedAt.set(target, now);
+  r.lastAskAt = now;
+  r.pending = { target, advertTs, tag: null, sentAt: now };
+  return receipt;
+}
+
+// undoAsk gives back everything commitAsk took, for an ask that never reached the
+// radio. Returns whether it rolled anything back.
+//
+// Field case (2026-09-11 commute): the BLE characteristic goes invalid on a reconnect,
+// the write throws, and nothing is transmitted — yet the target was charged an attempt
+// and dropped into the 5/15/30-minute backoff, the shared 60s budget was spent, and
+// the slot was held until it timed out, which logged as "no reply within 20s" as
+// though the repeater had stayed silent. Two of six asks in that log were this.
+//
+// Refuses when the send-ack already captured a tag (that request IS on the air and its
+// reply can still arrive) or when the slot has moved on to another target — a late
+// rejection must not free someone else's round or refund airtime they legitimately
+// spent.
+export function undoAsk(r, receipt) {
+  if (!r.pending || r.pending.target !== receipt.target || r.pending.tag != null) return false;
+  r.pending = null;
+  if (receipt.attempts == null) r.attempts.delete(receipt.target);
+  else r.attempts.set(receipt.target, receipt.attempts);
+  if (receipt.lastAskedAt == null) r.lastAskedAt.delete(receipt.target);
+  else r.lastAskedAt.set(receipt.target, receipt.lastAskedAt);
+  r.lastAskAt = receipt.lastAskAt;
+  return true;
 }
 
 // PENDING_TIMEOUT_MS: how long one outstanding request may hold the single pending
 // slot. This app deliberately keeps only ONE ask in flight, so that slot is also the
-// gate on the event-driven path (heardAskEligible above) — which means an ask that is
-// never released takes every LATER ask down with it.
+// gate on the ask path (heardAskDecision above) — which means an ask that is never
+// released takes every LATER ask down with it.
 //
 // That is exactly what happened in the field (2026-09-11 commute): pending was
 // cleared on a FLOOD send-ack, on an accepted reply, and on disconnect — but the

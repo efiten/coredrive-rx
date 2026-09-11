@@ -1,11 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildRegionsRequest, parseRegionsResponse, selectNextTarget, CMD_SEND_ANON_REQ,
+  buildRegionsRequest, parseRegionsResponse, CMD_SEND_ANON_REQ,
   parseSentAck, RESP_CODE_SENT, applyRegionsReply, TRUNCATION_WARN_BYTES, retryBackoffFor,
-  isTargetDue, heardAskEligible, pendingExpired, PENDING_TIMEOUT_MS, recordCandidate,
+  isTargetDue, heardAskDecision, pendingExpired, PENDING_TIMEOUT_MS, recordCandidate,
+  commitAsk, undoAsk, SKIP_IN_FLIGHT, SKIP_BUDGET, SKIP_ANSWERED, SKIP_BACKOFF,
 } from '../src/regionreq.js';
 import { REGION_INTERVAL_MS } from '../src/monitor.js';
+
+// The ask decision now reports WHY it said no, because the timer fallback that used
+// to print a once-a-minute "nothing to ask" line is gone. Most assertions here only
+// care about the verdict.
+const eligible = (target, advertTs, r, now) => heardAskDecision(target, advertTs, r, now).ask;
 
 const PK = 'aa'.repeat(32);
 const le32 = (v) => [v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff];
@@ -90,55 +96,6 @@ test('an empty CSV yields an empty list, not null', () => {
   assert.deepEqual(parseRegionsResponse(bytes).regions, []);
 });
 
-const cand = (pk, ts) => ({ pubkey: pk, advertTs: ts });
-
-test('picks an unasked repeater', () => {
-  const s = { candidates: [cand('a', 1), cand('b', 1)], answered: new Map(), demoted: new Set(), cursor: 0 };
-  assert.equal(selectNextTarget(s), 'a');
-});
-
-test('skips one that already answered with the same advert timestamp', () => {
-  const s = { candidates: [cand('a', 1), cand('b', 1)], answered: new Map([['a', 1]]), demoted: new Set(), cursor: 0 };
-  assert.equal(selectNextTarget(s), 'b');
-});
-
-test('re-asks when the advert timestamp changed — the config may have been edited', () => {
-  const s = { candidates: [cand('a', 2)], answered: new Map([['a', 1]]), demoted: new Set(), cursor: 0 };
-  assert.equal(selectNextTarget(s), 'a');
-});
-
-test('returns null when every candidate is satisfied', () => {
-  const s = { candidates: [cand('a', 1)], answered: new Map([['a', 1]]), demoted: new Set(), cursor: 0 };
-  assert.equal(selectNextTarget(s), null);
-});
-
-test('a demoted non-answerer is only chosen once no fresh candidate remains', () => {
-  const s = { candidates: [cand('a', 1), cand('b', 1)], answered: new Map(), demoted: new Set(['a']), cursor: 0 };
-  assert.equal(selectNextTarget(s), 'b', 'fresh candidate wins');
-  const only = { candidates: [cand('a', 1)], answered: new Map(), demoted: new Set(['a']), cursor: 0 };
-  assert.equal(selectNextTarget(only), 'a', 'demoted is still retried when it is all we have');
-});
-
-test('a discover-sourced candidate (advertTs null) is asked once, then not re-asked until a real advert arrives', () => {
-  // Discover-sourced candidates carry advertTs:null (no timestamp in a discover reply).
-  // due() is answered.get(pubkey) !== advertTs — null !== null is false, so once answered
-  // with the same null it goes quiet, exactly like an advert-sourced repeater with an
-  // unchanged timestamp.
-  const first = { candidates: [cand('a', null)], answered: new Map(), demoted: new Set(), cursor: 0 };
-  assert.equal(selectNextTarget(first), 'a', 'asked once');
-
-  const answeredNull = new Map([['a', null]]);
-  const second = { candidates: [cand('a', null)], answered: answeredNull, demoted: new Set(), cursor: 0 };
-  assert.equal(selectNextTarget(second), null, 'not re-asked while still only known via discover');
-
-  const third = { candidates: [cand('a', 12345)], answered: answeredNull, demoted: new Set(), cursor: 0 };
-  assert.equal(selectNextTarget(third), 'a', 're-asked once a real advert with a timestamp arrives');
-});
-
-test('no candidates yields null rather than throwing', () => {
-  assert.equal(selectNextTarget({ candidates: [], answered: new Map(), demoted: new Set(), cursor: 0 }), null);
-});
-
 // --- RESP_CODE_SENT ack + tag-matched reply attribution ---
 // The repeater rate-limits (anon_limiter) and replies after SERVER_RESPONSE_DELAY,
 // and a different repeater is asked every round (60s later) — a reply delayed past
@@ -210,26 +167,24 @@ test('parseSentAck reports the route the companion actually used', () => {
 
 const A = 'aa'.repeat(32), B = 'bb'.repeat(32);
 
-test('a silent target is NOT re-asked every round once every other candidate has answered', () => {
-  // Exactly the field case: B answered so it is no longer due; A never answered and
-  // is demoted. The demoted-fallback pool then contained only A, handing it back
-  // every single round. The backoff must break that.
-  const answered = new Map([[B, null]]);
-  const state = {
-    candidates: [cand(A, null), cand(B, null)], answered, demoted: new Set([A]), cursor: 0,
+test('a silent target is NOT re-asked a minute later just because it is heard again', () => {
+  // Exactly the field case, now expressed on the only path left: A was asked, stayed
+  // silent, and is heard again on the next pass. Re-asking on the old one-minute
+  // cadence is what made simple_repeater's 4-per-180s anon limiter drop it for good.
+  const r = {
+    pending: null, lastAskAt: null, answered: new Map(),
     attempts: new Map([[A, 1]]), lastAskedAt: new Map([[A, 1_000_000]]),
-    now: 1_000_000 + 60_000, // one minute later, the old cadence
   };
-  assert.equal(selectNextTarget(state), null, 'one minute after a failed ask, A is still backed off');
+  assert.equal(eligible(A, null, r, 1_000_000 + 60_000), false, 'one minute after a silent ask, A is still backed off');
 });
 
 test('a silent target IS retried once its backoff has elapsed — silence stays ambiguous', () => {
-  const state = {
-    candidates: [cand(A, null), cand(B, null)], answered: new Map([[B, null]]), demoted: new Set([A]), cursor: 0,
+  const r = {
+    pending: null, lastAskAt: null, answered: new Map(),
     attempts: new Map([[A, 1]]), lastAskedAt: new Map([[A, 1_000_000]]),
-    now: 1_000_000 + retryBackoffFor(1),
   };
-  assert.equal(selectNextTarget(state), A, 'dropping a node forever would lose one that was merely out of range');
+  assert.equal(eligible(A, null, r, 1_000_000 + retryBackoffFor(1)), true,
+    'dropping a node forever would lose one that was merely out of range');
 });
 
 test('backoff lengthens with each failed attempt and then holds', () => {
@@ -239,18 +194,23 @@ test('backoff lengthens with each failed attempt and then holds', () => {
   assert.equal(retryBackoffFor(9), retryBackoffFor(3), 'the last step repeats rather than growing without bound');
 });
 
-test('a fresh candidate is preferred over a backed-off one', () => {
-  const state = {
-    candidates: [cand(A, null), cand(B, null)], answered: new Map(), demoted: new Set([A]), cursor: 0,
-    attempts: new Map([[A, 1]]), lastAskedAt: new Map([[A, 1_000_000]]),
-    now: 1_000_000 + 60_000,
-  };
-  assert.equal(selectNextTarget(state), B);
+test('a candidate known only from a discover reply is asked once, then not again until a real advert arrives', () => {
+  // Discover- and forwarder-sourced candidates carry advertTs:null (neither a discover
+  // reply nor a path hash carries a timestamp). The rule is answered.get(t) !== advertTs
+  // — null !== null is false, so once it has answered it goes quiet, exactly like an
+  // advert-sourced repeater whose timestamp has not changed.
+  const r = { pending: null, lastAskAt: null, answered: new Map(), attempts: new Map(), lastAskedAt: new Map() };
+  assert.equal(eligible(A, null, r, 1_000_000), true, 'asked once');
+
+  r.answered.set(A, null);
+  assert.equal(eligible(A, null, r, 2_000_000), false, 'not re-asked while still only known via discover');
+  assert.equal(eligible(A, 12345, r, 2_000_000), true, 're-asked once a real advert with a timestamp arrives');
 });
 
-// --- Event-driven ask on a heard packet (fires the moment a repeater is in range,
-// instead of waiting for whichever candidate the next 60s timer tick happens to
-// pick — see maybeAskHeardTarget in src/app.js) ---
+// --- Event-driven ask on a heard packet. This is the ONLY path that asks: the 60s
+// timer fallback is gone, because it picked from the whole session pool with no
+// notion of range and spent the shared budget on repeaters we had long driven past
+// (see maybeAskHeardTarget in src/app.js) ---
 
 test('isTargetDue: never asked and never answered is due', () => {
   assert.equal(isTargetDue(A, 1, new Map(), new Map(), new Map(), 1_000_000), true);
@@ -267,36 +227,36 @@ test('isTargetDue: inside the per-target backoff is not due', () => {
   assert.equal(isTargetDue(A, null, new Map(), attempts, lastAskedAt, 1_000_000 + retryBackoffFor(1)), true, 'due once the backoff elapses');
 });
 
-test('heardAskEligible: a due repeater heard within budget is eligible', () => {
+test('heardAskDecision: a due repeater heard within budget is eligible', () => {
   const r = { pending: null, lastAskAt: null, answered: new Map(), attempts: new Map(), lastAskedAt: new Map() };
-  assert.equal(heardAskEligible(A, 1, r, 1_000_000), true);
+  assert.equal(eligible(A, 1, r, 1_000_000), true);
 });
 
-test('heardAskEligible: a second repeater heard 5s later is NOT eligible — the 60s budget is shared', () => {
+test('heardAskDecision: a second repeater heard 5s later is NOT eligible — the 60s budget is shared', () => {
   const r = { pending: null, lastAskAt: 1_000_000, answered: new Map(), attempts: new Map(), lastAskedAt: new Map() };
-  assert.equal(heardAskEligible(B, 1, r, 1_000_000 + 5000), false);
-  assert.equal(heardAskEligible(B, 1, r, 1_000_000 + REGION_INTERVAL_MS), true, 'eligible again once the budget clock elapses');
+  assert.equal(eligible(B, 1, r, 1_000_000 + 5000), false);
+  assert.equal(eligible(B, 1, r, 1_000_000 + REGION_INTERVAL_MS), true, 'eligible again once the budget clock elapses');
 });
 
-test('heardAskEligible: a repeater inside its per-target backoff is NOT eligible even with budget free', () => {
+test('heardAskDecision: a repeater inside its per-target backoff is NOT eligible even with budget free', () => {
   const r = {
     pending: null, lastAskAt: null, answered: new Map(),
     attempts: new Map([[A, 1]]), lastAskedAt: new Map([[A, 1_000_000]]),
   };
-  assert.equal(heardAskEligible(A, null, r, 1_000_000 + 60_000), false);
+  assert.equal(eligible(A, null, r, 1_000_000 + 60_000), false);
 });
 
-test('heardAskEligible: an already-answered repeater is NOT eligible', () => {
+test('heardAskDecision: an already-answered repeater is NOT eligible', () => {
   const r = { pending: null, lastAskAt: null, answered: new Map([[A, 1]]), attempts: new Map(), lastAskedAt: new Map() };
-  assert.equal(heardAskEligible(A, 1, r, 1_000_000), false);
+  assert.equal(eligible(A, 1, r, 1_000_000), false);
 });
 
-test('heardAskEligible: an ask already pending blocks a heard target regardless of budget/backoff', () => {
+test('heardAskDecision: an ask already pending blocks a heard target regardless of budget/backoff', () => {
   // sentAt is what makes this pending genuinely in-flight rather than expired (see
   // pendingExpired). The one-ask-at-a-time rule this asserts is unchanged; it is now
   // bounded in time, which the expiry tests below cover.
   const r = { pending: { target: B, advertTs: 1, tag: null, sentAt: 1_000_000 }, lastAskAt: null, answered: new Map(), attempts: new Map(), lastAskedAt: new Map() };
-  assert.equal(heardAskEligible(A, 1, r, 1_000_000), false);
+  assert.equal(eligible(A, 1, r, 1_000_000), false);
 });
 
 test('an evaluation that asks nobody must not consume the airtime budget', () => {
@@ -310,11 +270,11 @@ test('an evaluation that asks nobody must not consume the airtime budget', () =>
     pending: null, lastAskAt: null, // nothing has ever been SENT
     answered: new Map(), attempts: new Map(), lastAskedAt: new Map(),
   };
-  assert.equal(heardAskEligible(A, null, r, t0 + 19_000), true,
+  assert.equal(eligible(A, null, r, t0 + 19_000), true,
     'a repeater heard 19s after a no-op evaluation is still eligible');
 
   r.lastAskAt = t0; // now something was actually sent
-  assert.equal(heardAskEligible(A, null, r, t0 + 19_000), false,
+  assert.equal(eligible(A, null, r, t0 + 19_000), false,
     'but 19s after a real ask the budget is genuinely spent');
 });
 
@@ -352,7 +312,7 @@ test('a reply that is only padding yields no regions, not one empty name', () =>
 // were being heard continuously. Cause: state.regions.pending was cleared in only
 // three places — a FLOOD send-ack, an accepted reply, and disconnect — so the
 // ordinary outcome on a moving receiver (sent DIRECT, never answered) left it set
-// forever. heardAskEligible's pending gate then disabled the event-driven path for
+// forever. heardAskDecision's pending gate then disabled the event-driven path for
 // the rest of the session, leaving only the clock-picked ask that the module header
 // says cannot work while moving. A pending request must expire.
 
@@ -377,17 +337,17 @@ test('pendingExpired: a pending without a sentAt is treated as expired, never as
   assert.equal(pendingExpired({ target: A, advertTs: null, tag: null }, 1_000_000), true);
 });
 
-test('heardAskEligible: an EXPIRED pending no longer blocks a heard repeater', () => {
+test('heardAskDecision: an EXPIRED pending no longer blocks a heard repeater', () => {
   // The exact field scenario: an unanswered ask must not cost us every later one.
   const r = {
     pending: { target: B, advertTs: null, tag: 7, sentAt: 1_000_000 },
     lastAskAt: null, answered: new Map(), attempts: new Map(), lastAskedAt: new Map(),
   };
   const stillInFlight = 1_000_000 + PENDING_TIMEOUT_MS - 1;
-  assert.equal(heardAskEligible(A, null, r, stillInFlight), false,
+  assert.equal(eligible(A, null, r, stillInFlight), false,
     'one request at a time still holds while the reply could plausibly arrive');
   const afterExpiry = 1_000_000 + PENDING_TIMEOUT_MS;
-  assert.equal(heardAskEligible(A, null, r, afterExpiry), true,
+  assert.equal(eligible(A, null, r, afterExpiry), true,
     'but a silent request must not disable the heard path for the rest of the session');
 });
 
@@ -400,14 +360,14 @@ test('a silent repeater does not wedge the heard path for every later repeater',
     answered: new Map(), attempts: new Map(), lastAskedAt: new Map(),
   };
   // B is heard and asked.
-  assert.equal(heardAskEligible(B, null, r, t0), true);
+  assert.equal(eligible(B, null, r, t0), true);
   r.lastAskAt = t0;
   r.attempts.set(B, 1);
   r.lastAskedAt.set(B, t0);
   r.pending = { target: B, advertTs: null, tag: 7, sentAt: t0 };
   // B never answers. A minute later we are past a different repeater.
   const later = t0 + REGION_INTERVAL_MS;
-  assert.equal(heardAskEligible(A, null, r, later), true,
+  assert.equal(eligible(A, null, r, later), true,
     'A is due, the budget has elapsed, and B\'s silence is not A\'s problem');
 });
 
@@ -461,7 +421,7 @@ test('recordCandidate: an answered repeater heard again as a forwarder stays not
 test('recordCandidate returns the EFFECTIVE answered-key, not the one it was handed', () => {
   // The ask decision and the stored candidate must use the SAME key or they disagree.
   // Protecting only the map is not enough: a caller that then passes its own null to
-  // heardAskEligible asks isTargetDue(t, null, ...) while answered holds 4242, which
+  // heardAskDecision asks isTargetDue(t, null, ...) while answered holds 4242, which
   // reads as due and re-asks a repeater that already answered. Handing the effective
   // key back makes that mismatch unrepresentable at the call site.
   const c = new Map([[A, 4242]]);
@@ -470,4 +430,106 @@ test('recordCandidate returns the EFFECTIVE answered-key, not the one it was han
   const fresh = new Map();
   assert.equal(recordCandidate(fresh, B, null), null, 'a genuinely new prefix-sourced candidate is null');
   assert.equal(recordCandidate(fresh, B, 5353), 5353, 'an upgrading advert returns its own timestamp');
+});
+
+// --- Ask bookkeeping: commit and undo ----------------------------------------
+// An ask costs the target an attempt, its place in the retry backoff, and the whole
+// shared 60s airtime budget. Field log (2026-09-11 commute): two of six asks never
+// reached the radio at all — the BLE characteristic went invalid on a reconnect and
+// the write threw — and both targets were charged anyway, then logged as "no reply
+// within 20s" as if the repeater had stayed silent. A write that threw put nothing
+// on the air, so it must cost nothing.
+
+test('commitAsk charges the target and the shared budget, and opens the pending slot', () => {
+  const r = { pending: null, lastAskAt: null, answered: new Map(), attempts: new Map(), lastAskedAt: new Map() };
+  commitAsk(r, A, 4242, 1_000_000);
+  assert.equal(r.attempts.get(A), 1);
+  assert.equal(r.lastAskedAt.get(A), 1_000_000);
+  assert.equal(r.lastAskAt, 1_000_000, 'the airtime budget is spent at the one site that transmits');
+  assert.deepEqual(r.pending, { target: A, advertTs: 4242, tag: null, sentAt: 1_000_000 });
+});
+
+test('undoAsk refunds everything an ask that never left the phone took', () => {
+  const r = { pending: null, lastAskAt: null, answered: new Map(), attempts: new Map(), lastAskedAt: new Map() };
+  const receipt = commitAsk(r, A, null, 1_000_000);
+  assert.equal(undoAsk(r, receipt), true);
+  assert.equal(r.pending, null, 'the slot is free for the next repeater heard');
+  assert.equal(r.attempts.has(A), false, 'a target that was never asked must not carry an attempt');
+  assert.equal(r.lastAskedAt.has(A), false);
+  assert.equal(r.lastAskAt, null, 'no airtime was spent, so none is charged');
+  assert.equal(eligible(A, null, r, 1_000_001), true, 'and the very next reception may ask it');
+});
+
+test('undoAsk restores the PREVIOUS attempt count rather than clearing it', () => {
+  // A target asked once before must not be handed a clean slate by a failed write:
+  // that would erase a real, transmitted ask and let it be hammered again.
+  const r = {
+    pending: null, lastAskAt: 500_000, answered: new Map(),
+    attempts: new Map([[A, 1]]), lastAskedAt: new Map([[A, 500_000]]),
+  };
+  const receipt = commitAsk(r, A, null, 1_000_000);
+  undoAsk(r, receipt);
+  assert.equal(r.attempts.get(A), 1);
+  assert.equal(r.lastAskedAt.get(A), 500_000);
+  assert.equal(r.lastAskAt, 500_000);
+});
+
+test('undoAsk does nothing once the send-ack captured a tag — that ask is on the air', () => {
+  const r = { pending: null, lastAskAt: null, answered: new Map(), attempts: new Map(), lastAskedAt: new Map() };
+  const receipt = commitAsk(r, A, null, 1_000_000);
+  r.pending.tag = 0x11223344; // the companion acked the send
+  assert.equal(undoAsk(r, receipt), false);
+  assert.equal(r.attempts.get(A), 1, 'a transmitted ask keeps its cost');
+  assert.equal(r.pending.tag, 0x11223344, 'and its pending slot, so the reply can still be matched');
+});
+
+test('undoAsk does nothing once another ask holds the slot', () => {
+  // A late rejection from a dead write must never free a slot that now belongs to a
+  // different target, nor refund a budget that target has legitimately spent.
+  const r = { pending: null, lastAskAt: null, answered: new Map(), attempts: new Map(), lastAskedAt: new Map() };
+  const receipt = commitAsk(r, A, null, 1_000_000);
+  r.pending = null; // A's round expired
+  commitAsk(r, B, null, 1_100_000);
+  assert.equal(undoAsk(r, receipt), false);
+  assert.equal(r.pending.target, B);
+  assert.equal(r.lastAskAt, 1_100_000);
+});
+
+// --- Why an ask was skipped ---------------------------------------------------
+// With the timer fallback gone there is no once-a-minute "nothing to ask" line, so
+// the heard path has to be able to say why it stayed quiet — otherwise a silent log
+// is consistent with an in-flight ask, a spent budget, a backed-off target and a
+// repeater that already answered, and distinguishes none of them.
+
+test('heardAskDecision names the in-flight ask that is blocking', () => {
+  const r = {
+    pending: { target: B, advertTs: null, tag: 7, sentAt: 1_000_000 },
+    lastAskAt: null, answered: new Map(), attempts: new Map(), lastAskedAt: new Map(),
+  };
+  const d = heardAskDecision(A, null, r, 1_000_000 + 1000);
+  assert.equal(d.ask, false);
+  assert.equal(d.why, SKIP_IN_FLIGHT);
+  assert.equal(d.target, B, 'which request is holding the slot');
+});
+
+test('heardAskDecision reports how long the shared airtime budget still has to run', () => {
+  const r = { pending: null, lastAskAt: 1_000_000, answered: new Map(), attempts: new Map(), lastAskedAt: new Map() };
+  const d = heardAskDecision(A, null, r, 1_000_000 + 20_000);
+  assert.equal(d.why, SKIP_BUDGET);
+  assert.equal(d.waitMs, REGION_INTERVAL_MS - 20_000);
+});
+
+test('heardAskDecision reports the remaining per-target backoff', () => {
+  const r = {
+    pending: null, lastAskAt: null, answered: new Map(),
+    attempts: new Map([[A, 1]]), lastAskedAt: new Map([[A, 1_000_000]]),
+  };
+  const d = heardAskDecision(A, null, r, 1_000_000 + 60_000);
+  assert.equal(d.why, SKIP_BACKOFF);
+  assert.equal(d.waitMs, retryBackoffFor(1) - 60_000);
+});
+
+test('heardAskDecision separates "already answered" from "backed off" — one is done, the other is waiting', () => {
+  const r = { pending: null, lastAskAt: null, answered: new Map([[A, 4242]]), attempts: new Map(), lastAskedAt: new Map() };
+  assert.equal(heardAskDecision(A, 4242, r, 9_000_000).why, SKIP_ANSWERED);
 });
