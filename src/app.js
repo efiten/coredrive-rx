@@ -85,7 +85,7 @@ const state = {
     queue: [], targets: new Map(), answered: new Set(), outstanding: new Map(), lastSignal: new Map(),
     lastSentAt: null, busy: false, overrideRaw: null,
     heard: 0, queued: 0, asks: 0, replies: 0, flooded: 0, unmatched: 0, dropped: 0,
-    capped: 0, limited: 0, bonus: 0,
+    capped: 0, bonus: 0,
     // The signal each ask went out on, split by what came back. If these two ranges
     // do not overlap, a signal floor is worth having and this says where it sits.
     sigAnswered: newSignalRange(), sigSilent: newSignalRange(),
@@ -245,7 +245,6 @@ function noteRepeaterHeard(target, snr, rssi) {
   }, snr);
   if (verdict === 'queued-now') r.queued++;
   else if (verdict === 'capped') r.capped++;
-  else if (verdict === 'limiter') r.limited++;
   else if (verdict === 'bonus') {
     r.queued++;
     r.bonus++;
@@ -1270,7 +1269,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         answered: state.regions.answered.size, queue: state.regions.queue.length,
         outstanding: state.regions.outstanding.size, flooded: state.regions.flooded,
         unmatched: state.regions.unmatched, dropped: state.regions.dropped,
-        capped: state.regions.capped, limited: state.regions.limited, bonus: state.regions.bonus,
+        capped: state.regions.capped, bonus: state.regions.bonus,
         sigAnswered: state.regions.sigAnswered, sigSilent: state.regions.sigSilent,
       },
       lineCount: lines.length,

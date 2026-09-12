@@ -70,9 +70,10 @@ export function normalizeConfig(raw) {
     //
     //   regionAskGapSec      between ANY two transmitted asks
     //   regionTargetGapSec   between two asks to the SAME repeater
-    //   regionMaxAsks        unanswered asks one repeater gets per encounter; this is
-    //                        what keeps the total inside simple_repeater's limiter of
-    //                        4 anon requests per 180s shared across all requesters
+    //   regionMaxAsks        unanswered asks one repeater gets per encounter, plus at
+    //                        most one bonus ask; this and the gap above are the only
+    //                        bound on one repeater's load (see src/regionsched.js on
+    //                        why the firmware's own limiter is not mirrored here)
     //   regionForgetMin      silence after which the next reception counts as a NEW
     //                        encounter and the count starts over
     regionAskGapSec: positiveSeconds(raw.regionAskGapSec, 2),

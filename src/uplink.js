@@ -170,8 +170,8 @@ export function buildLogHeader(info) {
       + asks.asks + ' asks sent, ' + asks.replies + ' answered, over ' + asks.heard + ' receptions'));
     lines.push(row('asks q', asks.queue + ' queued, ' + asks.outstanding + ' awaiting a reply, '
       + asks.dropped + ' timed out, ' + asks.unmatched + ' unmatched replies, ' + asks.flooded + ' sent as FLOOD'));
-    lines.push(row('asks cap', asks.capped + ' receptions ignored (encounter allowance spent), '
-      + asks.limited + ' held off by the repeater limiter, ' + asks.bonus + ' extra asks earned by a much stronger reception'));
+    lines.push(row('asks cap', asks.capped + ' receptions ignored (this encounter had spent its asks), '
+      + asks.bonus + ' extra asks earned by a much stronger reception'));
     // Is there a signal below which asking is pointless? Two ranges, one for the
     // receptions that produced an answer and one for those that produced silence.
     // They argue for a floor only if they do NOT overlap.

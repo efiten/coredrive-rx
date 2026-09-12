@@ -47,13 +47,23 @@ export const DEFAULT_TARGET_GAP_MS = 30000;
 export const DEFAULT_MAX_ASKS = 4;
 export const DEFAULT_FORGET_MS = 5 * 60000;
 
-// The firmware's limiter, mirrored here as a hard per-target ceiling rather than left
-// to be approximated by maxAsks and the spacing. It is what makes the encounter cap and
-// the bonus below safe to raise: whatever those two allow, no repeater is ever sent
-// more than the four requests per 180s it accepts, and the quota we do not use stays
-// available to other clients. Not configurable — it is not ours to raise.
-export const LIMITER_WINDOW_MS = 180000;
-export const LIMITER_MAX_IN_WINDOW = 4;
+// NOT here: a client-side copy of the repeater's rate limiter. simple_repeater does run
+// one — `anon_limiter(4, 180)` in MyMesh.cpp:880, shared across every anon request type
+// (regions, owner, clock) and every requester — but RateLimiter.h shows it is a FIXED
+// window, not a rolling one:
+//
+//     if (now < _start_timestamp + _secs) { _count++; if (_count > _maximum) return false; }
+//     else { _start_timestamp = now; _count = 1; }   // window expired, restart
+//
+// The window is anchored to the repeater's own clock and starts at the first request it
+// accepts after an expiry, which a client cannot observe. A rolling copy on this side is
+// therefore wrong in both directions, and wrong in the expensive direction too: it
+// refuses asks the repeater would have answered because its window had just reset. A
+// denied request also costs nothing — _count keeps counting but _start_timestamp does
+// not move, so hammering neither extends the block nor penalises the sender.
+//
+// What bounds one repeater's load here is the encounter: maxAsks plus at most one bonus,
+// each at least targetGapMs apart, and no new encounter until forgetMs of silence.
 
 // A repeater can spend its whole encounter allowance during a bad stretch and then be
 // heard far better while it still counts as the same encounter. Measured on 2026-09-12:
@@ -76,7 +86,7 @@ export const DEFAULT_BONUS_SNR_DB = 6;
 export function noteHeard(targets, target, now, forgetMs) {
   const rec = targets.get(target);
   if (!rec) {
-    const fresh = { attempts: 0, lastAskedAt: null, lastHeardAt: now, bestAskSnr: null, bonusUsed: false, sentAt: [] };
+    const fresh = { attempts: 0, lastAskedAt: null, lastHeardAt: now, bestAskSnr: null, bonusUsed: false };
     targets.set(target, fresh);
     return fresh;
   }
@@ -85,18 +95,9 @@ export function noteHeard(targets, target, now, forgetMs) {
     rec.lastAskedAt = null;
     rec.bestAskSnr = null;
     rec.bonusUsed = false;
-    // sentAt is deliberately NOT cleared: the limiter is a property of the repeater's
-    // radio, not of our idea of an encounter, and it ages out on its own clock.
   }
   rec.lastHeardAt = now;
   return rec;
-}
-
-// recentAsks counts how many asks to this target still fall inside the limiter window,
-// pruning the ones that have aged out as it goes.
-export function recentAsks(rec, now, windowMs = LIMITER_WINDOW_MS) {
-  rec.sentAt = (rec.sentAt ?? []).filter((t) => now - t < windowMs);
-  return rec.sentAt.length;
 }
 
 // enqueue records that this repeater was heard again, and is the only thing that ever
@@ -105,7 +106,6 @@ export function recentAsks(rec, now, windowMs = LIMITER_WINDOW_MS) {
 //   'answered'  it declared its list: done for this session, no encounter reopens it
 //   'queued'    already waiting; queueing each reception would ask it twice in a row
 //               with nothing heard in between, which measures the queue not the mesh
-//   'limiter'   four asks to it already inside the firmware's 180s window
 //   'capped'    this encounter has used its maxAsks and this reception is not enough
 //               better than the ones already spent to earn the bonus
 //   'too-soon'  asked less than targetGapMs ago
@@ -114,7 +114,6 @@ export function enqueue(queue, target, answered, targets, now, opts, snr = null)
   const rec = noteHeard(targets, target, now, opts.forgetMs);
   if (answered.has(target)) return 'answered';
   if (queue.includes(target)) return 'queued';
-  if (recentAsks(rec, now) >= LIMITER_MAX_IN_WINDOW) return 'limiter';
   let bonus = false;
   if (rec.attempts >= opts.maxAsks) {
     const gain = opts.bonusSnrDb ?? DEFAULT_BONUS_SNR_DB;
@@ -135,10 +134,9 @@ export function enqueue(queue, target, answered, targets, now, opts, snr = null)
 // queue behind others is held off from the moment it went out rather than from the
 // moment it was heard.
 export function markAsked(targets, target, now, snr = null) {
-  const rec = targets.get(target) ?? { attempts: 0, lastAskedAt: null, lastHeardAt: now, bestAskSnr: null, bonusUsed: false, sentAt: [] };
+  const rec = targets.get(target) ?? { attempts: 0, lastAskedAt: null, lastHeardAt: now, bestAskSnr: null, bonusUsed: false };
   rec.attempts++;
   rec.lastAskedAt = now;
-  rec.sentAt = (rec.sentAt ?? []).concat(now);
   // The best reception any ask has gone out on, which is what a later one has to beat
   // to earn the bonus. Tracked here rather than at enqueue so it reflects transmissions.
   if (snr != null && (rec.bestAskSnr == null || snr > rec.bestAskSnr)) rec.bestAskSnr = snr;
