@@ -349,15 +349,6 @@ async function askRepeater(target) {
 // succeeded, failed outright (still flooded), or simply timed out with no reply.
 const GET_CONTACT_TIMEOUT_MS = 4000;
 const CONTACT_WRITE_TIMEOUT_MS = 4000;
-// Upper bound on how long a contact is held zero-hop for one ask. The repeater's own
-// est_timeout (returned in the send-ack but otherwise unused here) is normally
-// shorter, but nothing tells us a reply is NEVER coming — this is the backstop that
-// guarantees restoreContact still runs even if the round never resolves any other way.
-// Shares PENDING_TIMEOUT_MS by construction: once this restore runs the contact is
-// back on its stale path and no reply can arrive, so the pending slot must not
-// outlive the override that made the ask answerable in the first place.
-const OVERRIDE_ROUND_TIMEOUT_MS = PENDING_TIMEOUT_MS;
-
 // getContact reads one contact by pubkey. Resolves parseContactReply's result, or
 // null on a timeout/send failure — callers treat null the same as "not a contact":
 // skip the override and ask as-is, since that is exactly today's (broken-for-
@@ -408,127 +399,9 @@ function writeContact(frame, timeoutMs) {
   });
 }
 
-// finishOverrideRound restores a temporarily-overridden contact exactly once per
-// round — called from every place a round can conclude (accepted reply, an ack that
-// still reports FLOOD despite the override, or the OVERRIDE_ROUND_TIMEOUT_MS
-// backstop) so a race between two of those can never double-restore.
-function finishOverrideRound(target) {
-  const ov = state.regions.overridePending;
-  if (!ov || ov.target !== target) return;
-  clearTimeout(ov.timer);
-  state.regions.overridePending = null;
-  restoreContact(target, ov.raw);
-}
-
-// restoreContact writes the ORIGINAL contact frame back. The localStorage
-// crash-safety record is cleared only once the restore actually acks — if it
-// doesn't, the record is left in place so the next connect to this same companion
-// replays it (see maybeReplayPendingRestore).
-async function restoreContact(target, raw) {
-  const ok = await writeContact(buildRestoreFrame(raw), CONTACT_WRITE_TIMEOUT_MS);
-  if (ok) {
-    clearPendingRestore(target);
-    dbg('regions: restored ' + target.slice(0, 12) + '…’s original path', 'st');
-  } else {
-    dbg('regions: restore write for ' + target.slice(0, 12) + '… did not ack — will retry on next connect', 'no');
-  }
-}
-
 function clearPendingRestore(target) {
   const rec = decodePendingRestore(localStorage.getItem(RESTORE_STORAGE_KEY) || '');
   if (rec && rec.self === state.companionPubkey && rec.target === target) localStorage.removeItem(RESTORE_STORAGE_KEY);
-}
-
-// prepareAndAskRegions runs the read/override dance (if this target needs one) and
-// then sends the regions request exactly as askRegions always has. `receipt` is the
-// commitAsk booking, handed on so a send that never reaches the radio can be undone.
-//
-// The try/catch is not decoration: state.transport goes null the moment the companion
-// drops, and askRegions dereferences it. Without this the rejection is unhandled and
-// the ask silently holds the pending slot until it times out 20s later.
-async function prepareAndAskRegions(target, frame, receipt) {
-  try {
-    const contact = await getContact(target);
-    if (!needsPathOverride(contact)) { askRegions(target, frame, receipt); return; }
-    const raw = contact.raw;
-    localStorage.setItem(RESTORE_STORAGE_KEY, encodePendingRestore(state.companionPubkey, target, raw));
-    const ok = await writeContact(buildOverrideFrame(raw), CONTACT_WRITE_TIMEOUT_MS);
-    if (!ok) dbg('regions: path override for ' + target.slice(0, 12) + '… did not ack — asking anyway', 'no');
-    const timer = setTimeout(() => finishOverrideRound(target), OVERRIDE_ROUND_TIMEOUT_MS);
-    state.regions.overridePending = { target, raw, timer };
-    askRegions(target, frame, receipt);
-  } catch (e) {
-    abandonAsk(target, receipt, e.message);
-  }
-}
-
-// maybeReplayPendingRestore runs once per connect, before any region-discovery ask:
-// if a previous session died between an override write and its restore, the target
-// contact is still sitting zero-hop on the companion. Replayed only against the SAME
-// companion the record was made for (keyed on self pubkey from SELF_INFO) — never a
-// different one, which may have an unrelated contact under that pubkey.
-async function maybeReplayPendingRestore() {
-  const stored = localStorage.getItem(RESTORE_STORAGE_KEY);
-  if (!stored) return;
-  const rec = decodePendingRestore(stored);
-  if (!rec) { localStorage.removeItem(RESTORE_STORAGE_KEY); return; } // corrupt — nothing safe to replay
-  if (rec.self !== state.companionPubkey) return; // belongs to a different companion — leave it for its own connect
-  dbg('regions: replaying a pending contact-path restore for ' + rec.target.slice(0, 12) + '… left over from a previous session', 'st');
-  const ok = await writeContact(buildRestoreFrame(rec.raw), CONTACT_WRITE_TIMEOUT_MS);
-  if (ok) { localStorage.removeItem(RESTORE_STORAGE_KEY); dbg('regions: pending restore replayed OK', 'ok'); }
-  else dbg('regions: pending restore did not ack — will retry next connect', 'no');
-}
-
-// askRegions sends the request and listens for the immediate RESP_CODE_SENT ack to
-// capture the tag the eventual PUSH_CODE_BINARY_RESPONSE must match — the repeater
-// rate-limits and replies after a delay, and a DIFFERENT repeater is asked every
-// round, so a reply delayed past one round can land while another target is
-// pending. Matching on "something is pending" instead of on this tag would
-// attribute one repeater's declared regions to a different repeater and store it
-// as fact (see applyRegionsReply in src/regionreq.js for the actual decision).
-function askRegions(target, frame, receipt) {
-  const onAck = (dv) => {
-    const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
-    const ack = parseSentAck(bytes);
-    if (!ack) return;
-    cleanup();
-    if (!(state.regions.pending && state.regions.pending.target === target)) return;
-    if (ack.isFlood) {
-      // Flooded: the repeater requires a DIRECT route and drops this silently.
-      // Clear the pending slot rather than waiting out a reply that cannot come,
-      // and say so — otherwise this looks identical to a repeater in range that
-      // simply has not answered yet.
-      state.regions.pending = null;
-      const overridden = state.regions.overridePending && state.regions.overridePending.target === target;
-      if (overridden) {
-        // We just forced this contact's out_path to zero-hop and it STILL came
-        // back flood — the override assumption was wrong (or didn't take). Say so
-        // plainly rather than letting it look like the ordinary not-a-contact case.
-        dbg('regions: ' + target.slice(0, 12) + '… still asked over FLOOD after the zero-hop override — override had no effect', 'no');
-        finishOverrideRound(target);
-      } else {
-        dbg('regions: ' + target.slice(0, 12) + '… asked over FLOOD — repeaters only answer DIRECT, no reply will come', 'no');
-      }
-      return;
-    }
-    state.regions.pending.tag = ack.tag;
-  };
-  const timer = setTimeout(() => {
-    cleanup();
-    dbg('regions: no send-ack for ' + target.slice(0, 12) + '… (tag never captured)', 'no');
-  }, REGION_SENT_ACK_TIMEOUT_MS);
-  // Disconnecting inside this window nulls state.transport (disconnectAll clears
-  // state.regions.pending but has no reference to this timer/listener) — guard the
-  // dereference so the timeout callback can't throw on a transport that's gone.
-  function cleanup() { clearTimeout(timer); if (state.transport) state.transport.offFrame(onAck); }
-  state.transport.onFrame(onAck);
-  // Log only once the write has actually gone out. Announcing the ask before the
-  // send settles printed "asked" beside "failed" for the same attempt, which read
-  // as a request that was made and then broke rather than one never sent.
-  state.transport.send(frame).then(
-    () => dbg('regions → asked ' + target.slice(0, 12) + '… for its declared list', 'tx'),
-    (e) => { cleanup(); abandonAsk(target, receipt, e.message); },
-  );
 }
 
 // onRegionsFrame is a dedicated BLE frame listener for ANON_REQ_TYPE_REGIONS replies.
@@ -1277,7 +1150,10 @@ async function disconnectAll(keepProgress) {
   renderPauseChip();
   clearInterval(state.tick); state.tick = null;
   stopRfSampler();
-  state.regions.pending = null; // no more frames will arrive on this transport to answer it
+  // Outstanding requests die with the transport: no reply can arrive on a link that is
+  // gone, and a tag from this session must never match one from the next.
+  state.regions.outstanding.clear();
+  state.regions.queue.length = 0;
   // A contact left zero-hop here is exactly what the localStorage crash-safety record
   // covers — leave it in place (do NOT restore over a transport that's gone, and do NOT
   // clear the record) so maybeReplayPendingRestore fixes it on the next connect.
