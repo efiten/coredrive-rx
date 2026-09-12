@@ -4,10 +4,27 @@ import {
   enqueue, dueToSend, takeNext, registerOutstanding, matchOutstanding,
   pruneOutstanding, markAnswered, markAsked, noteHeard, newSignalRange, noteSignal, DEFAULT_ASK_GAP_MS,
   DEFAULT_TARGET_GAP_MS, DEFAULT_MAX_ASKS, DEFAULT_FORGET_MS, OUTSTANDING_TTL_MS,
+  recentAsks, LIMITER_WINDOW_MS, LIMITER_MAX_IN_WINDOW, DEFAULT_BONUS_SNR_DB,
 } from '../src/regionsched.js';
 
 const GAP = DEFAULT_TARGET_GAP_MS;
-const OPTS = { targetGapMs: GAP, maxAsks: DEFAULT_MAX_ASKS, forgetMs: DEFAULT_FORGET_MS };
+const OPTS = { targetGapMs: GAP, maxAsks: DEFAULT_MAX_ASKS, forgetMs: DEFAULT_FORGET_MS, bonusSnrDb: DEFAULT_BONUS_SNR_DB };
+// The default cap equals the firmware limiter ceiling, so a target that spends it all
+// hits the limiter first and the cap rules become unobservable. SMALL_CAP leaves room
+// in the window, which is what those tests are about.
+const SMALL_CAP = { ...OPTS, maxAsks: 2 };
+
+// spend sends one ask to A per snr given, one every targetGap, and returns the clock
+// just after the last one.
+function spend(targets, snrs, opts = SMALL_CAP, t0 = 1_000_000) {
+  let now = t0;
+  for (const snr of snrs) {
+    enqueue([], A, new Set(), targets, now, opts, snr);
+    markAsked(targets, A, now, snr);
+    now += GAP;
+  }
+  return now;
+}
 const never = () => new Map();
 
 const A = 'aa'.repeat(32), B = 'bb'.repeat(32);
@@ -53,20 +70,15 @@ test('an unanswered repeater is dropped after maxAsks, however often it is heard
   // replies is asked every targetGap for the rest of the session.
   const targets = new Map();
   const q = [];
-  let now = 1_000_000;
-  for (let i = 0; i < DEFAULT_MAX_ASKS; i++) {
-    assert.equal(enqueue(q, A, new Set(), targets, now, OPTS), 'queued-now', 'ask ' + (i + 1));
-    q.length = 0;
-    markAsked(targets, A, now);
-    now += GAP;
-  }
-  assert.equal(enqueue(q, A, new Set(), targets, now, OPTS), 'capped');
+  const now = spend(targets, [-4, -4]);
+  assert.equal(targets.get(A).attempts, SMALL_CAP.maxAsks);
+  assert.equal(enqueue(q, A, new Set(), targets, now, SMALL_CAP, -4), 'capped');
   // And it stays capped for as long as we keep hearing it. Each reception refreshes
   // lastHeardAt, so the encounter never ends and the count is never reset — stepping
   // straight to now + forgetMs instead would be a NEW encounter by definition, which
   // is a different rule and has its own test below.
   for (let i = 1; i <= 5; i++) {
-    assert.equal(enqueue(q, A, new Set(), targets, now + GAP * i, OPTS), 'capped', 'reception ' + i);
+    assert.equal(enqueue(q, A, new Set(), targets, now + GAP * i, SMALL_CAP, -4), 'capped', 'reception ' + i);
   }
   assert.deepEqual(q, []);
 });
@@ -77,16 +89,10 @@ test('a repeater met again after forgetMs gets a fresh run — a new encounter i
   // repeaters a drive exists to reach.
   const targets = new Map();
   const q = [];
-  let now = 1_000_000;
-  for (let i = 0; i < DEFAULT_MAX_ASKS; i++) {
-    enqueue(q, A, new Set(), targets, now, OPTS);
-    q.length = 0;
-    markAsked(targets, A, now);
-    now += GAP;
-  }
-  assert.equal(enqueue(q, A, new Set(), targets, now, OPTS), 'capped');
+  const now = spend(targets, [-4, -4]);
+  assert.equal(enqueue(q, A, new Set(), targets, now, SMALL_CAP, -4), 'capped');
   const later = now + DEFAULT_FORGET_MS;
-  assert.equal(enqueue(q, A, new Set(), targets, later, OPTS), 'queued-now');
+  assert.equal(enqueue(q, A, new Set(), targets, later, SMALL_CAP, -4), 'queued-now');
   assert.equal(targets.get(A).attempts, 0, 'the new encounter starts clean');
 });
 
@@ -213,4 +219,103 @@ test('an empty range stays empty rather than reporting Infinity', () => {
   const r = newSignalRange();
   assert.equal(r.n, 0);
   assert.equal(r.rssiMin, null);
+});
+
+// --- The firmware limiter, mirrored -------------------------------------------
+// simple_repeater accepts 4 anon requests per 180s across every requester. Mirroring it
+// as a hard per-target ceiling is what makes the encounter cap and the bonus safe: no
+// matter what those two allow, one repeater never sees more than it will accept.
+
+test('a fifth ask inside the 180s window is refused however the encounter cap stands', () => {
+  const targets = new Map();
+  const q = [];
+  let now = 1_000_000;
+  for (let i = 0; i < LIMITER_MAX_IN_WINDOW; i++) {
+    enqueue(q, A, new Set(), targets, now, OPTS);
+    q.length = 0;
+    markAsked(targets, A, now, 0);
+    now += GAP;
+  }
+  assert.equal(enqueue(q, A, new Set(), targets, now, OPTS), 'limiter');
+});
+
+test('the limiter window ages out on its own clock, not with the encounter', () => {
+  const targets = new Map();
+  const q = [];
+  let now = 1_000_000;
+  for (let i = 0; i < LIMITER_MAX_IN_WINDOW; i++) {
+    enqueue(q, A, new Set(), targets, now, OPTS);
+    q.length = 0;
+    markAsked(targets, A, now, 0);
+    now += GAP;
+  }
+  const firstSent = 1_000_000;
+  assert.equal(recentAsks(targets.get(A), firstSent + LIMITER_WINDOW_MS - 1), LIMITER_MAX_IN_WINDOW,
+    'all four still count just before the oldest ages out');
+  assert.equal(recentAsks(targets.get(A), firstSent + LIMITER_WINDOW_MS), LIMITER_MAX_IN_WINDOW - 1,
+    'the oldest ages out on its own clock and frees one slot');
+});
+
+// --- The signal bonus ---------------------------------------------------------
+// Field case, 2026-09-12: efef79435050 spent its whole encounter allowance between
+// 21:06:50 and 21:08:08 on receptions around -115 dBm, all unanswered, and was then
+// heard from 21:09:37 at -76 to -69 dBm with nothing left to spend.
+
+test('a much stronger reception buys one more ask after the cap is reached', () => {
+  const targets = new Map();
+  const q = [];
+  const now = spend(targets, [-4, -4]);
+  assert.equal(enqueue(q, A, new Set(), targets, now, SMALL_CAP, -3), 'capped', 'a hair better is not better');
+  assert.equal(enqueue(q, A, new Set(), targets, now, SMALL_CAP, -4 + DEFAULT_BONUS_SNR_DB), 'bonus');
+  assert.deepEqual(q, [A]);
+});
+
+test('the bonus is once per encounter', () => {
+  const targets = new Map();
+  const q = [];
+  let now = spend(targets, [-10, -10]);
+  assert.equal(enqueue(q, A, new Set(), targets, now, SMALL_CAP, 2), 'bonus');
+  q.length = 0;
+  markAsked(targets, A, now, 2);
+  now += GAP;
+  assert.equal(enqueue(q, A, new Set(), targets, now, SMALL_CAP, 11), 'capped',
+    'stronger again, but this encounter has had its extra ask');
+});
+
+test('the bonus compares against the best ask so far, not the last one', () => {
+  // Otherwise a run that happens to end on a bad reception hands out a bonus for a
+  // signal no better than one already spent.
+  const targets = new Map();
+  const q = [];
+  const now = spend(targets, [-10, 2]); // the good one is not the last one
+  assert.equal(targets.get(A).bestAskSnr, 2);
+  assert.equal(enqueue(q, A, new Set(), targets, now, SMALL_CAP, 4), 'capped', '2 dB better than the best is not enough');
+  assert.equal(enqueue(q, A, new Set(), targets, now, SMALL_CAP, 8), 'bonus', '6 dB better than the best is');
+});
+
+test('a reception with no signal reported can never earn the bonus', () => {
+  const targets = new Map();
+  const now = spend(targets, [-4, -4]);
+  assert.equal(enqueue([], A, new Set(), targets, now, SMALL_CAP, null), 'capped');
+});
+
+test('a new encounter clears the bonus and the best-ask mark, but not the limiter', () => {
+  // With the shipped defaults an encounter (5 min of silence) always outlasts the
+  // limiter window (180s), so the two only meet on a deployment that shortens
+  // regionForgetMin. This asserts the rule rather than the default: the limiter counts
+  // transmissions to a radio and does not care what we call an encounter.
+  const SHORT_FORGET = { ...SMALL_CAP, forgetMs: 60000 };
+  const targets = new Map();
+  const t0 = 1_000_000;
+  spend(targets, [5], SHORT_FORGET, t0);
+  const rec = targets.get(A);
+  assert.equal(rec.bestAskSnr, 5);
+
+  enqueue([], A, new Set(), targets, t0 + SHORT_FORGET.forgetMs, SHORT_FORGET, -8);
+  assert.equal(rec.attempts, 0, 'fresh run');
+  assert.equal(rec.bestAskSnr, null, 'nothing to beat yet');
+  assert.equal(rec.bonusUsed, false);
+  assert.equal(recentAsks(rec, t0 + SHORT_FORGET.forgetMs), 1,
+    'the ask from the previous encounter still counts against the repeater');
+  assert.equal(recentAsks(rec, t0 + LIMITER_WINDOW_MS), 0, 'and stops counting on its own clock');
 });

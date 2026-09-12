@@ -84,7 +84,8 @@ const state = {
     supported: false,
     queue: [], targets: new Map(), answered: new Set(), outstanding: new Map(), lastSignal: new Map(),
     lastSentAt: null, busy: false, overrideRaw: null,
-    heard: 0, queued: 0, asks: 0, replies: 0, flooded: 0, unmatched: 0, dropped: 0, capped: 0,
+    heard: 0, queued: 0, asks: 0, replies: 0, flooded: 0, unmatched: 0, dropped: 0,
+    capped: 0, limited: 0, bonus: 0,
     // The signal each ask went out on, split by what came back. If these two ranges
     // do not overlap, a signal floor is worth having and this says where it sits.
     sigAnswered: newSignalRange(), sigSilent: newSignalRange(),
@@ -240,9 +241,17 @@ function noteRepeaterHeard(target, snr, rssi) {
     targetGapMs: cfg.regionTargetGapSec * 1000,
     maxAsks: cfg.regionMaxAsks,
     forgetMs: cfg.regionForgetMin * 60000,
-  });
+    bonusSnrDb: cfg.regionBonusSnrDb,
+  }, snr);
   if (verdict === 'queued-now') r.queued++;
   else if (verdict === 'capped') r.capped++;
+  else if (verdict === 'limiter') r.limited++;
+  else if (verdict === 'bonus') {
+    r.queued++;
+    r.bonus++;
+    dbg('regions: heard ' + target.slice(0, 12) + '… at snr ' + snr
+      + ', well above the ' + r.targets.get(target).bestAskSnr + ' its asks went out on — one more ask', 'st');
+  }
 }
 
 // regionTick drains the queue and retires requests too old to be answered. Driven by
@@ -294,8 +303,10 @@ async function askRepeater(target) {
   r.busy = true;
   r.lastSentAt = Date.now();
   // Stamped at the transmission, not when the target was queued: a target that waited
-  // its turn behind others still gets its full gap measured from THIS ask onward.
-  markAsked(r.targets, target, r.lastSentAt);
+  // its turn behind others still gets its full gap measured from THIS ask onward. The
+  // signal goes in too — it is what a later reception has to beat to earn a bonus ask.
+  const sig = r.lastSignal.get(target) ?? { snr: null, rssi: null };
+  markAsked(r.targets, target, r.lastSentAt, sig.snr);
   let overrode = false;
   try {
     const frame = buildRegionsRequest(target);
@@ -318,7 +329,6 @@ async function askRepeater(target) {
       dbg('regions: ' + target.slice(0, 12) + '… went out over FLOOD — repeaters only answer DIRECT', 'no');
     } else {
       r.asks++;
-      const sig = r.lastSignal.get(target) ?? { snr: null, rssi: null };
       registerOutstanding(r.outstanding, ack.tag, target, Date.now(), sig.snr, sig.rssi);
       dbg('regions → asked ' + target.slice(0, 12) + '… on snr ' + sig.snr + ' / rssi ' + sig.rssi
         + ' (attempt ' + r.targets.get(target).attempts + ' of ' + getConfig().regionMaxAsks
@@ -1260,7 +1270,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         answered: state.regions.answered.size, queue: state.regions.queue.length,
         outstanding: state.regions.outstanding.size, flooded: state.regions.flooded,
         unmatched: state.regions.unmatched, dropped: state.regions.dropped,
-        capped: state.regions.capped,
+        capped: state.regions.capped, limited: state.regions.limited, bonus: state.regions.bonus,
         sigAnswered: state.regions.sigAnswered, sigSilent: state.regions.sigSilent,
       },
       lineCount: lines.length,

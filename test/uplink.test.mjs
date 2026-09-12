@@ -263,14 +263,14 @@ test('buildLogHeader reports the ask counters', () => {
     uplink: 'ok', pending: 0, lineCount: 1, lineCap: 200,
     asks: {
       heard: 340, seen: 22, asks: 61, replies: 7, answered: 7, queue: 3,
-      outstanding: 5, flooded: 1, unmatched: 2, dropped: 12, capped: 96,
+      outstanding: 5, flooded: 1, unmatched: 2, dropped: 12, capped: 96, limited: 4, bonus: 2,
       sigAnswered: { n: 7, rssiMin: -109, rssiMax: -78, snrMin: 1.75, snrMax: 12.25 },
       sigSilent: { n: 12, rssiMin: -125, rssiMax: -111, snrMin: -13.5, snrMax: -0.5 },
     },
   });
   assert.match(h, /asks {7}7 of 22 repeaters answered — 61 asks sent, 7 answered, over 340 receptions/);
   assert.match(h, /asks q {5}3 queued, 5 awaiting a reply, 12 timed out, 2 unmatched replies, 1 sent as FLOOD/);
-  assert.match(h, /asks cap {3}96 receptions ignored/);
+  assert.match(h, /asks cap {3}96 receptions ignored \(encounter allowance spent\), 4 held off by the repeater limiter, 2 extra asks earned/);
   assert.match(h, /asks sig {3}answered 7: rssi -109 … -78dBm, snr 1.75 … 12.25dB \| silent 12: rssi -125 … -111dBm/);
 });
 

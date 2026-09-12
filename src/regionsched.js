@@ -44,8 +44,29 @@ export const OUTSTANDING_TTL_MS = 120000; // how long an unanswered tag stays ma
 //                meeting say nothing about this one.
 export const DEFAULT_ASK_GAP_MS = 2000;
 export const DEFAULT_TARGET_GAP_MS = 30000;
-export const DEFAULT_MAX_ASKS = 3;
+export const DEFAULT_MAX_ASKS = 4;
 export const DEFAULT_FORGET_MS = 5 * 60000;
+
+// The firmware's limiter, mirrored here as a hard per-target ceiling rather than left
+// to be approximated by maxAsks and the spacing. It is what makes the encounter cap and
+// the bonus below safe to raise: whatever those two allow, no repeater is ever sent
+// more than the four requests per 180s it accepts, and the quota we do not use stays
+// available to other clients. Not configurable — it is not ours to raise.
+export const LIMITER_WINDOW_MS = 180000;
+export const LIMITER_MAX_IN_WINDOW = 4;
+
+// A repeater can spend its whole encounter allowance during a bad stretch and then be
+// heard far better while it still counts as the same encounter. Measured on 2026-09-12:
+// efef79435050 used its three asks between 21:06:50 and 21:08:08, all around -115 dBm
+// and all unanswered, and was then heard from 21:09:37 at -76 to -69 dBm, up to 46 dB
+// stronger, with nothing left to spend. Those were the best receptions of the drive.
+//
+// So a reception this much better in snr than the best one any ask in this encounter
+// went out on buys exactly ONE more ask. Once per encounter, and still under the
+// limiter above. A signal FLOOR was the other candidate and the same drive killed it:
+// two of the three answers came from asks at snr -5.25 and -1.75 dB, which any floor
+// worth setting would have blocked.
+export const DEFAULT_BONUS_SNR_DB = 6;
 
 // noteHeard updates one target's record and reports it. A gap of forgetMs since the
 // last reception starts a NEW encounter: the attempt count and the per-target clock are
@@ -55,41 +76,72 @@ export const DEFAULT_FORGET_MS = 5 * 60000;
 export function noteHeard(targets, target, now, forgetMs) {
   const rec = targets.get(target);
   if (!rec) {
-    const fresh = { attempts: 0, lastAskedAt: null, lastHeardAt: now };
+    const fresh = { attempts: 0, lastAskedAt: null, lastHeardAt: now, bestAskSnr: null, bonusUsed: false, sentAt: [] };
     targets.set(target, fresh);
     return fresh;
   }
-  if (now - rec.lastHeardAt >= forgetMs) { rec.attempts = 0; rec.lastAskedAt = null; }
+  if (now - rec.lastHeardAt >= forgetMs) {
+    rec.attempts = 0;
+    rec.lastAskedAt = null;
+    rec.bestAskSnr = null;
+    rec.bonusUsed = false;
+    // sentAt is deliberately NOT cleared: the limiter is a property of the repeater's
+    // radio, not of our idea of an encounter, and it ages out on its own clock.
+  }
   rec.lastHeardAt = now;
   return rec;
 }
 
+// recentAsks counts how many asks to this target still fall inside the limiter window,
+// pruning the ones that have aged out as it goes.
+export function recentAsks(rec, now, windowMs = LIMITER_WINDOW_MS) {
+  rec.sentAt = (rec.sentAt ?? []).filter((t) => now - t < windowMs);
+  return rec.sentAt.length;
+}
+
 // enqueue records that this repeater was heard again, and is the only thing that ever
-// creates an ask. Four reasons it says no, and the reason is returned rather than a
-// bare false so the log can say which:
+// creates an ask. `snr` is this reception's signal and may be null. The verdict is
+// returned rather than a bare false so the log can say which rule spoke:
 //   'answered'  it declared its list: done for this session, no encounter reopens it
 //   'queued'    already waiting; queueing each reception would ask it twice in a row
 //               with nothing heard in between, which measures the queue not the mesh
-//   'capped'    this encounter has used its maxAsks
+//   'limiter'   four asks to it already inside the firmware's 180s window
+//   'capped'    this encounter has used its maxAsks and this reception is not enough
+//               better than the ones already spent to earn the bonus
 //   'too-soon'  asked less than targetGapMs ago
-export function enqueue(queue, target, answered, targets, now, opts) {
+//   'bonus'     capped, but heard enough stronger to be worth one more — queued
+export function enqueue(queue, target, answered, targets, now, opts, snr = null) {
   const rec = noteHeard(targets, target, now, opts.forgetMs);
   if (answered.has(target)) return 'answered';
   if (queue.includes(target)) return 'queued';
-  if (rec.attempts >= opts.maxAsks) return 'capped';
+  if (recentAsks(rec, now) >= LIMITER_MAX_IN_WINDOW) return 'limiter';
+  let bonus = false;
+  if (rec.attempts >= opts.maxAsks) {
+    const gain = opts.bonusSnrDb ?? DEFAULT_BONUS_SNR_DB;
+    const better = snr != null && rec.bestAskSnr != null && snr - rec.bestAskSnr >= gain;
+    if (rec.bonusUsed || !better) return 'capped';
+    bonus = true;
+  }
   if (rec.lastAskedAt != null && now - rec.lastAskedAt < opts.targetGapMs) return 'too-soon';
+  if (bonus) rec.bonusUsed = true; // spent on queueing, not on sending: a bonus that
+  // never leaves the queue because the repeater answered in the meantime has cost
+  // nothing, and tracking it through the queue would buy nothing back.
   queue.push(target);
-  return 'queued-now';
+  return bonus ? 'bonus' : 'queued-now';
 }
 
 // markAsked counts the attempt and stamps the per-target clock. Called when an ask is
 // actually transmitted, never when one is merely queued, so a target that sat in the
 // queue behind others is held off from the moment it went out rather than from the
 // moment it was heard.
-export function markAsked(targets, target, now) {
-  const rec = targets.get(target) ?? { attempts: 0, lastAskedAt: null, lastHeardAt: now };
+export function markAsked(targets, target, now, snr = null) {
+  const rec = targets.get(target) ?? { attempts: 0, lastAskedAt: null, lastHeardAt: now, bestAskSnr: null, bonusUsed: false, sentAt: [] };
   rec.attempts++;
   rec.lastAskedAt = now;
+  rec.sentAt = (rec.sentAt ?? []).concat(now);
+  // The best reception any ask has gone out on, which is what a later one has to beat
+  // to earn the bonus. Tracked here rather than at enqueue so it reflects transmissions.
+  if (snr != null && (rec.bestAskSnr == null || snr > rec.bestAskSnr)) rec.bestAskSnr = snr;
   targets.set(target, rec);
 }
 

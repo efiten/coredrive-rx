@@ -79,6 +79,10 @@ export function normalizeConfig(raw) {
     regionTargetGapSec: positiveSeconds(raw.regionTargetGapSec, 30),
     regionMaxAsks: positiveSeconds(raw.regionMaxAsks, 3),
     regionForgetMin: positiveSeconds(raw.regionForgetMin, 5),
+    //   regionBonusSnrDb     how much better in snr a reception has to be than the best
+    //                        one this encounter already spent an ask on, to buy one
+    //                        extra ask. Set from one field case, so it is a knob.
+    regionBonusSnrDb: positiveSeconds(raw.regionBonusSnrDb, 6),
   };
   if (!c.mqttUrl) throw new Error('config.json: "mqttUrl" is required');
   return c;

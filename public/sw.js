@@ -1,7 +1,7 @@
 // Minimal service worker: makes the app installable and lets the shell load
 // offline. Network-first (always fresh online), cache fallback (offline).
 // Only the static app assets go through fetch; MQTT runs over WSS (not cached).
-const CACHE = 'coredrive-rx-v45';
+const CACHE = 'coredrive-rx-v46';
 
 // config.json is deliberately NEVER cached, in either direction. It is
 // per-deployment runtime config, and a stale copy is worse than none: flags added

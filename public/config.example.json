@@ -12,5 +12,6 @@
   "regionAskGapSec": 2,
   "regionTargetGapSec": 30,
   "regionMaxAsks": 3,
-  "regionForgetMin": 5
+  "regionForgetMin": 5,
+  "regionBonusSnrDb": 6
 }
