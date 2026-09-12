@@ -1492,7 +1492,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         resolved: Array.from(state.pathResolve.values()).filter(Boolean).length,
       },
       beta: REGION_BETA ? {
-        heard: state.beta.heard, queued: state.beta.queued,
+        heard: state.beta.heard, seen: state.beta.targets.size,
         asks: state.beta.asks, replies: state.beta.replies,
         answered: state.beta.answered.size, queue: state.beta.queue.length,
         outstanding: state.beta.outstanding.size, flooded: state.beta.flooded,

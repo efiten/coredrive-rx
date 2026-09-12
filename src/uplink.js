@@ -158,8 +158,12 @@ export function buildLogHeader(info) {
   // production scheduler ever did. Two separate denominators on purpose — how many
   // repeaters answered at all, and how many asks that took.
   if (beta) {
-    lines.push(row('beta', beta.answered + ' of ' + beta.queued + ' repeaters answered, '
-      + beta.asks + ' asks sent (' + beta.replies + ' answered) from ' + beta.heard + ' receptions'));
+    // Three different denominators, and conflating any two of them makes the result
+    // unreadable: repeaters SEEN is distinct nodes, asks SENT is transmissions, and
+    // receptions is how often those nodes were heard at all. An earlier version of this
+    // row said "6 of 15 repeaters answered" where the 15 counted queue entries.
+    lines.push(row('beta', beta.answered + ' of ' + beta.seen + ' repeaters answered — '
+      + beta.asks + ' asks sent, ' + beta.replies + ' answered, over ' + beta.heard + ' receptions'));
     lines.push(row('beta q', beta.queue + ' queued, ' + beta.outstanding + ' awaiting a reply, '
       + beta.dropped + ' timed out, ' + beta.unmatched + ' unmatched replies, ' + beta.flooded + ' sent as FLOOD'));
     lines.push(row('beta cap', beta.capped + ' receptions ignored — that repeater had used its asks for this encounter'));
