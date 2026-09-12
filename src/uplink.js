@@ -159,9 +159,10 @@ export function buildLogHeader(info) {
   // repeaters answered at all, and how many asks that took.
   if (beta) {
     lines.push(row('beta', beta.answered + ' of ' + beta.queued + ' repeaters answered, '
-      + beta.asks + ' asks sent (' + beta.replies + ' answered)'));
+      + beta.asks + ' asks sent (' + beta.replies + ' answered) from ' + beta.heard + ' receptions'));
     lines.push(row('beta q', beta.queue + ' queued, ' + beta.outstanding + ' awaiting a reply, '
       + beta.dropped + ' timed out, ' + beta.unmatched + ' unmatched replies, ' + beta.flooded + ' sent as FLOOD'));
+    lines.push(row('beta cap', beta.capped + ' receptions ignored — that repeater had used its asks for this encounter'));
   }
 
   if (companionPubkey) {

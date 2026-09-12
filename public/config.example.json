@@ -6,5 +6,11 @@
   "fullRfLog": true,
   "rfSampler": true,
   "regionDiscovery": true,
-  "verifyAdverts": false
+  "verifyAdverts": false,
+
+  "_beta": "REGION_BETA builds only (rx.on8ar.eu/beta). Ignored by a production build.",
+  "betaAskGapSec": 2,
+  "betaTargetGapSec": 15,
+  "betaMaxAsks": 6,
+  "betaForgetMin": 5
 }

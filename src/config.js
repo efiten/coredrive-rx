@@ -44,6 +44,15 @@ let inFlight = null; // in-flight loadConfig promise, so concurrent retries shar
 // normalizeConfig validates + normalizes a parsed config.json object. Throws on
 // a missing required field (mqttUrl). resolveUrl is optional (empty = node-name
 // resolution disabled).
+// positiveSeconds reads a tuning value that must be a real number of seconds. A
+// missing key takes the default; anything unusable (a string, a negative, NaN) also
+// takes it rather than disabling the throttle it configures — a typo in config.json
+// must never turn into "no limit at all" on a transmitting path.
+function positiveSeconds(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 export function normalizeConfig(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config.json: expected a JSON object');
   const c = {
@@ -56,6 +65,30 @@ export function normalizeConfig(raw) {
     fullRfLog: featureEnabled(raw, 'fullRfLog'),
     rfSampler: featureEnabled(raw, 'rfSampler'),
     regionDiscovery: featureEnabled(raw, 'regionDiscovery'),
+    // Two separate throttles for the beta experiment (src/regionsprint.js), both
+    // seconds, both tunable on the server without a rebuild — that is the point of a
+    // measurement rig. They answer different questions and must not be conflated:
+    //
+    //   betaAskGapSec      minimum gap between ANY two transmitted asks. Keeps two
+    //                      rounds from overlapping and bounds total airtime.
+    //   betaTargetGapSec   minimum gap between two asks to the SAME repeater. A node
+    //                      held in range is heard many times a minute; this is what
+    //                      decides how often each reception is allowed to become an
+    //                      ask, and simple_repeater drops anon requests past 4 per
+    //                      180s, so asking one node faster than that cannot help.
+    //
+    // Ignored entirely by a production build, where neither throttle exists.
+    betaAskGapSec: positiveSeconds(raw.betaAskGapSec, 2),
+    betaTargetGapSec: positiveSeconds(raw.betaTargetGapSec, 15),
+    // And the two that END the asking. Without them the only exit is a reply, so a
+    // repeater held in range that never answers is asked every betaTargetGapSec for
+    // the rest of the session.
+    //
+    //   betaMaxAsks     unanswered asks one repeater gets per encounter
+    //   betaForgetMin   silence after which the next reception is a NEW encounter and
+    //                   the count starts over
+    betaMaxAsks: positiveSeconds(raw.betaMaxAsks, 6),
+    betaForgetMin: positiveSeconds(raw.betaForgetMin, 5),
   };
   if (!c.mqttUrl) throw new Error('config.json: "mqttUrl" is required');
   return c;

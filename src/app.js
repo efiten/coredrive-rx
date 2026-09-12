@@ -33,7 +33,8 @@ import { heardKeyAfterVerify } from './advertsig.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
 import { buildRegionsRequest, parseRegionsResponse, parseSentAck, applyRegionsReply, heardAskDecision, pendingExpired, PENDING_TIMEOUT_MS, recordCandidate, commitAsk, undoAsk, SKIP_IN_FLIGHT, SKIP_BUDGET, SKIP_ANSWERED } from './regionreq.js';
 import {
-  enqueue, dueToSend, takeNext, registerOutstanding, matchOutstanding, pruneOutstanding, markAnswered,
+  enqueue, dueToSend, takeNext, registerOutstanding, matchOutstanding, pruneOutstanding,
+  markAnswered, markAsked,
 } from './regionsprint.js';
 import { regionsRows } from './regionsview.js';
 import { uplinkState, uplinkWarning, pushOutcome, regionInertReason, buildLogHeader, REGION_DISCOVERY_MIN_FW } from './uplink.js';
@@ -95,9 +96,12 @@ const state = {
   // takes a repeater out of rotation. The counters exist because the 200-line ring
   // buffer rolls the per-ask lines out long before a drive ends.
   beta: {
-    queue: [], answered: new Set(), outstanding: new Map(),
+    // targets: pubkey -> { attempts, lastAskedAt, lastHeardAt } for the CURRENT
+    // encounter. attempts is what the per-encounter cap counts and what a long enough
+    // silence resets; answered is separate because it outlives every encounter.
+    queue: [], answered: new Set(), outstanding: new Map(), targets: new Map(),
     lastSentAt: null, busy: false, overrideRaw: null,
-    queued: 0, asks: 0, replies: 0, flooded: 0, unmatched: 0, dropped: 0,
+    queued: 0, heard: 0, asks: 0, replies: 0, flooded: 0, unmatched: 0, dropped: 0, capped: 0,
   },
   // pathResolve: path-hash prefix -> whether it ever resolved to a full pubkey.
   // A Map, not two counters, because resolvePubkey is called on EVERY reception from
@@ -323,8 +327,16 @@ const BETA_OVERRIDE_HOLD_MS = 20000;
 function betaEnqueue(target) {
   if (!state.transport) return;
   const b = state.beta;
-  if (!featureEnabled(getConfig(), 'regionDiscovery') || !state.regions.supported) { noteRegionInert(); return; }
-  if (enqueue(b.queue, target, b.answered)) b.queued++;
+  const cfg = getConfig();
+  if (!featureEnabled(cfg, 'regionDiscovery') || !state.regions.supported) { noteRegionInert(); return; }
+  b.heard++;
+  const verdict = enqueue(b.queue, target, b.answered, b.targets, Date.now(), {
+    targetGapMs: cfg.betaTargetGapSec * 1000,
+    maxAsks: cfg.betaMaxAsks,
+    forgetMs: cfg.betaForgetMin * 60000,
+  });
+  if (verdict === 'queued-now') b.queued++;
+  else if (verdict === 'capped') b.capped++;
 }
 
 // betaTick drains the queue. Called from the one-second monitor tick rather than its
@@ -333,7 +345,7 @@ function betaEnqueue(target) {
 function betaTick(now) {
   const b = state.beta;
   b.dropped += pruneOutstanding(b.outstanding, now);
-  if (!dueToSend(b.queue, now, b.lastSentAt, b.busy)) return;
+  if (!dueToSend(b.queue, now, b.lastSentAt, b.busy, getConfig().betaAskGapSec * 1000)) return;
   const target = takeNext(b.queue, b.answered);
   if (!target) return;
   betaAsk(target);
@@ -367,6 +379,9 @@ async function betaAsk(target) {
   const b = state.beta;
   b.busy = true;
   b.lastSentAt = Date.now();
+  // Stamped here, at the transmission, not when the target was queued: a target that
+  // waited its turn behind others must still get its full gap from THIS ask onward.
+  markAsked(b.targets, target, b.lastSentAt);
   let overrode = false;
   try {
     const frame = buildRegionsRequest(target);
@@ -389,8 +404,9 @@ async function betaAsk(target) {
     } else {
       b.asks++;
       registerOutstanding(b.outstanding, ack.tag, target, Date.now());
-      dbg('beta → asked ' + target.slice(0, 12) + '… (queue ' + b.queue.length
-        + ', outstanding ' + b.outstanding.size + ')', 'tx');
+      dbg('beta → asked ' + target.slice(0, 12) + '… (attempt '
+        + b.targets.get(target).attempts + ' of ' + getConfig().betaMaxAsks
+        + ' this encounter, queue ' + b.queue.length + ', outstanding ' + b.outstanding.size + ')', 'tx');
     }
     if (overrode) {
       await new Promise((r) => setTimeout(r, BETA_OVERRIDE_HOLD_MS));
@@ -1476,10 +1492,11 @@ window.addEventListener('DOMContentLoaded', async () => {
         resolved: Array.from(state.pathResolve.values()).filter(Boolean).length,
       },
       beta: REGION_BETA ? {
-        queued: state.beta.queued, asks: state.beta.asks, replies: state.beta.replies,
+        heard: state.beta.heard, queued: state.beta.queued,
+        asks: state.beta.asks, replies: state.beta.replies,
         answered: state.beta.answered.size, queue: state.beta.queue.length,
         outstanding: state.beta.outstanding.size, flooded: state.beta.flooded,
-        unmatched: state.beta.unmatched, dropped: state.beta.dropped,
+        unmatched: state.beta.unmatched, dropped: state.beta.dropped, capped: state.beta.capped,
       } : null,
       lineCount: lines.length,
       lineCap: LOG_LINE_CAP,
