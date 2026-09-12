@@ -1,51 +1,50 @@
-// BETA scheduler for region discovery: ask every repeater, every time it is heard,
-// until it answers. Built as a measurement, not as a replacement for src/regionreq.js.
+// Region-discovery scheduling: which repeater to ask, when, and when to stop.
 //
-// What it deliberately does NOT do, all of which the production scheduler does:
-//   - no shared one-ask-per-60s airtime budget
-//   - no per-target retry backoff (5/15/30 minutes)
-//   - no single in-flight slot: several requests may be outstanding at once, so a
-//     reply can no longer be matched by "the one pending request" and is matched on
-//     the 4-byte tag the companion echoes back instead
+// The rule is that a repeater is asked while we are hearing it, and not otherwise.
+// Everything else here exists to bound that. What this replaced is worth keeping
+// written down, because all three limits seemed reasonable and all three cost answers:
 //
-// The premise under test is that a moving receiver passes from node to node, so the
-// same repeater is never asked often enough to matter. Two things can falsify it and
-// this module is instrumented for both: simple_repeater rate-limits anon requests to
-// 4 per 180s shared across all requesters and all types, and a target parked in range
-// is re-queued on every single reception.
+//   - a shared one-ask-per-60s airtime budget. One ask, from wherever, blocked every
+//     repeater heard in the following minute. The 2026-09-11 log has a repeater heard
+//     at -102 dBm skipped because the budget had gone 31 seconds earlier on the SAME
+//     node at -120.
+//   - a 5/15/30-minute per-target retry backoff counted per session. A repeater asked
+//     once from a bad spot was locked out for the rest of the drive, including when it
+//     was later heard at close range.
+//   - a single in-flight slot with a 20s timeout, which capped the feature at three
+//     asks a minute, and at one per session whenever a request went unanswered.
+//
+// Replies are therefore matched on the 4-byte tag the companion echoes back: several
+// requests can be outstanding at once, and "something is pending" would file one
+// repeater's regions under another.
 //
 // Everything here is pure: no DOM, no transport, no timers. app.js does the wiring.
 
 export const OUTSTANDING_TTL_MS = 120000; // how long an unanswered tag stays matchable
 
-// Two throttles, and they answer different questions. Both come from config.json
-// (betaAskGapSec / betaTargetGapSec) so the rig can be retuned on the server between
-// drives without a rebuild.
+// Four limits, all settable in config.json so a deployment on another mesh can retune
+// them without a rebuild. The two that bound ONE repeater's load come from the
+// firmware's own limiter: simple_repeater accepts 4 anon requests per 180s, shared
+// across every requester and every request type. That is one per 45 seconds for
+// everybody together, so a client that asks one node faster than that cannot be
+// answered and is spending someone else's quota.
 //
-//   askGapMs     between ANY two transmitted asks. Stops two rounds overlapping and
-//                bounds total airtime. Small by design: a burst of five different
-//                repeaters heard at once should all get asked while they are in range.
-//   targetGapMs  between two asks to the SAME repeater. This is the one that matters
-//                for a node parked in range, which is heard many times a minute:
-//                simple_repeater drops anon requests past 4 per 180s shared across all
-//                requesters, so asking one node faster than that cannot help and may
-//                exhaust its limiter for everyone.
+//   askGapMs     between ANY two transmitted asks. Small by design: five different
+//                repeaters heard at once should all be asked while they are in range.
+//   targetGapMs  between two asks to the SAME repeater. 30s is deliberately shorter
+//                than the limiter's 45s, because at road speed a node is often out of
+//                range before 45 seconds are up: the real choice there is between one
+//                more try and no second try at all.
+//   maxAsks      unanswered asks per ENCOUNTER, and this is what keeps the total
+//                inside the limiter rather than targetGapMs — three asks 30s apart is
+//                3 in any 180s window, under the 4 the firmware allows.
+//   forgetMs     silence after which the next reception counts as a NEW encounter with
+//                a fresh run. The same repeater met again 40 km later is a different
+//                distance and a different antenna aspect; the failures of the last
+//                meeting say nothing about this one.
 export const DEFAULT_ASK_GAP_MS = 2000;
-export const DEFAULT_TARGET_GAP_MS = 15000;
-
-// And two rules that end the asking, because "until it answers" on its own never ends:
-// a repeater you keep hearing and that never replies would be asked every targetGap for
-// the rest of the session.
-//
-//   maxAsks    how many unanswered asks one repeater gets per ENCOUNTER. Past this it
-//              is dropped, answered or not. simple_repeater allows 4 anon requests per
-//              180s across all requesters, so a run much longer than that is spending
-//              airtime on a limiter that is already refusing.
-//   forgetMs   how long a repeater must be out of earshot before the next reception
-//              counts as a NEW encounter and gives it a fresh run of maxAsks. This is
-//              what keeps a node met again 40 km later from being written off by a run
-//              of failed asks in a spot where it was barely audible.
-export const DEFAULT_MAX_ASKS = 6;
+export const DEFAULT_TARGET_GAP_MS = 30000;
+export const DEFAULT_MAX_ASKS = 3;
 export const DEFAULT_FORGET_MS = 5 * 60000;
 
 // noteHeard updates one target's record and reports it. A gap of forgetMs since the
@@ -114,10 +113,11 @@ export function takeNext(queue, answered) {
 }
 
 // registerOutstanding also files the signal of the reception that triggered this ask.
-// Three logs in a row suggested a clean split — every answer came from a reception at
-// about -109 dBm or better, every ask at -111 or worse stayed silent — but that was
-// assembled by hand from pairs of log lines, and the per-ask lines roll out of the ring
-// buffer. Carrying the signal WITH the request is what turns that into a measurement.
+// Four logs point at a clean split: of the eleven asks whose trigger signal could be
+// recovered by hand, every one at snr +1.75 dB or better was answered and every one at
+// -1.25 dB or worse stayed silent. That reading had to be assembled from pairs of log
+// lines the ring buffer rolls out mid-drive. Carrying the signal WITH the request is
+// what turns it into a measurement, and a signal floor is the next thing it can justify.
 export function registerOutstanding(outstanding, tag, target, now, snr, rssi) {
   outstanding.set(tag, { target, sentAt: now, snr, rssi });
 }
@@ -163,7 +163,7 @@ export function matchOutstanding(outstanding, parsed) {
 // pruneOutstanding drops tags too old to still be answered and RETURNS those records,
 // because a request that timed out is the negative half of the signal measurement: the
 // reception that produced it is one the repeater did not answer from. Unbounded growth
-// is the other reason it exists — this beta transmits far more than it gets back.
+// is the other reason it exists — most asks are never answered.
 export function pruneOutstanding(outstanding, now, ttlMs = OUTSTANDING_TTL_MS) {
   const dropped = [];
   for (const [tag, rec] of outstanding) {

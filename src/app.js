@@ -20,7 +20,6 @@ import { createLocalMap } from './localmap.js';
 import { hexCellAt } from './hexgrid.js';
 import {
   discoverDecision, isOrganicHeard, snrToPct, decayPeak, pruneTimestamps,
-  REGION_INTERVAL_MS,
 } from './monitor.js';
 import { shareLog } from './sharelog.js';
 import { Gps } from './gps.js';
@@ -31,11 +30,11 @@ import { loadConfig, getConfig, featureEnabled } from './config.js';
 import { buildRfLogRecord } from './capture.js';
 import { heardKeyAfterVerify } from './advertsig.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
-import { buildRegionsRequest, parseRegionsResponse, parseSentAck, applyRegionsReply, heardAskDecision, pendingExpired, PENDING_TIMEOUT_MS, recordCandidate, commitAsk, undoAsk, SKIP_IN_FLIGHT, SKIP_BUDGET, SKIP_ANSWERED } from './regionreq.js';
+import { buildRegionsRequest, parseRegionsResponse, parseSentAck } from './regionreq.js';
 import {
   enqueue, dueToSend, takeNext, registerOutstanding, matchOutstanding, pruneOutstanding,
   markAnswered, markAsked, newSignalRange, noteSignal,
-} from './regionsprint.js';
+} from './regionsched.js';
 import { regionsRows } from './regionsview.js';
 import { uplinkState, uplinkWarning, pushOutcome, regionInertReason, buildLogHeader, REGION_DISCOVERY_MIN_FW } from './uplink.js';
 import {
@@ -69,43 +68,31 @@ const state = {
   lastHeardAt: null, lastFireAt: 0, tick: null,
   // RF environment sampler
   rfTimer: null, lastRfSample: null, rfGen: 0,
-  // Region discovery (ANON_REQ_TYPE_REGIONS) — purely event-driven: a repeater is
-  // asked while we are hearing it, never on a clock (see heardAskDecision in
-  // src/regionreq.js). candidates holds the answered-key per known repeater and
-  // answered what each one replied with; pending holds the one outstanding request
-  // this app ever has in flight; supported reflects the FIRMWARE_VER_CODE gate.
+  // Region discovery (ANON_REQ_TYPE_REGIONS) — purely reception-driven: a repeater is
+  // asked while we are hearing it, never on a clock (src/regionsched.js holds the
+  // rules). supported reflects the FIRMWARE_VER_CODE gate.
+  //
+  //   queue        repeaters heard and not yet asked, drained one ask at a time
+  //   targets      pubkey -> { attempts, lastAskedAt, lastHeardAt } for the CURRENT
+  //                encounter; attempts is what the per-encounter cap counts
+  //   answered     declared its list: out of rotation for the whole session
+  //   outstanding  sent tag -> the request it belongs to, since several can be in
+  //                flight and the tag is the only thing that tells them apart
+  //   lastSignal   the signal of the most recent reception per repeater, so the ask
+  //                that follows can be filed under the conditions that produced it
   regions: {
-    candidates: new Map(), answered: new Map(),
-    // attempts/lastAskedAt drive the per-target retry backoff: a repeater that never
-    // answers must not be asked again on the next pass.
-    attempts: new Map(), lastAskedAt: new Map(),
-    lastAskAt: null, lastSkipLogAt: null, pending: null, supported: false,
-    // overridePending: { target, raw, timer } while a saved contact's out_path is
-    // temporarily forced to zero-hop for the ask currently in flight (see
-    // prepareAndAskRegions / finishOverrideRound below). null the rest of the time.
-    overridePending: null,
+    supported: false,
+    queue: [], targets: new Map(), answered: new Set(), outstanding: new Map(), lastSignal: new Map(),
+    lastSentAt: null, busy: false, overrideRaw: null,
+    heard: 0, queued: 0, asks: 0, replies: 0, flooded: 0, unmatched: 0, dropped: 0, capped: 0,
+    // The signal each ask went out on, split by what came back. If these two ranges
+    // do not overlap, a signal floor is worth having and this says where it sits.
+    sigAnswered: newSignalRange(), sigSilent: newSignalRange(),
     // answers: accepted replies, oldest first, for the Home "declared scopes" panel
     // (src/regionsview.js does the last-5/most-recent-first transform). Each entry
     // is { target, regions, truncated, at, name }; name is filled in lazily once
     // resolveName returns (see noteRegionsAnswer).
     answers: [],
-  },
-  // beta: state for the unthrottled experiment (REGION_BETA builds only, see
-  // src/regionsprint.js). queue holds targets heard and not yet asked, outstanding maps
-  // a sent tag to the target that must answer it, answered is the one thing that ever
-  // takes a repeater out of rotation. The counters exist because the 200-line ring
-  // buffer rolls the per-ask lines out long before a drive ends.
-  beta: {
-    // targets: pubkey -> { attempts, lastAskedAt, lastHeardAt } for the CURRENT
-    // encounter. attempts is what the per-encounter cap counts and what a long enough
-    // silence resets; answered is separate because it outlives every encounter.
-    queue: [], answered: new Set(), outstanding: new Map(), targets: new Map(), lastSignal: new Map(),
-    lastSentAt: null, busy: false, overrideRaw: null,
-    queued: 0, heard: 0, asks: 0, replies: 0, flooded: 0, unmatched: 0, dropped: 0, capped: 0,
-    // The signal of the reception that triggered each ask, split by what came back.
-    // If these two ranges do not overlap, a signal floor is worth having and the log
-    // says where it sits; if they do overlap, the idea is dead and this says that too.
-    sigAnswered: newSignalRange(), sigSilent: newSignalRange(),
   },
   // pathResolve: path-hash prefix -> whether it ever resolved to a full pubkey.
   // A Map, not two counters, because resolvePubkey is called on EVERY reception from
@@ -121,11 +108,6 @@ const REGIONS_ANSWERS_MAX = 200; // display only shows the last 5 (regionsview.j
 const HEX_COUNT_RES = 10; // fixed res (~90 m cells) for the distinct-hex session counter
 // Build version, injected from package.json by Vite (see vite.config.js).
 const VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev';
-// REGION_BETA: the unthrottled region-discovery experiment, compiled in only by
-// `REGION_BETA=1 vite build` (see vite.config.js). A normal build folds this to false
-// and drops every branch below it, so the production scheduler is untouched.
-const REGION_BETA = typeof __REGION_BETA__ !== 'undefined' ? __REGION_BETA__ : false;
-
 // SNR → colour bucket (LoRa-ish). Returns a CSS colour.
 function snrColor(snr) {
   if (snr == null) return '#95a5a6';
@@ -228,145 +210,61 @@ function fireDiscover(now) {
 }
 
 // --- Region discovery (outbound: what does a repeater CLAIM to forward?) ---
-// The ONLY part of this app that transmits addressed to one specific node. Asking
-// only works zero-hop DIRECT and this receiver is moving, so the ask is driven by
-// receptions and nothing else: maybeAskHeardTarget fires it the moment a suitable
-// repeater is actually heard (see the heard-packet handler below).
-//
-// There is deliberately no timer fallback any more. One used to pick a second target
-// off a 60s clock from the whole session pool, with no notion of whether that node
-// was still in range: in the 2026-09-11 commute log four such asks went to repeaters
-// last heard three to six minutes earlier and none was answered, while the single ask
-// that fired on a live reception was answered in two seconds. It also charged each of
-// those targets an attempt and pushed them into the 5/15/30-minute backoff, so the
-// repeaters that WERE in range could not be asked when we next heard them — the
-// fallback was consuming the feature it was meant to back up.
-const REGION_SENT_ACK_TIMEOUT_MS = 4000;
+// The ONLY part of this app that transmits addressed to one specific node. A request
+// is answered only over a zero-hop DIRECT route, so it is worth sending exactly while
+// the repeater's radio is demonstrably in range: every ask below is triggered by a
+// reception of that repeater and by nothing else. src/regionsched.js holds the rules
+// and the reasons; this is the wiring, the BLE round and the logging.
+const REGION_ACK_TIMEOUT_MS = 4000;
+// How long a contact whose stored path was forced to zero-hop is held that way before
+// it is put back. Whether restoring earlier costs the reply is a firmware question
+// nothing here can answer, so the hold stays as long as a reply might plausibly take.
+// A round that needs an override blocks the queue for this long; overrides were needed
+// twice across four field logs.
+const OVERRIDE_HOLD_MS = 20000;
 
-// expireStalePendingAsk frees the single pending slot once its round is over. Driven
-// by the one-second tick rather than a setTimeout on purpose: this app is routinely
-// backgrounded on a phone mid-drive, where a timer fires late or not at all, and the
-// slot is exactly what must not be held hostage by a suspended page.
-function expireStalePendingAsk(now) {
-  const r = state.regions;
-  if (!pendingExpired(r.pending, now)) return;
-  const target = r.pending.target;
-  r.pending = null;
-  // A silent repeater is not a repeater that declared nothing, so it keeps its
-  // attempts count — the retry backoff, not this, decides when it is asked again.
-  // All this releases is the in-flight slot.
-  dbg('regions: no reply from ' + target.slice(0, 12) + '… within '
-    + Math.round(PENDING_TIMEOUT_MS / 1000) + 's — slot freed for the next repeater heard', 'st');
-  finishOverrideRound(target); // no-op unless this round overrode the contact's path
-}
-
-// noteAskSkipped explains, at most once a minute, why a repeater we are hearing is
-// not being asked. The timer sweep used to narrate the scheduler once a minute; with
-// it gone, a log that shows receptions and no asks would otherwise be equally
-// consistent with four different states and identify none of them.
-function noteAskSkipped(target, decision, now) {
-  const r = state.regions;
-  if (r.lastSkipLogAt != null && now - r.lastSkipLogAt < REGION_INTERVAL_MS) return;
-  r.lastSkipLogAt = now;
-  const who = target.slice(0, 12) + '…';
-  const secs = (ms) => Math.max(1, Math.round(ms / 1000)) + 's';
-  const why = decision.why === SKIP_IN_FLIGHT
-    ? 'the ask to ' + decision.target.slice(0, 12) + '… is still in flight'
-    : decision.why === SKIP_BUDGET
-      ? 'the shared airtime budget has ' + secs(decision.waitMs) + ' to run'
-      : decision.why === SKIP_ANSWERED
-        ? 'it already declared its list this session'
-        : 'it stayed silent before — backed off for another ' + secs(decision.waitMs);
-  dbg('regions: heard ' + who + ' but not asking — ' + why, 'st');
-}
-
-// maybeAskHeardTarget is the whole scheduler: called right after a repeater is
-// recorded as a region-discovery candidate from a heard packet, it asks THAT repeater
-// while its radio is demonstrably in range, which is the only moment a zero-hop DIRECT
-// ask can be answered. heardAskDecision (src/regionreq.js) is the pure decision; this
-// is just wiring.
-function maybeAskHeardTarget(target, advertTs) {
+// noteRepeaterHeard is called for every reception that identifies a repeater. It
+// decides nothing itself — enqueue does — it just records what was heard and how well.
+function noteRepeaterHeard(target, snr, rssi) {
   if (!state.transport) return;
   const r = state.regions;
   const cfg = getConfig();
   // noteRegionInert says which gate is holding this, exactly once — the four reasons
   // are otherwise indistinguishable from "no repeater heard yet".
   if (!featureEnabled(cfg, 'regionDiscovery') || !r.supported) { noteRegionInert(); return; }
-  const now = Date.now();
-  const decision = heardAskDecision(target, advertTs, r, now);
-  if (!decision.ask) { noteAskSkipped(target, decision, now); return; }
-  dbg('regions: heard ' + target.slice(0, 12) + '… directly — asking now', 'st');
-  commitAndAsk(target, advertTs);
-}
-
-// commitAndAsk books one ask (commitAsk in src/regionreq.js) and sends it. The receipt
-// it gets back is what undoes the booking if the write never reaches the radio.
-function commitAndAsk(target, advertTs) {
-  const r = state.regions;
-  // Build the frame BEFORE committing any scheduler state: buildRegionsRequest throws
-  // on a malformed pubkey, and a throw here must not leave attempts/pending mutated
-  // for a request that was never sent — that would escape its caller (the heard-packet
-  // handler) and skip the rest of that handler's work.
-  const frame = buildRegionsRequest(target);
-  const receipt = commitAsk(r, target, advertTs, Date.now());
-  prepareAndAskRegions(target, frame, receipt);
-}
-
-// --- BETA: unthrottled ask path (src/regionsprint.js) -------------------------
-// Compiled in only by REGION_BETA=1. Everything above this block is bypassed: no
-// airtime budget, no per-target backoff, no single in-flight slot. Every reception of
-// a repeater queues it, the queue drains one ask per 2s, and a target is dropped only
-// once it has answered. Replies are matched on the echoed tag, which is the only thing
-// that can tell several outstanding requests apart.
-const BETA_ACK_TIMEOUT_MS = 4000;
-// How long a contact whose path was forced to zero-hop is held that way. Unchanged
-// from the production path on purpose: whether a restore before the reply arrives
-// costs the reply is a firmware question this experiment is not the place to answer.
-// A round that needs an override therefore blocks the queue for this long; overrides
-// were needed twice in three field logs, so it is rare.
-const BETA_OVERRIDE_HOLD_MS = 20000;
-
-// betaEnqueue is the beta twin of maybeAskHeardTarget: it decides nothing, it just
-// records that this repeater was heard again.
-function betaEnqueue(target, snr, rssi) {
-  if (!state.transport) return;
-  const b = state.beta;
-  const cfg = getConfig();
-  if (!featureEnabled(cfg, 'regionDiscovery') || !state.regions.supported) { noteRegionInert(); return; }
-  b.heard++;
-  // The signal of THIS reception, kept on the target so the ask that follows can be
-  // filed under the conditions that produced it. Overwritten by every later reception:
-  // the one that matters is the one the ask actually went out on.
-  b.lastSignal.set(target, { snr, rssi });
-  const verdict = enqueue(b.queue, target, b.answered, b.targets, Date.now(), {
-    targetGapMs: cfg.betaTargetGapSec * 1000,
-    maxAsks: cfg.betaMaxAsks,
-    forgetMs: cfg.betaForgetMin * 60000,
+  r.heard++;
+  // Overwritten by every later reception: the signal that matters is the one the ask
+  // actually goes out on, not the one that first put this repeater in the queue.
+  r.lastSignal.set(target, { snr, rssi });
+  const verdict = enqueue(r.queue, target, r.answered, r.targets, Date.now(), {
+    targetGapMs: cfg.regionTargetGapSec * 1000,
+    maxAsks: cfg.regionMaxAsks,
+    forgetMs: cfg.regionForgetMin * 60000,
   });
-  if (verdict === 'queued-now') b.queued++;
-  else if (verdict === 'capped') b.capped++;
+  if (verdict === 'queued-now') r.queued++;
+  else if (verdict === 'capped') r.capped++;
 }
 
-// betaTick drains the queue. Called from the one-second monitor tick rather than its
-// own timer: the app is routinely backgrounded mid-drive, where a setInterval fires
-// late or not at all, and the tick is already the thing that survives that.
-function betaTick(now) {
-  const b = state.beta;
-  for (const rec of pruneOutstanding(b.outstanding, now)) {
-    b.dropped++;
-    noteSignal(b.sigSilent, rec.snr, rec.rssi);
+// regionTick drains the queue and retires requests too old to be answered. Driven by
+// the one-second monitor tick rather than its own timer: this app is routinely
+// backgrounded on a phone mid-drive, where a setInterval fires late or not at all.
+function regionTick(now) {
+  const r = state.regions;
+  for (const rec of pruneOutstanding(r.outstanding, now)) {
+    r.dropped++;
+    noteSignal(r.sigSilent, rec.snr, rec.rssi);
   }
-  if (!dueToSend(b.queue, now, b.lastSentAt, b.busy, getConfig().betaAskGapSec * 1000)) return;
-  const target = takeNext(b.queue, b.answered);
+  if (!dueToSend(r.queue, now, r.lastSentAt, r.busy, getConfig().regionAskGapSec * 1000)) return;
+  const target = takeNext(r.queue, r.answered);
   if (!target) return;
-  betaAsk(target);
+  askRepeater(target);
 }
 
-// betaSendAndReadTag sends one request and resolves with the companion's own
+// sendAndReadTag sends one request and resolves with the companion's own
 // RESP_CODE_SENT ack: { tag, isFlood }, or null when the write failed or no ack came.
-// The tag is what every later reply is matched against, so an ask whose tag was never
-// captured is an ask whose answer cannot be attributed to anyone.
-function betaSendAndReadTag(frame) {
+// Every later reply is matched against that tag, so an ask whose tag was never captured
+// is an ask whose answer could not be attributed to anyone — it is not counted.
+function sendAndReadTag(frame) {
   return new Promise((resolve) => {
     if (!state.transport) { resolve(null); return; }
     const onAck = (dv) => {
@@ -375,24 +273,29 @@ function betaSendAndReadTag(frame) {
       cleanup();
       resolve(ack);
     };
-    const timer = setTimeout(() => { cleanup(); resolve(null); }, BETA_ACK_TIMEOUT_MS);
+    const timer = setTimeout(() => { cleanup(); resolve(null); }, REGION_ACK_TIMEOUT_MS);
     function cleanup() { clearTimeout(timer); if (state.transport) state.transport.offFrame(onAck); }
     state.transport.onFrame(onAck);
     state.transport.send(frame).catch((e) => {
       cleanup();
-      dbg('beta: ask never left the phone (' + e.message + ')', 'no');
+      // A write that threw put nothing on the air. It costs the target nothing beyond
+      // the attempt already counted, and the queue moves on rather than waiting it out.
+      dbg('regions: ask never left the phone (' + e.message + ')', 'no');
       resolve(null);
     });
   });
 }
 
-async function betaAsk(target) {
-  const b = state.beta;
-  b.busy = true;
-  b.lastSentAt = Date.now();
-  // Stamped here, at the transmission, not when the target was queued: a target that
-  // waited its turn behind others must still get its full gap from THIS ask onward.
-  markAsked(b.targets, target, b.lastSentAt);
+// askRepeater runs one whole round: the contact-path override if this target needs one,
+// the request, its ack, and the restore. `busy` is held for all of it, so two rounds
+// can never interleave their contact writes.
+async function askRepeater(target) {
+  const r = state.regions;
+  r.busy = true;
+  r.lastSentAt = Date.now();
+  // Stamped at the transmission, not when the target was queued: a target that waited
+  // its turn behind others still gets its full gap measured from THIS ask onward.
+  markAsked(r.targets, target, r.lastSentAt);
   let overrode = false;
   try {
     const frame = buildRegionsRequest(target);
@@ -400,76 +303,41 @@ async function betaAsk(target) {
     if (needsPathOverride(contact)) {
       localStorage.setItem(RESTORE_STORAGE_KEY, encodePendingRestore(state.companionPubkey, target, contact.raw));
       const ok = await writeContact(buildOverrideFrame(contact.raw), CONTACT_WRITE_TIMEOUT_MS);
-      if (!ok) dbg('beta: path override for ' + target.slice(0, 12) + '… did not ack — asking anyway', 'no');
+      if (!ok) dbg('regions: path override for ' + target.slice(0, 12) + '… did not ack — asking anyway', 'no');
       overrode = true;
-      // The production round tracks one override at a time in state.regions; this path
-      // owns its own restore end to end, so it does not touch that field.
-      b.overrideRaw = contact.raw;
+      r.overrideRaw = contact.raw;
     }
-    const ack = await betaSendAndReadTag(frame);
+    const ack = await sendAndReadTag(frame);
     if (ack == null) {
-      dbg('beta: no send-ack for ' + target.slice(0, 12) + '… — ask not counted', 'no');
+      dbg('regions: no send-ack for ' + target.slice(0, 12) + '… — ask not counted', 'no');
     } else if (ack.isFlood) {
-      b.flooded++;
-      dbg('beta: ' + target.slice(0, 12) + '… went out over FLOOD — repeaters only answer DIRECT', 'no');
+      // The companion floods whenever the target is a contact whose out_path is
+      // unknown, and a repeater ignores a flooded request without any error. Saying so
+      // is the difference between "no reply yet" and "no reply can come".
+      r.flooded++;
+      dbg('regions: ' + target.slice(0, 12) + '… went out over FLOOD — repeaters only answer DIRECT', 'no');
     } else {
-      b.asks++;
-      const sig = b.lastSignal.get(target) ?? { snr: null, rssi: null };
-      registerOutstanding(b.outstanding, ack.tag, target, Date.now(), sig.snr, sig.rssi);
-      dbg('beta → asked ' + target.slice(0, 12) + '… on snr ' + sig.snr + ' / rssi ' + sig.rssi + ' (attempt '
-        + b.targets.get(target).attempts + ' of ' + getConfig().betaMaxAsks
-        + ' this encounter, queue ' + b.queue.length + ', outstanding ' + b.outstanding.size + ')', 'tx');
+      r.asks++;
+      const sig = r.lastSignal.get(target) ?? { snr: null, rssi: null };
+      registerOutstanding(r.outstanding, ack.tag, target, Date.now(), sig.snr, sig.rssi);
+      dbg('regions → asked ' + target.slice(0, 12) + '… on snr ' + sig.snr + ' / rssi ' + sig.rssi
+        + ' (attempt ' + r.targets.get(target).attempts + ' of ' + getConfig().regionMaxAsks
+        + ' this encounter, queue ' + r.queue.length + ', outstanding ' + r.outstanding.size + ')', 'tx');
     }
     if (overrode) {
-      await new Promise((r) => setTimeout(r, BETA_OVERRIDE_HOLD_MS));
-      const restored = await writeContact(buildRestoreFrame(b.overrideRaw), CONTACT_WRITE_TIMEOUT_MS);
-      if (restored) { clearPendingRestore(target); dbg('beta: restored ' + target.slice(0, 12) + '…’s original path', 'st'); }
-      else dbg('beta: restore for ' + target.slice(0, 12) + '… did not ack — will retry on next connect', 'no');
+      await new Promise((done) => setTimeout(done, OVERRIDE_HOLD_MS));
+      const restored = await writeContact(buildRestoreFrame(r.overrideRaw), CONTACT_WRITE_TIMEOUT_MS);
+      if (restored) { clearPendingRestore(target); dbg('regions: restored ' + target.slice(0, 12) + '…’s original path', 'st'); }
+      else dbg('regions: restore for ' + target.slice(0, 12) + '… did not ack — will retry on next connect', 'no');
     }
   } catch (e) {
-    dbg('beta: ask to ' + target.slice(0, 12) + '… failed: ' + e.message, 'no');
+    // state.transport is nulled the moment the companion drops, and this round
+    // dereferences it in several places. Without this the rejection is unobserved.
+    dbg('regions: ask to ' + target.slice(0, 12) + '… failed: ' + e.message, 'no');
   } finally {
-    b.overrideRaw = null;
-    b.busy = false;
+    r.overrideRaw = null;
+    r.busy = false;
   }
-}
-
-// betaOnReply is the beta half of onRegionsFrame. Returns whether it consumed the
-// frame, so the production matcher never sees a reply this path has already filed.
-function betaOnReply(parsed) {
-  const b = state.beta;
-  const hit = matchOutstanding(b.outstanding, parsed);
-  if (!hit) {
-    b.unmatched++;
-    dbg('beta ← reply tag ' + parsed.tag + ' matches no outstanding ask — dropped, not attributed', 'no');
-    return true;
-  }
-  b.replies++;
-  noteSignal(b.sigAnswered, hit.snr, hit.rssi);
-  markAnswered(b.answered, b.queue, hit.target);
-  noteRegionsAnswer(hit.target, hit.regions, hit.truncated);
-  state.queue.add({
-    kind: 'regions', at: new Date().toISOString(), target: hit.target,
-    regions: hit.regions, truncated: hit.truncated, repeater_clock: hit.repeaterClock,
-    rx_pubkey: state.companionPubkey,
-  }).catch((e) => dbg('beta: regions queue failed: ' + e.message, 'no'));
-  dbg('beta ← ' + hit.target.slice(0, 12) + '… declares: ' + (hit.regions.join(',') || '(none)')
-    + ' — asked on snr ' + hit.snr + ' / rssi ' + hit.rssi
-    + ' (' + b.replies + ' of ' + b.asks + ' asks answered)', 'ok');
-  return true;
-}
-
-// abandonAsk hands a target back everything commitAsk charged it, for a request that
-// never reached the radio: a BLE write that threw put nothing on the air, so it must
-// cost neither an attempt (which triggers the 5/15/30-minute backoff), nor the shared
-// airtime budget, nor 20s of the single pending slot. In the 2026-09-11 commute log
-// two of six asks were exactly this, and both were logged as "no reply within 20s" —
-// indistinguishable from a repeater that heard us and stayed silent.
-function abandonAsk(target, receipt, reason) {
-  if (!undoAsk(state.regions, receipt)) return; // already acked, answered, or superseded
-  dbg('regions: ask to ' + target.slice(0, 12) + '… never left the phone (' + reason
-    + ') — attempt and airtime refunded', 'no');
-  finishOverrideRound(target); // no-op unless this round overrode the contact's path
 }
 
 // --- Contact-path override (src/contactpath.js has the frame layout + decision) ---
@@ -667,36 +535,33 @@ function askRegions(target, frame, receipt) {
 // parseRegionsResponse checks bytes[0] itself — it must see the RAW notification,
 // never parseFrame(...).data (parseFrame strips the leading code byte, which would
 // silently misfire this check and discard every reply with no error anywhere).
+//
+// The reply is attributed on the tag it echoes, never on "a request is outstanding":
+// several are, and guessing would file one repeater's declared regions under another
+// and store it as fact.
 function onRegionsFrame(dv) {
   const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
   const parsed = parseRegionsResponse(bytes);
   if (!parsed) return;
-  if (REGION_BETA && betaOnReply(parsed)) return;
-  const result = applyRegionsReply(state.regions.pending, parsed);
-  if (!result.accepted) {
-    // Do NOT clear pending either way: the real reply for the current target may
-    // still be on its way. Two different facts, logged differently — conflating
-    // them ("tag mismatch" for both) is exactly the kind of ambiguity that costs
-    // time in the field: an ack not back yet is normal and expected shortly, while
-    // an actual tag mismatch is a stray/late reply from an abandoned round.
-    if (state.regions.pending && state.regions.pending.tag == null) {
-      dbg('regions ← reply arrived before the send-ack tag was captured — ignored, not attributed', 'no');
-    } else if (state.regions.pending) {
-      dbg('regions ← reply tag mismatch (got ' + parsed.tag + ', want ' + state.regions.pending.tag + ') — stray/late reply, ignored', 'no');
-    }
+  const r = state.regions;
+  const hit = matchOutstanding(r.outstanding, parsed);
+  if (!hit) {
+    r.unmatched++;
+    dbg('regions ← reply tag ' + parsed.tag + ' matches no outstanding ask — dropped, not attributed', 'no');
     return;
   }
-  state.regions.pending = null;
-  state.regions.answered.set(result.target, result.advertTs);
-  finishOverrideRound(result.target); // no-op unless this round overrode the contact's path
-  noteRegionsAnswer(result.target, result.regions, result.truncated);
-  const fix = currentFix();
+  r.replies++;
+  noteSignal(r.sigAnswered, hit.snr, hit.rssi);
+  markAnswered(r.answered, r.queue, hit.target);
+  noteRegionsAnswer(hit.target, hit.regions, hit.truncated);
   state.queue.add({
-    kind: 'regions', at: new Date().toISOString(), target: result.target,
-    regions: result.regions, truncated: result.truncated, repeater_clock: result.repeaterClock,
-    lat: fix ? fix.lat : null, lon: fix ? fix.lon : null, acc_m: fix ? fix.acc_m : null,
+    kind: 'regions', at: new Date().toISOString(), target: hit.target,
+    regions: hit.regions, truncated: hit.truncated, repeater_clock: hit.repeaterClock,
+    rx_pubkey: state.companionPubkey,
   }).catch((e) => dbg('regions queue failed: ' + e.message, 'no'));
-  dbg('regions ← ' + result.target.slice(0, 12) + '… declares: ' + (result.regions.join(',') || '(none)'), 'ok');
+  dbg('regions ← ' + hit.target.slice(0, 12) + '… declares: ' + (hit.regions.join(',') || '(none)')
+    + ' — asked on snr ' + hit.snr + ' / rssi ' + hit.rssi
+    + ' (' + r.replies + ' of ' + r.asks + ' asks answered)', 'ok');
 }
 
 function renderDiscoverStatus(dec) {
@@ -831,9 +696,8 @@ function monitorTick() {
   else renderDiscoverStatus(dec);
   // The only region-discovery work left on the clock: free a timed-out ask, so the
   // slot is available to the very next repeater heard instead of one tick later. The
-  // asking itself happens on receptions (maybeAskHeardTarget), never on a timer.
-  if (REGION_BETA) betaTick(now);
-  else expireStalePendingAsk(now);
+  // asking itself happens on receptions (noteRepeaterHeard), never on a timer.
+  regionTick(now);
   // A session that started without config must be able to heal without a restart:
   // retry once a minute (not per tick) for as long as it is missing.
   if (!getConfig() && (state.lastConfigTryAt == null || now - state.lastConfigTryAt >= 60000)) {
@@ -1064,9 +928,7 @@ async function processFrame(dv) {
   // sends, and it keeps every stored list demonstrably current instead of assumed.
   const regionsCfg = getConfig();
   if (featureEnabled(regionsCfg, 'regionDiscovery') && hk.src === 'advert' && pkt.advertType === ADV_TYPE_REPEATER && pkt.advertTs != null) {
-    const key = recordCandidate(state.regions.candidates, hk.heardKey, pkt.advertTs);
-    if (REGION_BETA) betaEnqueue(hk.heardKey, f.snr, f.rssi);
-    else maybeAskHeardTarget(hk.heardKey, key);
+    noteRepeaterHeard(hk.heardKey, f.snr, f.rssi);
   }
   // Discover responses are the common case (47h advert intervals mean real adverts are
   // rare) but carry only an 8-byte pubkey prefix in practice — resolve to the full
@@ -1078,11 +940,7 @@ async function processFrame(dv) {
   if (featureEnabled(regionsCfg, 'regionDiscovery') && hk.src === 'discover' && pkt.discoverType === ADV_TYPE_REPEATER) {
     resolvePubkey(hk.heardKey).then((pk) => {
       if (!pk) return;
-      // The effective key, never the null offered — see recordCandidate. Passing the
-      // null would re-ask a repeater that already answered via a real advert.
-      const key = recordCandidate(state.regions.candidates, pk, null);
-      if (REGION_BETA) betaEnqueue(pk, f.snr, f.rssi);
-      else maybeAskHeardTarget(pk, key);
+      noteRepeaterHeard(pk, f.snr, f.rssi);
     });
   }
 
@@ -1108,9 +966,7 @@ async function processFrame(dv) {
     resolvePubkey(hk.heardKey).then((pk) => {
       state.pathResolve.set(hk.heardKey, !!pk);
       if (!pk) return;
-      const key = recordCandidate(state.regions.candidates, pk, null);
-      if (REGION_BETA) betaEnqueue(pk, f.snr, f.rssi);
-      else maybeAskHeardTarget(pk, key);
+      noteRepeaterHeard(pk, f.snr, f.rssi);
     });
   }
 
@@ -1505,14 +1361,15 @@ window.addEventListener('DOMContentLoaded', async () => {
         attempted: state.pathResolve.size,
         resolved: Array.from(state.pathResolve.values()).filter(Boolean).length,
       },
-      beta: REGION_BETA ? {
-        heard: state.beta.heard, seen: state.beta.targets.size,
-        asks: state.beta.asks, replies: state.beta.replies,
-        answered: state.beta.answered.size, queue: state.beta.queue.length,
-        outstanding: state.beta.outstanding.size, flooded: state.beta.flooded,
-        unmatched: state.beta.unmatched, dropped: state.beta.dropped, capped: state.beta.capped,
-        sigAnswered: state.beta.sigAnswered, sigSilent: state.beta.sigSilent,
-      } : null,
+      asks: {
+        heard: state.regions.heard, seen: state.regions.targets.size,
+        asks: state.regions.asks, replies: state.regions.replies,
+        answered: state.regions.answered.size, queue: state.regions.queue.length,
+        outstanding: state.regions.outstanding.size, flooded: state.regions.flooded,
+        unmatched: state.regions.unmatched, dropped: state.regions.dropped,
+        capped: state.regions.capped,
+        sigAnswered: state.regions.sigAnswered, sigSilent: state.regions.sigSilent,
+      },
       lineCount: lines.length,
       lineCap: LOG_LINE_CAP,
     });
@@ -1542,11 +1399,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   window.addEventListener('online', () => {
     retryConfig().finally(() => { drain().then(refreshCounters).catch(() => {}); });
   });
-  // The beta build is served from a subdirectory of the SAME origin as the production
-  // app. Registering '/sw.js' from there would claim the ROOT scope and start serving
-  // the beta bundle to everyone on the production URL, so the experiment ships without
-  // a service worker at all: no offline shell, one less thing to explain in its log.
-  if (!REGION_BETA && 'serviceWorker' in navigator) {
+  if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   }
 });

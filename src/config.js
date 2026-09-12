@@ -65,30 +65,20 @@ export function normalizeConfig(raw) {
     fullRfLog: featureEnabled(raw, 'fullRfLog'),
     rfSampler: featureEnabled(raw, 'rfSampler'),
     regionDiscovery: featureEnabled(raw, 'regionDiscovery'),
-    // Two separate throttles for the beta experiment (src/regionsprint.js), both
-    // seconds, both tunable on the server without a rebuild — that is the point of a
-    // measurement rig. They answer different questions and must not be conflated:
+    // Region-discovery pacing (src/regionsched.js has the reasoning behind each
+    // default). Here so a deployment on another mesh can retune without a rebuild.
     //
-    //   betaAskGapSec      minimum gap between ANY two transmitted asks. Keeps two
-    //                      rounds from overlapping and bounds total airtime.
-    //   betaTargetGapSec   minimum gap between two asks to the SAME repeater. A node
-    //                      held in range is heard many times a minute; this is what
-    //                      decides how often each reception is allowed to become an
-    //                      ask, and simple_repeater drops anon requests past 4 per
-    //                      180s, so asking one node faster than that cannot help.
-    //
-    // Ignored entirely by a production build, where neither throttle exists.
-    betaAskGapSec: positiveSeconds(raw.betaAskGapSec, 2),
-    betaTargetGapSec: positiveSeconds(raw.betaTargetGapSec, 15),
-    // And the two that END the asking. Without them the only exit is a reply, so a
-    // repeater held in range that never answers is asked every betaTargetGapSec for
-    // the rest of the session.
-    //
-    //   betaMaxAsks     unanswered asks one repeater gets per encounter
-    //   betaForgetMin   silence after which the next reception is a NEW encounter and
-    //                   the count starts over
-    betaMaxAsks: positiveSeconds(raw.betaMaxAsks, 6),
-    betaForgetMin: positiveSeconds(raw.betaForgetMin, 5),
+    //   regionAskGapSec      between ANY two transmitted asks
+    //   regionTargetGapSec   between two asks to the SAME repeater
+    //   regionMaxAsks        unanswered asks one repeater gets per encounter; this is
+    //                        what keeps the total inside simple_repeater's limiter of
+    //                        4 anon requests per 180s shared across all requesters
+    //   regionForgetMin      silence after which the next reception counts as a NEW
+    //                        encounter and the count starts over
+    regionAskGapSec: positiveSeconds(raw.regionAskGapSec, 2),
+    regionTargetGapSec: positiveSeconds(raw.regionTargetGapSec, 30),
+    regionMaxAsks: positiveSeconds(raw.regionMaxAsks, 3),
+    regionForgetMin: positiveSeconds(raw.regionForgetMin, 5),
   };
   if (!c.mqttUrl) throw new Error('config.json: "mqttUrl" is required');
   return c;

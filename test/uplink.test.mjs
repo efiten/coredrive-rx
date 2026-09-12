@@ -252,32 +252,34 @@ test('no path-hash prefix tried yet prints no row at all rather than a misleadin
   assert.doesNotMatch(buildLogHeader(BASE), /path keys/);
 });
 
-// --- BETA header rows (REGION_BETA builds only) -------------------------------
-// The unthrottled experiment transmits far more than the production scheduler, so its
-// per-ask lines roll out of the 200-line ring buffer long before a drive ends. The
-// ratios that decide whether it works have to survive in the header.
+// --- Ask counters in the header ----------------------------------------------
+// Region discovery's per-ask lines are the first thing the 200-line ring buffer rolls
+// out on a long drive, so the ratios that say whether it is working have to survive in
+// the header.
 
-test('buildLogHeader reports the beta counters when the experiment is running', () => {
+test('buildLogHeader reports the ask counters', () => {
   const h = buildLogHeader({
-    version: '1.14.0-beta-sprint', nowISO: 'now', config: null, fwVer: 13, regionsSupported: true,
+    version: '1.15.0', nowISO: 'now', config: null, fwVer: 13, regionsSupported: true,
     uplink: 'ok', pending: 0, lineCount: 1, lineCap: 200,
-    beta: {
+    asks: {
       heard: 340, seen: 22, asks: 61, replies: 7, answered: 7, queue: 3,
       outstanding: 5, flooded: 1, unmatched: 2, dropped: 12, capped: 96,
       sigAnswered: { n: 7, rssiMin: -109, rssiMax: -78, snrMin: 1.75, snrMax: 12.25 },
       sigSilent: { n: 12, rssiMin: -125, rssiMax: -111, snrMin: -13.5, snrMax: -0.5 },
     },
   });
-  assert.match(h, /beta {7}7 of 22 repeaters answered — 61 asks sent, 7 answered, over 340 receptions/);
-  assert.match(h, /beta q {5}3 queued, 5 awaiting a reply, 12 timed out, 2 unmatched replies, 1 sent as FLOOD/);
-  assert.match(h, /beta cap {3}96 receptions ignored/);
-  assert.match(h, /beta sig {3}answered asks 7: rssi -109 … -78dBm, snr 1.75 … 12.25dB \| silent asks 12: rssi -125 … -111dBm/);
+  assert.match(h, /asks {7}7 of 22 repeaters answered — 61 asks sent, 7 answered, over 340 receptions/);
+  assert.match(h, /asks q {5}3 queued, 5 awaiting a reply, 12 timed out, 2 unmatched replies, 1 sent as FLOOD/);
+  assert.match(h, /asks cap {3}96 receptions ignored/);
+  assert.match(h, /asks sig {3}answered 7: rssi -109 … -78dBm, snr 1.75 … 12.25dB \| silent 12: rssi -125 … -111dBm/);
 });
 
-test('buildLogHeader leaves the beta rows out of a production build', () => {
+test('buildLogHeader omits the ask rows when nothing passed them', () => {
+  // A caller that does not know about them must not produce a header full of zeros
+  // that reads like a session which asked nothing.
   const h = buildLogHeader({
-    version: '1.14.0', nowISO: 'now', config: null, fwVer: 13, regionsSupported: true,
-    uplink: 'ok', pending: 0, lineCount: 1, lineCap: 200, beta: null,
+    version: '1.15.0', nowISO: 'now', config: null, fwVer: 13, regionsSupported: true,
+    uplink: 'ok', pending: 0, lineCount: 1, lineCap: 200, asks: null,
   });
-  assert.doesNotMatch(h, /beta/);
+  assert.doesNotMatch(h, /asks/);
 });

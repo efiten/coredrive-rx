@@ -120,7 +120,7 @@ function signalRange(r) {
 export function buildLogHeader(info) {
   const {
     version, nowISO, config, fwVer, regionsSupported,
-    companionName, companionPubkey, uplink, pending, lineCount, lineCap, pathResolve, beta,
+    companionName, companionPubkey, uplink, pending, lineCount, lineCap, pathResolve, asks,
   } = info;
   const row = (k, v) => k.padEnd(10) + ' ' + v;
   const onOff = (b) => (b ? 'on' : 'off');
@@ -161,26 +161,21 @@ export function buildLogHeader(info) {
       + (unresolved > 0 ? ' (' + unresolved + ' ambiguous or unknown)' : '')));
   }
 
-  // The unthrottled experiment lives or dies on these ratios, and its per-ask lines are
-  // the first thing the ring buffer rolls out: it transmits far more than the
-  // production scheduler ever did. Two separate denominators on purpose — how many
-  // repeaters answered at all, and how many asks that took.
-  if (beta) {
-    // Three different denominators, and conflating any two of them makes the result
-    // unreadable: repeaters SEEN is distinct nodes, asks SENT is transmissions, and
-    // receptions is how often those nodes were heard at all. An earlier version of this
-    // row said "6 of 15 repeaters answered" where the 15 counted queue entries.
-    lines.push(row('beta', beta.answered + ' of ' + beta.seen + ' repeaters answered — '
-      + beta.asks + ' asks sent, ' + beta.replies + ' answered, over ' + beta.heard + ' receptions'));
-    lines.push(row('beta q', beta.queue + ' queued, ' + beta.outstanding + ' awaiting a reply, '
-      + beta.dropped + ' timed out, ' + beta.unmatched + ' unmatched replies, ' + beta.flooded + ' sent as FLOOD'));
-    lines.push(row('beta cap', beta.capped + ' receptions ignored — that repeater had used its asks for this encounter'));
-    // The question three drives have now raised and none could settle from the ring
-    // buffer: is there a signal below which asking is pointless. Two ranges, one for the
-    // receptions that produced an answer and one for those that produced silence. They
-    // are only an argument for a floor if they do NOT overlap.
-    lines.push(row('beta sig', 'answered asks ' + signalRange(beta.sigAnswered)
-      + ' | silent asks ' + signalRange(beta.sigSilent)));
+  // Region discovery reports its own ratios, because its per-ask lines are the first
+  // thing the 200-line ring buffer rolls out on a long drive. Three denominators, and
+  // conflating any two makes the result unreadable: repeaters SEEN is distinct nodes,
+  // asks SENT is transmissions, receptions is how often those nodes were heard at all.
+  if (asks) {
+    lines.push(row('asks', asks.answered + ' of ' + asks.seen + ' repeaters answered — '
+      + asks.asks + ' asks sent, ' + asks.replies + ' answered, over ' + asks.heard + ' receptions'));
+    lines.push(row('asks q', asks.queue + ' queued, ' + asks.outstanding + ' awaiting a reply, '
+      + asks.dropped + ' timed out, ' + asks.unmatched + ' unmatched replies, ' + asks.flooded + ' sent as FLOOD'));
+    lines.push(row('asks cap', asks.capped + ' receptions ignored — that repeater had used its asks for this encounter'));
+    // Is there a signal below which asking is pointless? Two ranges, one for the
+    // receptions that produced an answer and one for those that produced silence.
+    // They argue for a floor only if they do NOT overlap.
+    lines.push(row('asks sig', 'answered ' + signalRange(asks.sigAnswered)
+      + ' | silent ' + signalRange(asks.sigSilent)));
   }
 
   if (companionPubkey) {

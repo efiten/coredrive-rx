@@ -4,7 +4,7 @@ import {
   enqueue, dueToSend, takeNext, registerOutstanding, matchOutstanding,
   pruneOutstanding, markAnswered, markAsked, noteHeard, newSignalRange, noteSignal, DEFAULT_ASK_GAP_MS,
   DEFAULT_TARGET_GAP_MS, DEFAULT_MAX_ASKS, DEFAULT_FORGET_MS, OUTSTANDING_TTL_MS,
-} from '../src/regionsprint.js';
+} from '../src/regionsched.js';
 
 const GAP = DEFAULT_TARGET_GAP_MS;
 const OPTS = { targetGapMs: GAP, maxAsks: DEFAULT_MAX_ASKS, forgetMs: DEFAULT_FORGET_MS };
@@ -61,8 +61,13 @@ test('an unanswered repeater is dropped after maxAsks, however often it is heard
     now += GAP;
   }
   assert.equal(enqueue(q, A, new Set(), targets, now, OPTS), 'capped');
-  assert.equal(enqueue(q, A, new Set(), targets, now + GAP * 10, OPTS), 'capped',
-    'still capped while we keep hearing it');
+  // And it stays capped for as long as we keep hearing it. Each reception refreshes
+  // lastHeardAt, so the encounter never ends and the count is never reset — stepping
+  // straight to now + forgetMs instead would be a NEW encounter by definition, which
+  // is a different rule and has its own test below.
+  for (let i = 1; i <= 5; i++) {
+    assert.equal(enqueue(q, A, new Set(), targets, now + GAP * i, OPTS), 'capped', 'reception ' + i);
+  }
   assert.deepEqual(q, []);
 });
 

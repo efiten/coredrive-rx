@@ -63,20 +63,3 @@ export function pruneTimestamps(times, now, windowMs = 60000) {
   const cutoff = now - windowMs;
   return times.filter((t) => t >= cutoff);
 }
-
-// REGION_INTERVAL_MS: how often region discovery may ask ONE repeater. Matches the
-// rate the old round-parity scheme produced (a 30s discover sweep at half rate), so
-// airtime is unchanged.
-export const REGION_INTERVAL_MS = 60000;
-
-// regionDiscoverDue decides whether a region-discovery ask is due, deliberately
-// WITHOUT consulting the stationary pause. The pause exists because re-sampling the
-// same spot adds nothing to coverage or RF data — but a repeater's declared region
-// list is a property of that repeater, not of where we are standing, and standing
-// still inside its range is a perfectly good moment to ask. Gating this on movement
-// meant a parked app never asked at all, and the repeaters that matter most are the
-// ones you are parked next to.
-export function regionDiscoverDue(now, lastAskAt, opts = {}) {
-  const interval = opts.intervalMs ?? REGION_INTERVAL_MS;
-  return lastAskAt == null || now - lastAskAt >= interval;
-}
