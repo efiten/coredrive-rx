@@ -112,7 +112,7 @@ export function regionInertReason({ config, supported, fwVer }) {
 export function buildLogHeader(info) {
   const {
     version, nowISO, config, fwVer, regionsSupported,
-    companionName, companionPubkey, uplink, pending, lineCount, lineCap, pathResolve,
+    companionName, companionPubkey, uplink, pending, lineCount, lineCap, pathResolve, beta,
   } = info;
   const row = (k, v) => k.padEnd(10) + ' ' + v;
   const onOff = (b) => (b ? 'on' : 'off');
@@ -151,6 +151,17 @@ export function buildLogHeader(info) {
     lines.push(row('path keys', pathResolve.resolved + ' of ' + pathResolve.attempted
       + ' path-hash prefixes resolved to a pubkey'
       + (unresolved > 0 ? ' (' + unresolved + ' ambiguous or unknown)' : '')));
+  }
+
+  // The unthrottled experiment lives or dies on these ratios, and its per-ask lines are
+  // the first thing the ring buffer rolls out: it transmits far more than the
+  // production scheduler ever did. Two separate denominators on purpose — how many
+  // repeaters answered at all, and how many asks that took.
+  if (beta) {
+    lines.push(row('beta', beta.answered + ' of ' + beta.queued + ' repeaters answered, '
+      + beta.asks + ' asks sent (' + beta.replies + ' answered)'));
+    lines.push(row('beta q', beta.queue + ' queued, ' + beta.outstanding + ' awaiting a reply, '
+      + beta.dropped + ' timed out, ' + beta.unmatched + ' unmatched replies, ' + beta.flooded + ' sent as FLOOD'));
   }
 
   if (companionPubkey) {

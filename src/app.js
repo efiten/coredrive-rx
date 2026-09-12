@@ -32,6 +32,9 @@ import { buildRfLogRecord } from './capture.js';
 import { heardKeyAfterVerify } from './advertsig.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
 import { buildRegionsRequest, parseRegionsResponse, parseSentAck, applyRegionsReply, heardAskDecision, pendingExpired, PENDING_TIMEOUT_MS, recordCandidate, commitAsk, undoAsk, SKIP_IN_FLIGHT, SKIP_BUDGET, SKIP_ANSWERED } from './regionreq.js';
+import {
+  enqueue, dueToSend, takeNext, registerOutstanding, matchOutstanding, pruneOutstanding, markAnswered,
+} from './regionsprint.js';
 import { regionsRows } from './regionsview.js';
 import { uplinkState, uplinkWarning, pushOutcome, regionInertReason, buildLogHeader, REGION_DISCOVERY_MIN_FW } from './uplink.js';
 import {
@@ -86,6 +89,16 @@ const state = {
     // resolveName returns (see noteRegionsAnswer).
     answers: [],
   },
+  // beta: state for the unthrottled experiment (REGION_BETA builds only, see
+  // src/regionsprint.js). queue holds targets heard and not yet asked, outstanding maps
+  // a sent tag to the target that must answer it, answered is the one thing that ever
+  // takes a repeater out of rotation. The counters exist because the 200-line ring
+  // buffer rolls the per-ask lines out long before a drive ends.
+  beta: {
+    queue: [], answered: new Set(), outstanding: new Map(),
+    lastSentAt: null, busy: false, overrideRaw: null,
+    queued: 0, asks: 0, replies: 0, flooded: 0, unmatched: 0, dropped: 0,
+  },
   // pathResolve: path-hash prefix -> whether it ever resolved to a full pubkey.
   // A Map, not two counters, because resolvePubkey is called on EVERY reception from
   // a forwarder and answers from its session cache — counting calls would report the
@@ -100,6 +113,10 @@ const REGIONS_ANSWERS_MAX = 200; // display only shows the last 5 (regionsview.j
 const HEX_COUNT_RES = 10; // fixed res (~90 m cells) for the distinct-hex session counter
 // Build version, injected from package.json by Vite (see vite.config.js).
 const VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev';
+// REGION_BETA: the unthrottled region-discovery experiment, compiled in only by
+// `REGION_BETA=1 vite build` (see vite.config.js). A normal build folds this to false
+// and drops every branch below it, so the production scheduler is untouched.
+const REGION_BETA = typeof __REGION_BETA__ !== 'undefined' ? __REGION_BETA__ : false;
 
 // SNR → colour bucket (LoRa-ish). Returns a CSS colour.
 function snrColor(snr) {
@@ -285,6 +302,131 @@ function commitAndAsk(target, advertTs) {
   const frame = buildRegionsRequest(target);
   const receipt = commitAsk(r, target, advertTs, Date.now());
   prepareAndAskRegions(target, frame, receipt);
+}
+
+// --- BETA: unthrottled ask path (src/regionsprint.js) -------------------------
+// Compiled in only by REGION_BETA=1. Everything above this block is bypassed: no
+// airtime budget, no per-target backoff, no single in-flight slot. Every reception of
+// a repeater queues it, the queue drains one ask per 2s, and a target is dropped only
+// once it has answered. Replies are matched on the echoed tag, which is the only thing
+// that can tell several outstanding requests apart.
+const BETA_ACK_TIMEOUT_MS = 4000;
+// How long a contact whose path was forced to zero-hop is held that way. Unchanged
+// from the production path on purpose: whether a restore before the reply arrives
+// costs the reply is a firmware question this experiment is not the place to answer.
+// A round that needs an override therefore blocks the queue for this long; overrides
+// were needed twice in three field logs, so it is rare.
+const BETA_OVERRIDE_HOLD_MS = 20000;
+
+// betaEnqueue is the beta twin of maybeAskHeardTarget: it decides nothing, it just
+// records that this repeater was heard again.
+function betaEnqueue(target) {
+  if (!state.transport) return;
+  const b = state.beta;
+  if (!featureEnabled(getConfig(), 'regionDiscovery') || !state.regions.supported) { noteRegionInert(); return; }
+  if (enqueue(b.queue, target, b.answered)) b.queued++;
+}
+
+// betaTick drains the queue. Called from the one-second monitor tick rather than its
+// own timer: the app is routinely backgrounded mid-drive, where a setInterval fires
+// late or not at all, and the tick is already the thing that survives that.
+function betaTick(now) {
+  const b = state.beta;
+  b.dropped += pruneOutstanding(b.outstanding, now);
+  if (!dueToSend(b.queue, now, b.lastSentAt, b.busy)) return;
+  const target = takeNext(b.queue, b.answered);
+  if (!target) return;
+  betaAsk(target);
+}
+
+// betaSendAndReadTag sends one request and resolves with the companion's own
+// RESP_CODE_SENT ack: { tag, isFlood }, or null when the write failed or no ack came.
+// The tag is what every later reply is matched against, so an ask whose tag was never
+// captured is an ask whose answer cannot be attributed to anyone.
+function betaSendAndReadTag(frame) {
+  return new Promise((resolve) => {
+    if (!state.transport) { resolve(null); return; }
+    const onAck = (dv) => {
+      const ack = parseSentAck(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength));
+      if (!ack) return;
+      cleanup();
+      resolve(ack);
+    };
+    const timer = setTimeout(() => { cleanup(); resolve(null); }, BETA_ACK_TIMEOUT_MS);
+    function cleanup() { clearTimeout(timer); if (state.transport) state.transport.offFrame(onAck); }
+    state.transport.onFrame(onAck);
+    state.transport.send(frame).catch((e) => {
+      cleanup();
+      dbg('beta: ask never left the phone (' + e.message + ')', 'no');
+      resolve(null);
+    });
+  });
+}
+
+async function betaAsk(target) {
+  const b = state.beta;
+  b.busy = true;
+  b.lastSentAt = Date.now();
+  let overrode = false;
+  try {
+    const frame = buildRegionsRequest(target);
+    const contact = await getContact(target);
+    if (needsPathOverride(contact)) {
+      localStorage.setItem(RESTORE_STORAGE_KEY, encodePendingRestore(state.companionPubkey, target, contact.raw));
+      const ok = await writeContact(buildOverrideFrame(contact.raw), CONTACT_WRITE_TIMEOUT_MS);
+      if (!ok) dbg('beta: path override for ' + target.slice(0, 12) + '… did not ack — asking anyway', 'no');
+      overrode = true;
+      // The production round tracks one override at a time in state.regions; this path
+      // owns its own restore end to end, so it does not touch that field.
+      b.overrideRaw = contact.raw;
+    }
+    const ack = await betaSendAndReadTag(frame);
+    if (ack == null) {
+      dbg('beta: no send-ack for ' + target.slice(0, 12) + '… — ask not counted', 'no');
+    } else if (ack.isFlood) {
+      b.flooded++;
+      dbg('beta: ' + target.slice(0, 12) + '… went out over FLOOD — repeaters only answer DIRECT', 'no');
+    } else {
+      b.asks++;
+      registerOutstanding(b.outstanding, ack.tag, target, Date.now());
+      dbg('beta → asked ' + target.slice(0, 12) + '… (queue ' + b.queue.length
+        + ', outstanding ' + b.outstanding.size + ')', 'tx');
+    }
+    if (overrode) {
+      await new Promise((r) => setTimeout(r, BETA_OVERRIDE_HOLD_MS));
+      const restored = await writeContact(buildRestoreFrame(b.overrideRaw), CONTACT_WRITE_TIMEOUT_MS);
+      if (restored) { clearPendingRestore(target); dbg('beta: restored ' + target.slice(0, 12) + '…’s original path', 'st'); }
+      else dbg('beta: restore for ' + target.slice(0, 12) + '… did not ack — will retry on next connect', 'no');
+    }
+  } catch (e) {
+    dbg('beta: ask to ' + target.slice(0, 12) + '… failed: ' + e.message, 'no');
+  } finally {
+    b.overrideRaw = null;
+    b.busy = false;
+  }
+}
+
+// betaOnReply is the beta half of onRegionsFrame. Returns whether it consumed the
+// frame, so the production matcher never sees a reply this path has already filed.
+function betaOnReply(parsed) {
+  const b = state.beta;
+  const hit = matchOutstanding(b.outstanding, parsed);
+  if (!hit) {
+    b.unmatched++;
+    dbg('beta ← reply tag ' + parsed.tag + ' matches no outstanding ask — dropped, not attributed', 'no');
+    return true;
+  }
+  b.replies++;
+  markAnswered(b.answered, b.queue, hit.target);
+  noteRegionsAnswer(hit.target, hit.regions, hit.truncated);
+  state.queue.add({
+    kind: 'regions', at: new Date().toISOString(), target: hit.target,
+    regions: hit.regions, truncated: hit.truncated, repeater_clock: hit.repeaterClock,
+    rx_pubkey: state.companionPubkey,
+  }).catch((e) => dbg('beta: regions queue failed: ' + e.message, 'no'));
+  dbg('beta ← ' + hit.target.slice(0, 12) + '… declares: ' + (hit.regions.join(',') || '(none)')
+    + ' (' + b.replies + ' of ' + b.asks + ' asks answered)', 'ok');
+  return true;
 }
 
 // abandonAsk hands a target back everything commitAsk charged it, for a request that
@@ -499,6 +641,7 @@ function onRegionsFrame(dv) {
   const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
   const parsed = parseRegionsResponse(bytes);
   if (!parsed) return;
+  if (REGION_BETA && betaOnReply(parsed)) return;
   const result = applyRegionsReply(state.regions.pending, parsed);
   if (!result.accepted) {
     // Do NOT clear pending either way: the real reply for the current target may
@@ -659,7 +802,8 @@ function monitorTick() {
   // The only region-discovery work left on the clock: free a timed-out ask, so the
   // slot is available to the very next repeater heard instead of one tick later. The
   // asking itself happens on receptions (maybeAskHeardTarget), never on a timer.
-  expireStalePendingAsk(now);
+  if (REGION_BETA) betaTick(now);
+  else expireStalePendingAsk(now);
   // A session that started without config must be able to heal without a restart:
   // retry once a minute (not per tick) for as long as it is missing.
   if (!getConfig() && (state.lastConfigTryAt == null || now - state.lastConfigTryAt >= 60000)) {
@@ -891,7 +1035,8 @@ async function processFrame(dv) {
   const regionsCfg = getConfig();
   if (featureEnabled(regionsCfg, 'regionDiscovery') && hk.src === 'advert' && pkt.advertType === ADV_TYPE_REPEATER && pkt.advertTs != null) {
     const key = recordCandidate(state.regions.candidates, hk.heardKey, pkt.advertTs);
-    maybeAskHeardTarget(hk.heardKey, key);
+    if (REGION_BETA) betaEnqueue(hk.heardKey);
+    else maybeAskHeardTarget(hk.heardKey, key);
   }
   // Discover responses are the common case (47h advert intervals mean real adverts are
   // rare) but carry only an 8-byte pubkey prefix in practice — resolve to the full
@@ -905,7 +1050,9 @@ async function processFrame(dv) {
       if (!pk) return;
       // The effective key, never the null offered — see recordCandidate. Passing the
       // null would re-ask a repeater that already answered via a real advert.
-      maybeAskHeardTarget(pk, recordCandidate(state.regions.candidates, pk, null));
+      const key = recordCandidate(state.regions.candidates, pk, null);
+      if (REGION_BETA) betaEnqueue(pk);
+      else maybeAskHeardTarget(pk, key);
     });
   }
 
@@ -931,7 +1078,9 @@ async function processFrame(dv) {
     resolvePubkey(hk.heardKey).then((pk) => {
       state.pathResolve.set(hk.heardKey, !!pk);
       if (!pk) return;
-      maybeAskHeardTarget(pk, recordCandidate(state.regions.candidates, pk, null));
+      const key = recordCandidate(state.regions.candidates, pk, null);
+      if (REGION_BETA) betaEnqueue(pk);
+      else maybeAskHeardTarget(pk, key);
     });
   }
 
@@ -1326,6 +1475,12 @@ window.addEventListener('DOMContentLoaded', async () => {
         attempted: state.pathResolve.size,
         resolved: Array.from(state.pathResolve.values()).filter(Boolean).length,
       },
+      beta: REGION_BETA ? {
+        queued: state.beta.queued, asks: state.beta.asks, replies: state.beta.replies,
+        answered: state.beta.answered.size, queue: state.beta.queue.length,
+        outstanding: state.beta.outstanding.size, flooded: state.beta.flooded,
+        unmatched: state.beta.unmatched, dropped: state.beta.dropped,
+      } : null,
       lineCount: lines.length,
       lineCap: LOG_LINE_CAP,
     });
@@ -1355,7 +1510,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   window.addEventListener('online', () => {
     retryConfig().finally(() => { drain().then(refreshCounters).catch(() => {}); });
   });
-  if ('serviceWorker' in navigator) {
+  // The beta build is served from a subdirectory of the SAME origin as the production
+  // app. Registering '/sw.js' from there would claim the ROOT scope and start serving
+  // the beta bundle to everyone on the production URL, so the experiment ships without
+  // a service worker at all: no offline shell, one less thing to explain in its log.
+  if (!REGION_BETA && 'serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   }
 });

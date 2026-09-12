@@ -251,3 +251,29 @@ test('no path-hash prefix tried yet prints no row at all rather than a misleadin
   assert.doesNotMatch(buildLogHeader({ ...BASE, pathResolve: { attempted: 0, resolved: 0 } }), /path keys/);
   assert.doesNotMatch(buildLogHeader(BASE), /path keys/);
 });
+
+// --- BETA header rows (REGION_BETA builds only) -------------------------------
+// The unthrottled experiment transmits far more than the production scheduler, so its
+// per-ask lines roll out of the 200-line ring buffer long before a drive ends. The
+// ratios that decide whether it works have to survive in the header.
+
+test('buildLogHeader reports the beta counters when the experiment is running', () => {
+  const h = buildLogHeader({
+    version: '1.14.0-beta-sprint', nowISO: 'now', config: null, fwVer: 13, regionsSupported: true,
+    uplink: 'ok', pending: 0, lineCount: 1, lineCap: 200,
+    beta: {
+      queued: 22, asks: 61, replies: 7, answered: 7, queue: 3,
+      outstanding: 5, flooded: 1, unmatched: 2, dropped: 12,
+    },
+  });
+  assert.match(h, /beta {7}7 of 22 repeaters answered, 61 asks sent \(7 answered\)/);
+  assert.match(h, /beta q {5}3 queued, 5 awaiting a reply, 12 timed out, 2 unmatched replies, 1 sent as FLOOD/);
+});
+
+test('buildLogHeader leaves the beta rows out of a production build', () => {
+  const h = buildLogHeader({
+    version: '1.14.0', nowISO: 'now', config: null, fwVer: 13, regionsSupported: true,
+    uplink: 'ok', pending: 0, lineCount: 1, lineCap: 200, beta: null,
+  });
+  assert.doesNotMatch(h, /beta/);
+});
