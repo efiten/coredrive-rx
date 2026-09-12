@@ -399,6 +399,23 @@ function writeContact(frame, timeoutMs) {
   });
 }
 
+// maybeReplayPendingRestore runs once per connect, before any region-discovery ask:
+// if a previous session died between an override write and its restore, the target
+// contact is still sitting zero-hop on the companion. Replayed only against the SAME
+// companion the record was made for (keyed on self pubkey from SELF_INFO) — never a
+// different one, which may have an unrelated contact under that pubkey.
+async function maybeReplayPendingRestore() {
+  const stored = localStorage.getItem(RESTORE_STORAGE_KEY);
+  if (!stored) return;
+  const rec = decodePendingRestore(stored);
+  if (!rec) { localStorage.removeItem(RESTORE_STORAGE_KEY); return; } // corrupt — nothing safe to replay
+  if (rec.self !== state.companionPubkey) return; // belongs to a different companion — leave it for its own connect
+  dbg('regions: replaying a pending contact-path restore for ' + rec.target.slice(0, 12) + '… left over from a previous session', 'st');
+  const ok = await writeContact(buildRestoreFrame(rec.raw), CONTACT_WRITE_TIMEOUT_MS);
+  if (ok) { localStorage.removeItem(RESTORE_STORAGE_KEY); dbg('regions: pending restore replayed OK', 'ok'); }
+  else dbg('regions: pending restore did not ack — will retry next connect', 'no');
+}
+
 function clearPendingRestore(target) {
   const rec = decodePendingRestore(localStorage.getItem(RESTORE_STORAGE_KEY) || '');
   if (rec && rec.self === state.companionPubkey && rec.target === target) localStorage.removeItem(RESTORE_STORAGE_KEY);
