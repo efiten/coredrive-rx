@@ -34,7 +34,7 @@ import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE
 import { buildRegionsRequest, parseRegionsResponse, parseSentAck, applyRegionsReply, heardAskDecision, pendingExpired, PENDING_TIMEOUT_MS, recordCandidate, commitAsk, undoAsk, SKIP_IN_FLIGHT, SKIP_BUDGET, SKIP_ANSWERED } from './regionreq.js';
 import {
   enqueue, dueToSend, takeNext, registerOutstanding, matchOutstanding, pruneOutstanding,
-  markAnswered, markAsked,
+  markAnswered, markAsked, newSignalRange, noteSignal,
 } from './regionsprint.js';
 import { regionsRows } from './regionsview.js';
 import { uplinkState, uplinkWarning, pushOutcome, regionInertReason, buildLogHeader, REGION_DISCOVERY_MIN_FW } from './uplink.js';
@@ -99,9 +99,13 @@ const state = {
     // targets: pubkey -> { attempts, lastAskedAt, lastHeardAt } for the CURRENT
     // encounter. attempts is what the per-encounter cap counts and what a long enough
     // silence resets; answered is separate because it outlives every encounter.
-    queue: [], answered: new Set(), outstanding: new Map(), targets: new Map(),
+    queue: [], answered: new Set(), outstanding: new Map(), targets: new Map(), lastSignal: new Map(),
     lastSentAt: null, busy: false, overrideRaw: null,
     queued: 0, heard: 0, asks: 0, replies: 0, flooded: 0, unmatched: 0, dropped: 0, capped: 0,
+    // The signal of the reception that triggered each ask, split by what came back.
+    // If these two ranges do not overlap, a signal floor is worth having and the log
+    // says where it sits; if they do overlap, the idea is dead and this says that too.
+    sigAnswered: newSignalRange(), sigSilent: newSignalRange(),
   },
   // pathResolve: path-hash prefix -> whether it ever resolved to a full pubkey.
   // A Map, not two counters, because resolvePubkey is called on EVERY reception from
@@ -324,12 +328,16 @@ const BETA_OVERRIDE_HOLD_MS = 20000;
 
 // betaEnqueue is the beta twin of maybeAskHeardTarget: it decides nothing, it just
 // records that this repeater was heard again.
-function betaEnqueue(target) {
+function betaEnqueue(target, snr, rssi) {
   if (!state.transport) return;
   const b = state.beta;
   const cfg = getConfig();
   if (!featureEnabled(cfg, 'regionDiscovery') || !state.regions.supported) { noteRegionInert(); return; }
   b.heard++;
+  // The signal of THIS reception, kept on the target so the ask that follows can be
+  // filed under the conditions that produced it. Overwritten by every later reception:
+  // the one that matters is the one the ask actually went out on.
+  b.lastSignal.set(target, { snr, rssi });
   const verdict = enqueue(b.queue, target, b.answered, b.targets, Date.now(), {
     targetGapMs: cfg.betaTargetGapSec * 1000,
     maxAsks: cfg.betaMaxAsks,
@@ -344,7 +352,10 @@ function betaEnqueue(target) {
 // late or not at all, and the tick is already the thing that survives that.
 function betaTick(now) {
   const b = state.beta;
-  b.dropped += pruneOutstanding(b.outstanding, now);
+  for (const rec of pruneOutstanding(b.outstanding, now)) {
+    b.dropped++;
+    noteSignal(b.sigSilent, rec.snr, rec.rssi);
+  }
   if (!dueToSend(b.queue, now, b.lastSentAt, b.busy, getConfig().betaAskGapSec * 1000)) return;
   const target = takeNext(b.queue, b.answered);
   if (!target) return;
@@ -403,8 +414,9 @@ async function betaAsk(target) {
       dbg('beta: ' + target.slice(0, 12) + '… went out over FLOOD — repeaters only answer DIRECT', 'no');
     } else {
       b.asks++;
-      registerOutstanding(b.outstanding, ack.tag, target, Date.now());
-      dbg('beta → asked ' + target.slice(0, 12) + '… (attempt '
+      const sig = b.lastSignal.get(target) ?? { snr: null, rssi: null };
+      registerOutstanding(b.outstanding, ack.tag, target, Date.now(), sig.snr, sig.rssi);
+      dbg('beta → asked ' + target.slice(0, 12) + '… on snr ' + sig.snr + ' / rssi ' + sig.rssi + ' (attempt '
         + b.targets.get(target).attempts + ' of ' + getConfig().betaMaxAsks
         + ' this encounter, queue ' + b.queue.length + ', outstanding ' + b.outstanding.size + ')', 'tx');
     }
@@ -433,6 +445,7 @@ function betaOnReply(parsed) {
     return true;
   }
   b.replies++;
+  noteSignal(b.sigAnswered, hit.snr, hit.rssi);
   markAnswered(b.answered, b.queue, hit.target);
   noteRegionsAnswer(hit.target, hit.regions, hit.truncated);
   state.queue.add({
@@ -441,6 +454,7 @@ function betaOnReply(parsed) {
     rx_pubkey: state.companionPubkey,
   }).catch((e) => dbg('beta: regions queue failed: ' + e.message, 'no'));
   dbg('beta ← ' + hit.target.slice(0, 12) + '… declares: ' + (hit.regions.join(',') || '(none)')
+    + ' — asked on snr ' + hit.snr + ' / rssi ' + hit.rssi
     + ' (' + b.replies + ' of ' + b.asks + ' asks answered)', 'ok');
   return true;
 }
@@ -1051,7 +1065,7 @@ async function processFrame(dv) {
   const regionsCfg = getConfig();
   if (featureEnabled(regionsCfg, 'regionDiscovery') && hk.src === 'advert' && pkt.advertType === ADV_TYPE_REPEATER && pkt.advertTs != null) {
     const key = recordCandidate(state.regions.candidates, hk.heardKey, pkt.advertTs);
-    if (REGION_BETA) betaEnqueue(hk.heardKey);
+    if (REGION_BETA) betaEnqueue(hk.heardKey, f.snr, f.rssi);
     else maybeAskHeardTarget(hk.heardKey, key);
   }
   // Discover responses are the common case (47h advert intervals mean real adverts are
@@ -1067,7 +1081,7 @@ async function processFrame(dv) {
       // The effective key, never the null offered — see recordCandidate. Passing the
       // null would re-ask a repeater that already answered via a real advert.
       const key = recordCandidate(state.regions.candidates, pk, null);
-      if (REGION_BETA) betaEnqueue(pk);
+      if (REGION_BETA) betaEnqueue(pk, f.snr, f.rssi);
       else maybeAskHeardTarget(pk, key);
     });
   }
@@ -1095,7 +1109,7 @@ async function processFrame(dv) {
       state.pathResolve.set(hk.heardKey, !!pk);
       if (!pk) return;
       const key = recordCandidate(state.regions.candidates, pk, null);
-      if (REGION_BETA) betaEnqueue(pk);
+      if (REGION_BETA) betaEnqueue(pk, f.snr, f.rssi);
       else maybeAskHeardTarget(pk, key);
     });
   }
@@ -1497,6 +1511,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         answered: state.beta.answered.size, queue: state.beta.queue.length,
         outstanding: state.beta.outstanding.size, flooded: state.beta.flooded,
         unmatched: state.beta.unmatched, dropped: state.beta.dropped, capped: state.beta.capped,
+        sigAnswered: state.beta.sigAnswered, sigSilent: state.beta.sigSilent,
       } : null,
       lineCount: lines.length,
       lineCap: LOG_LINE_CAP,

@@ -113,8 +113,32 @@ export function takeNext(queue, answered) {
   return null;
 }
 
-export function registerOutstanding(outstanding, tag, target, now) {
-  outstanding.set(tag, { target, sentAt: now });
+// registerOutstanding also files the signal of the reception that triggered this ask.
+// Three logs in a row suggested a clean split — every answer came from a reception at
+// about -109 dBm or better, every ask at -111 or worse stayed silent — but that was
+// assembled by hand from pairs of log lines, and the per-ask lines roll out of the ring
+// buffer. Carrying the signal WITH the request is what turns that into a measurement.
+export function registerOutstanding(outstanding, tag, target, now, snr, rssi) {
+  outstanding.set(tag, { target, sentAt: now, snr, rssi });
+}
+
+export function newSignalRange() {
+  return { n: 0, rssiMin: null, rssiMax: null, snrMin: null, snrMax: null };
+}
+
+// noteSignal widens a range with one more sample. Null-safe on both fields: the
+// companion reports snr and rssi separately and either can be missing on a frame.
+export function noteSignal(range, snr, rssi) {
+  range.n++;
+  if (rssi != null) {
+    range.rssiMin = range.rssiMin == null ? rssi : Math.min(range.rssiMin, rssi);
+    range.rssiMax = range.rssiMax == null ? rssi : Math.max(range.rssiMax, rssi);
+  }
+  if (snr != null) {
+    range.snrMin = range.snrMin == null ? snr : Math.min(range.snrMin, snr);
+    range.snrMax = range.snrMax == null ? snr : Math.max(range.snrMax, snr);
+  }
+  return range;
 }
 
 // matchOutstanding attributes a reply to the request whose tag it echoes. With several
@@ -131,16 +155,19 @@ export function matchOutstanding(outstanding, parsed) {
     regions: parsed.regions,
     truncated: parsed.truncated,
     repeaterClock: parsed.repeaterClock,
+    snr: hit.snr,
+    rssi: hit.rssi,
   };
 }
 
-// pruneOutstanding drops tags too old to still be answered. Unbounded growth is the
-// real risk here: this beta transmits up to 30 asks a minute and most go unanswered.
-// Returns how many were dropped.
+// pruneOutstanding drops tags too old to still be answered and RETURNS those records,
+// because a request that timed out is the negative half of the signal measurement: the
+// reception that produced it is one the repeater did not answer from. Unbounded growth
+// is the other reason it exists — this beta transmits far more than it gets back.
 export function pruneOutstanding(outstanding, now, ttlMs = OUTSTANDING_TTL_MS) {
-  let dropped = 0;
+  const dropped = [];
   for (const [tag, rec] of outstanding) {
-    if (now - rec.sentAt >= ttlMs) { outstanding.delete(tag); dropped++; }
+    if (now - rec.sentAt >= ttlMs) { outstanding.delete(tag); dropped.push(rec); }
   }
   return dropped;
 }

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   enqueue, dueToSend, takeNext, registerOutstanding, matchOutstanding,
-  pruneOutstanding, markAnswered, markAsked, noteHeard, DEFAULT_ASK_GAP_MS,
+  pruneOutstanding, markAnswered, markAsked, noteHeard, newSignalRange, noteSignal, DEFAULT_ASK_GAP_MS,
   DEFAULT_TARGET_GAP_MS, DEFAULT_MAX_ASKS, DEFAULT_FORGET_MS, OUTSTANDING_TTL_MS,
 } from '../src/regionsprint.js';
 
@@ -158,7 +158,7 @@ test('pruneOutstanding drops tags too old to still be answered', () => {
   const out = new Map();
   registerOutstanding(out, 0x1111, A, 1_000_000);
   registerOutstanding(out, 0x2222, B, 1_000_000 + OUTSTANDING_TTL_MS);
-  assert.equal(pruneOutstanding(out, 1_000_000 + OUTSTANDING_TTL_MS), 1);
+  assert.equal(pruneOutstanding(out, 1_000_000 + OUTSTANDING_TTL_MS).length, 1);
   assert.deepEqual(Array.from(out.keys()), [0x2222]);
 });
 
@@ -168,4 +168,44 @@ test('markAnswered also cancels the ask this target has queued', () => {
   markAnswered(answered, q, A);
   assert.deepEqual(q, [B]);
   assert.equal(answered.has(A), true);
+});
+
+// --- Signal of the reception each ask went out on ------------------------------
+// Three drives suggested that an answer only ever came from a reception at roughly
+// -109 dBm or better, but that was assembled by hand from pairs of log lines that the
+// ring buffer rolls out. The ask carries its own conditions now, so one drive can
+// confirm or kill the idea of a signal floor.
+
+test('an ask carries the signal of the reception that triggered it into its reply', () => {
+  const out = new Map();
+  registerOutstanding(out, 0x1111, A, 1_000_000, 1.75, -104);
+  const hit = matchOutstanding(out, reply(0x1111));
+  assert.equal(hit.snr, 1.75);
+  assert.equal(hit.rssi, -104);
+});
+
+test('a timed-out ask hands its signal back — silence is the other half of the measurement', () => {
+  const out = new Map();
+  registerOutstanding(out, 0x1111, A, 1_000_000, -9.5, -119);
+  registerOutstanding(out, 0x2222, B, 1_000_000 + OUTSTANDING_TTL_MS, 7, -102);
+  const dropped = pruneOutstanding(out, 1_000_000 + OUTSTANDING_TTL_MS);
+  assert.equal(dropped.length, 1);
+  assert.deepEqual([dropped[0].target, dropped[0].snr, dropped[0].rssi], [A, -9.5, -119]);
+  assert.equal(out.size, 1, 'the one still inside its window stays matchable');
+});
+
+test('noteSignal widens a range and survives a missing snr or rssi', () => {
+  const r = newSignalRange();
+  noteSignal(r, 1.75, -104);
+  noteSignal(r, -0.5, -111);
+  noteSignal(r, null, null);
+  assert.equal(r.n, 3, 'every ask counts, even one the companion reported no signal for');
+  assert.deepEqual([r.rssiMin, r.rssiMax], [-111, -104]);
+  assert.deepEqual([r.snrMin, r.snrMax], [-0.5, 1.75]);
+});
+
+test('an empty range stays empty rather than reporting Infinity', () => {
+  const r = newSignalRange();
+  assert.equal(r.n, 0);
+  assert.equal(r.rssiMin, null);
 });

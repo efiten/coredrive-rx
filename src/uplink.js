@@ -109,6 +109,14 @@ export function regionInertReason({ config, supported, fwVer }) {
 //
 // Reads only the four feature flags by name and never iterates the config, so the
 // broker password cannot reach an exported file no matter what is passed in.
+// signalRange renders one accumulated range. "none yet" rather than an empty bracket:
+// a run with no answers at all must not print something that reads like a measurement.
+function signalRange(r) {
+  if (!r || !r.n) return 'none yet';
+  const span = (min, max, unit) => (min === max ? min + unit : min + ' … ' + max + unit);
+  return r.n + ': rssi ' + span(r.rssiMin, r.rssiMax, 'dBm') + ', snr ' + span(r.snrMin, r.snrMax, 'dB');
+}
+
 export function buildLogHeader(info) {
   const {
     version, nowISO, config, fwVer, regionsSupported,
@@ -167,6 +175,12 @@ export function buildLogHeader(info) {
     lines.push(row('beta q', beta.queue + ' queued, ' + beta.outstanding + ' awaiting a reply, '
       + beta.dropped + ' timed out, ' + beta.unmatched + ' unmatched replies, ' + beta.flooded + ' sent as FLOOD'));
     lines.push(row('beta cap', beta.capped + ' receptions ignored — that repeater had used its asks for this encounter'));
+    // The question three drives have now raised and none could settle from the ring
+    // buffer: is there a signal below which asking is pointless. Two ranges, one for the
+    // receptions that produced an answer and one for those that produced silence. They
+    // are only an argument for a floor if they do NOT overlap.
+    lines.push(row('beta sig', 'answered asks ' + signalRange(beta.sigAnswered)
+      + ' | silent asks ' + signalRange(beta.sigSilent)));
   }
 
   if (companionPubkey) {
