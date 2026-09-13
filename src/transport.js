@@ -38,6 +38,14 @@ export class WebBluetoothTransport {
     return true;
   }
 
+  // connected() reports whether the GATT link is actually up right now. Read from the
+  // browser's own device object rather than mirrored into a flag of ours: this is
+  // exactly the state that changes without us being told first, and a stale copy sends
+  // writes into a dead characteristic.
+  connected() {
+    return !!(this.device && this.device.gatt && this.device.gatt.connected);
+  }
+
   // _setup (re)establishes GATT, characteristics and notifications. Re-runnable
   // on reconnect (the characteristic objects are recreated each time).
   async _setup() {

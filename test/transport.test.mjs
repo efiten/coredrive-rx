@@ -53,3 +53,17 @@ test('send rejects when not connected', async () => {
   const t = new WebBluetoothTransport();
   await assert.rejects(t.send(new Uint8Array([1])), /not connected/);
 });
+
+// connected() is read straight off the browser's device object rather than mirrored
+// into a flag: the link drops without warning, and a stale copy is what sends writes
+// into a dead characteristic.
+test('connected() reports the live GATT state, and false before there is a device', () => {
+  const t = new WebBluetoothTransport();
+  assert.equal(t.connected(), false, 'no device yet');
+  t.device = { gatt: { connected: true } };
+  assert.equal(t.connected(), true);
+  t.device.gatt.connected = false;
+  assert.equal(t.connected(), false);
+  t.device = { };
+  assert.equal(t.connected(), false, 'a device with no gatt is not connected');
+});

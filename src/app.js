@@ -68,6 +68,9 @@ const state = {
   lastHeardAt: null, lastFireAt: 0, tick: null,
   // RF environment sampler
   rfTimer: null, lastRfSample: null, rfGen: 0,
+  // linkQuiet: true while the BLE link is down, so the pause and the resume are each
+  // said once instead of once per tick.
+  linkQuiet: false,
   // Region discovery (ANON_REQ_TYPE_REGIONS) — purely reception-driven: a repeater is
   // asked while we are hearing it, never on a clock (src/regionsched.js holds the
   // rules). supported reflects the FIRMWARE_VER_CODE gate.
@@ -465,6 +468,7 @@ function onRegionsFrame(dv) {
 
 function renderDiscoverStatus(dec) {
   const el = els('discStatus');
+  if (dec.state === 'link-down') { el.textContent = '🎯 Discover paused — companion link down'; return; }
   if (!state.connected || dec.state === 'paused') { el.textContent = ''; return; }
   if (dec.state === 'backoff') { el.textContent = '🎯 Backoff (verkeer actief)'; return; }
   el.textContent = dec.secs > 0 ? '🎯 Discover actief — volgende in ' + dec.secs + 's' : '🎯 Discover actief';
@@ -585,14 +589,33 @@ async function retryConfig() {
   return true;
 }
 
+// bleLinkUp asks the transport, which asks the browser. Not a flag of ours: the link
+// drops without warning and a mirrored copy is stale exactly when it matters.
+function bleLinkUp() {
+  return !!state.transport && state.transport.connected();
+}
+
+// noteLinkState says once that the radio work has stopped, and once that it resumed.
+// Without it a dropped link reads as a log that simply goes quiet — which is the same
+// thing as an app that has crashed, an area with no traffic, or a feature turned off.
+function noteLinkState(linkUp) {
+  if (linkUp === state.linkQuiet) return; // linkQuiet holds the INVERSE, so this is a change
+  state.linkQuiet = !linkUp;
+  if (!linkUp) dbg('companion link down — discover, RF sampling and region asks held until it is back', 'no');
+  else dbg('companion link back — discover, RF sampling and region asks resumed', 'ok');
+}
+
 // --- Per-second monitor tick: drives auto-discover, the SNR-meter decay, and the
 // time-relative labels (last-heard / last-upload / rate / discover countdown). Runs only
 // while connected.
 function monitorTick() {
   const now = Date.now();
-  const dec = discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused);
-  if (dec.fire) { fireDiscover(now); renderDiscoverStatus(discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused)); }
+  const linkUp = bleLinkUp();
+  noteLinkState(linkUp);
+  const dec = discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused, linkUp);
+  if (dec.fire) { fireDiscover(now); renderDiscoverStatus(discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused, linkUp)); }
   else renderDiscoverStatus(dec);
+  if (!linkUp) return; // nothing below this can reach the radio
   // The only region-discovery work left on the clock: free a timed-out ask, so the
   // slot is available to the very next repeater heard instead of one tick later. The
   // asking itself happens on receptions (noteRepeaterHeard), never on a timer.
@@ -1142,6 +1165,13 @@ function startRfSampler() {
 
   const tick = async () => {
     if (!state.transport || !state.companionPubkey) return;
+    // A sample taken over a dead link is three writes that throw and one
+    // "rf sample incomplete — discarded" line. Reschedule and wait for the link.
+    if (!bleLinkUp()) {
+      if (state.rfGen !== myGen) return;
+      state.rfTimer = setTimeout(tick, nextSampleDelay(state.motion ? state.motion.paused : false));
+      return;
+    }
     const fix = currentFix();
     if (fix) {
       const core = await ask(STATS_CORE);

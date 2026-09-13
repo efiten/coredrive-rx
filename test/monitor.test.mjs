@@ -76,3 +76,33 @@ test('capture-rate window drops entries older than 60 s', () => {
 
 // --- Region discovery cadence (deliberately independent of the stationary pause) ---
 
+
+// --- Link-down ----------------------------------------------------------------
+// Field log 2026-09-13, 01:57:54 onward: the BLE link dropped and the sweep kept firing
+// every 30s for two and a half minutes, each one logging
+// "discover send failed: GATT Server is disconnected". A sweep over a dead link is not
+// a sweep, so the decision has to know.
+
+test('discoverDecision does not sweep while the link is down', () => {
+  const d = discoverDecision(1_000_000, null, 0, false, false);
+  assert.equal(d.fire, false);
+  assert.equal(d.state, 'link-down');
+});
+
+test('link-down outranks both the pause and a sweep that is due', () => {
+  // Due (lastFireAt 0) and stationary at the same time: neither may turn into a write.
+  assert.equal(discoverDecision(1_000_000, null, 0, true, false).state, 'link-down');
+  assert.equal(discoverDecision(1_000_000, null, 0, false, false).fire, false);
+});
+
+test('the first tick after the link returns sweeps immediately', () => {
+  // lastFireAt is not advanced while down, so nothing has to be waited out afterwards.
+  const now = 1_000_000;
+  const lastFire = now - DISCOVER_INTERVAL_MS * 5;
+  assert.equal(discoverDecision(now, null, lastFire, false, false).fire, false);
+  assert.equal(discoverDecision(now, null, lastFire, false, true).fire, true);
+});
+
+test('linkUp defaults to true, so an existing caller keeps sweeping', () => {
+  assert.equal(discoverDecision(1_000_000, null, 0, false).fire, true);
+});

@@ -11,13 +11,21 @@ export const DISCOVER_BACKOFF_MS = 15000;  // silence required after organic tra
 // discoverDecision decides, on each tick, whether to fire a discover sweep now and
 // what status to surface. `lastHeardAt` = ms of the last ORGANIC reception (an
 // overheard forwarder/advert — NOT our own discover response); null if none yet.
-// `lastFireAt` = ms of the last sweep (0 = never). Returns:
-//   { fire, state: 'paused'|'backoff'|'active', secs }
+// `lastFireAt` = ms of the last sweep (0 = never). `linkUp` is whether the BLE link is
+// actually up. Returns:
+//   { fire, state: 'link-down'|'paused'|'backoff'|'active', secs }
 // where `secs` is the backoff seconds remaining (backoff) or seconds until the next
 // sweep (active). On fire the caller sets lastFireAt = now.
-export function discoverDecision(now, lastHeardAt, lastFireAt, paused, opts = {}) {
+//
+// link-down comes FIRST because a sweep while the companion is gone is not a sweep: the
+// write throws on a dead characteristic. A field log (2026-09-13, 01:57 onward) shows
+// 2.5 minutes of "discover send failed: GATT Server is disconnected" every 30 seconds,
+// one per tick, with nothing else able to happen anyway. lastFireAt is deliberately not
+// advanced while down, so the first tick after the link returns sweeps immediately.
+export function discoverDecision(now, lastHeardAt, lastFireAt, paused, linkUp = true, opts = {}) {
   const interval = opts.intervalMs ?? DISCOVER_INTERVAL_MS;
   const backoff = opts.backoffMs ?? DISCOVER_BACKOFF_MS;
+  if (!linkUp) return { fire: false, state: 'link-down', secs: 0 };
   if (paused) return { fire: false, state: 'paused', secs: 0 };
   if (lastHeardAt != null && now - lastHeardAt < backoff) {
     return { fire: false, state: 'backoff', secs: Math.ceil((backoff - (now - lastHeardAt)) / 1000) };
