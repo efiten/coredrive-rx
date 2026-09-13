@@ -3,6 +3,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { normalizeConfig, featureEnabled } from '../src/config.js';
+import {
+  DEFAULT_ASK_GAP_MS, DEFAULT_TARGET_GAP_MS, DEFAULT_MAX_ASKS, DEFAULT_FORGET_MS,
+  DEFAULT_BONUS_SNR_DB,
+} from '../src/regionsched.js';
 
 test('normalizeConfig requires mqttUrl', () => {
   assert.throws(() => normalizeConfig({ mqttUsername: 'x' }), /mqttUrl/);
@@ -177,4 +181,31 @@ test('verifyAdverts stays off unless config.json turns it on', () => {
   assert.strictEqual(featureEnabled(null, 'verifyAdverts'), false);
   assert.strictEqual(featureEnabled({}, 'verifyAdverts'), false);
   assert.strictEqual(featureEnabled({ verifyAdverts: true }, 'verifyAdverts'), true);
+});
+
+// --- Region pacing defaults ---------------------------------------------------
+// These were written out twice — once in src/regionsched.js and once here — and drifted
+// apart: the scheduler said four asks per encounter, config.js said three, and since the
+// app reads the config the shipped cap was three. A field log's "attempt 3 of 3" was the
+// only thing that showed it. One source, and a test that says so.
+
+test('the region pacing defaults are the scheduler\'s own, not a second copy', () => {
+  const c = normalizeConfig({ mqttUrl: 'wss://x/ws' });
+  assert.equal(c.regionAskGapSec, DEFAULT_ASK_GAP_MS / 1000);
+  assert.equal(c.regionTargetGapSec, DEFAULT_TARGET_GAP_MS / 1000);
+  assert.equal(c.regionMaxAsks, DEFAULT_MAX_ASKS);
+  assert.equal(c.regionForgetMin, DEFAULT_FORGET_MS / 60000);
+  assert.equal(c.regionBonusSnrDb, DEFAULT_BONUS_SNR_DB);
+});
+
+test('an explicit region pacing value still wins over the default', () => {
+  const c = normalizeConfig({ mqttUrl: 'wss://x/ws', regionMaxAsks: 2, regionTargetGapSec: 15 });
+  assert.equal(c.regionMaxAsks, 2);
+  assert.equal(c.regionTargetGapSec, 15);
+});
+
+test('an unusable region pacing value falls back to the default, never to no limit', () => {
+  const c = normalizeConfig({ mqttUrl: 'wss://x/ws', regionMaxAsks: 'lots', regionTargetGapSec: -5 });
+  assert.equal(c.regionMaxAsks, DEFAULT_MAX_ASKS);
+  assert.equal(c.regionTargetGapSec, DEFAULT_TARGET_GAP_MS / 1000);
 });

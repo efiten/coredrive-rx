@@ -1,3 +1,8 @@
+import {
+  DEFAULT_ASK_GAP_MS, DEFAULT_TARGET_GAP_MS, DEFAULT_MAX_ASKS, DEFAULT_FORGET_MS,
+  DEFAULT_BONUS_SNR_DB,
+} from './regionsched.js';
+
 // Runtime deployment config, fetched from config.json (served next to
 // index.html) at startup. Nothing is baked into the bundle — sysops edit
 // config.json, not source. See config.example.json for the shape.
@@ -76,14 +81,18 @@ export function normalizeConfig(raw) {
     //                        why the firmware's own limiter is not mirrored here)
     //   regionForgetMin      silence after which the next reception counts as a NEW
     //                        encounter and the count starts over
-    regionAskGapSec: positiveSeconds(raw.regionAskGapSec, 2),
-    regionTargetGapSec: positiveSeconds(raw.regionTargetGapSec, 30),
-    regionMaxAsks: positiveSeconds(raw.regionMaxAsks, 3),
-    regionForgetMin: positiveSeconds(raw.regionForgetMin, 5),
+    // Defaults come from src/regionsched.js, never from a number repeated here. They
+    // were repeated once, and the two drifted: the scheduler said four asks per
+    // encounter while config.js said three, and since the app reads THIS file the
+    // shipped behaviour was three. Only the log line "attempt 3 of 3" showed it.
+    regionAskGapSec: positiveSeconds(raw.regionAskGapSec, DEFAULT_ASK_GAP_MS / 1000),
+    regionTargetGapSec: positiveSeconds(raw.regionTargetGapSec, DEFAULT_TARGET_GAP_MS / 1000),
+    regionMaxAsks: positiveSeconds(raw.regionMaxAsks, DEFAULT_MAX_ASKS),
+    regionForgetMin: positiveSeconds(raw.regionForgetMin, DEFAULT_FORGET_MS / 60000),
     //   regionBonusSnrDb     how much better in snr a reception has to be than the best
     //                        one this encounter already spent an ask on, to buy one
     //                        extra ask. Set from one field case, so it is a knob.
-    regionBonusSnrDb: positiveSeconds(raw.regionBonusSnrDb, 6),
+    regionBonusSnrDb: positiveSeconds(raw.regionBonusSnrDb, DEFAULT_BONUS_SNR_DB),
   };
   if (!c.mqttUrl) throw new Error('config.json: "mqttUrl" is required');
   return c;
