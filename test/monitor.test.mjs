@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   discoverDecision, isOrganicHeard, snrToPct, decayPeak, pruneTimestamps,
-  DISCOVER_INTERVAL_MS, DISCOVER_BACKOFF_MS } from '../src/monitor.js';
+  DISCOVER_INTERVAL_MS, DISCOVER_BACKOFF_MS, linkTransition } from '../src/monitor.js';
 
 test('discover fires immediately when never fired and channel quiet', () => {
   const d = discoverDecision(1000, null, 0, false);
@@ -105,4 +105,45 @@ test('the first tick after the link returns sweeps immediately', () => {
 
 test('linkUp defaults to true, so an existing caller keeps sweeping', () => {
   assert.equal(discoverDecision(1_000_000, null, 0, false).fire, true);
+});
+
+// --- Link up/down edge announcements ------------------------------------------
+// Regression (field log 2026-09-14, 08:47–08:50): "companion link back" was logged on
+// EVERY per-second tick while the link was simply up, flooding the 200-line debug ring
+// buffer so that heard/asks/regions lines rolled out within minutes — while a real drop
+// was never announced at all.
+
+test('a steady link announces nothing, tick after tick', () => {
+  let quiet = false; // link up at start
+  for (let i = 0; i < 200; i++) assert.equal(linkTransition(quiet, true), null);
+});
+
+test('a steady down link announces nothing either', () => {
+  for (let i = 0; i < 200; i++) assert.equal(linkTransition(true, false), null);
+});
+
+test('the drop is announced once, then stays quiet', () => {
+  let quiet = false;
+  assert.equal(linkTransition(quiet, false), 'down');
+  quiet = true; // caller flips the flag on an edge
+  assert.equal(linkTransition(quiet, false), null);
+});
+
+test('the return is announced once, then stays quiet', () => {
+  let quiet = true;
+  assert.equal(linkTransition(quiet, true), 'back');
+  quiet = false;
+  assert.equal(linkTransition(quiet, true), null);
+});
+
+test('a full drop/return cycle over per-second ticks announces exactly two edges', () => {
+  // Drives the real monitorTick loop: 10 s up, 5 s down, 10 s up again.
+  const ups = [...Array(10).fill(true), ...Array(5).fill(false), ...Array(10).fill(true)];
+  let quiet = false;
+  const said = [];
+  for (const up of ups) {
+    const edge = linkTransition(quiet, up);
+    if (edge) { said.push(edge); quiet = !up; }
+  }
+  assert.deepEqual(said, ['down', 'back']);
 });

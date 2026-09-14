@@ -19,7 +19,7 @@ import { createBeeper } from './beeper.js';
 import { createLocalMap } from './localmap.js';
 import { hexCellAt } from './hexgrid.js';
 import {
-  discoverDecision, isOrganicHeard, snrToPct, decayPeak, pruneTimestamps,
+  discoverDecision, isOrganicHeard, snrToPct, decayPeak, pruneTimestamps, linkTransition,
 } from './monitor.js';
 import { shareLog } from './sharelog.js';
 import { Gps } from './gps.js';
@@ -599,9 +599,10 @@ function bleLinkUp() {
 // Without it a dropped link reads as a log that simply goes quiet — which is the same
 // thing as an app that has crashed, an area with no traffic, or a feature turned off.
 function noteLinkState(linkUp) {
-  if (linkUp === state.linkQuiet) return; // linkQuiet holds the INVERSE, so this is a change
+  const edge = linkTransition(state.linkQuiet, linkUp);
+  if (!edge) return;
   state.linkQuiet = !linkUp;
-  if (!linkUp) dbg('companion link down — discover, RF sampling and region asks held until it is back', 'no');
+  if (edge === 'down') dbg('companion link down — discover, RF sampling and region asks held until it is back', 'no');
   else dbg('companion link back — discover, RF sampling and region asks resumed', 'ok');
 }
 

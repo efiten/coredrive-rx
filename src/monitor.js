@@ -71,3 +71,19 @@ export function pruneTimestamps(times, now, windowMs = 60000) {
   const cutoff = now - windowMs;
   return times.filter((t) => t >= cutoff);
 }
+
+// --- Companion link edges -----------------------------------------------------
+// linkTransition decides what the per-second tick should ANNOUNCE about the BLE link:
+// 'down', 'back', or null while nothing changed. `prevQuiet` is the caller's stored
+// flag, which holds the INVERSE of the link being up — so the steady state is
+// `prevQuiet !== linkUp`, and an edge is exactly `prevQuiet === linkUp`.
+//
+// Getting that comparison the wrong way round is not a cosmetic bug: it announces on
+// every steady tick and swallows the real edge. A field log (2026-09-14, 08:47 onward)
+// shows "companion link back" once a second for three minutes, filling the 200-line
+// debug buffer so that the heard/asks/regions lines rolled out of it — and no "link
+// down" line anywhere, because the flag never flipped.
+export function linkTransition(prevQuiet, linkUp) {
+  if (prevQuiet !== linkUp) return null; // steady: the flag already holds the inverse
+  return linkUp ? 'back' : 'down';
+}
