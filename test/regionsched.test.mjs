@@ -4,7 +4,7 @@ import {
   enqueue, dueToSend, takeNext, registerOutstanding, matchOutstanding,
   pruneOutstanding, markAnswered, markAsked, noteHeard, newSignalRange, noteSignal, DEFAULT_ASK_GAP_MS,
   DEFAULT_TARGET_GAP_MS, DEFAULT_MAX_ASKS, DEFAULT_FORGET_MS, OUTSTANDING_TTL_MS,
-  DEFAULT_BONUS_SNR_DB,
+  DEFAULT_BONUS_SNR_DB, holdUntilReply, releaseHold,
 } from '../src/regionsched.js';
 
 const GAP = DEFAULT_TARGET_GAP_MS;
@@ -278,4 +278,58 @@ test('a new encounter clears the bonus and the best-ask mark', () => {
   assert.equal(rec.attempts, 0, 'fresh run');
   assert.equal(rec.bestAskSnr, null, 'nothing to beat yet');
   assert.equal(rec.bonusUsed, false, 'and a fresh bonus to spend');
+});
+
+// --- Override hold ends on the reply ------------------------------------------
+// A repeater saved as a contact gets its stored path forced to zero-hop for the ask and
+// put back afterwards, and the queue waits for that round. It used to wait a flat 20s.
+// Field log 2026-09-14: 49a98584fce5 and 72d171e63056 both answered 2s after the ask and
+// the queue then sat blocked for another 18s each; cafe314d00e2, heard at 17:47:01, was
+// not asked until 17:47:14 because of it. Every answer in every field log so far arrived
+// 1–2s after its ask. Waiting past the reply buys nothing; waiting for a reply that has
+// not come yet is a firmware question, so the 20s stays as the no-reply fallback.
+
+// fakeTimers records the one timer a hold sets, so a test can fire it by hand.
+function fakeTimers() {
+  const t = { pending: null, cleared: false };
+  t.setTimeout = (fn, ms) => { t.pending = { fn, ms }; return 1; };
+  t.clearTimeout = () => { t.cleared = true; t.pending = null; };
+  return t;
+}
+
+test('the hold ends as soon as the reply for that repeater arrives', async () => {
+  const waiters = new Map();
+  const timers = fakeTimers();
+  const held = holdUntilReply(waiters, A, 20000, timers);
+  assert.equal(timers.pending.ms, 20000, 'the no-reply fallback is still armed');
+  assert.equal(releaseHold(waiters, A), true);
+  assert.equal(await held, 'reply');
+  assert.equal(timers.cleared, true, 'the fallback timer is cancelled, not left to fire later');
+  assert.equal(waiters.size, 0);
+});
+
+test('with no reply the hold runs its full fallback, as before', async () => {
+  const waiters = new Map();
+  const timers = fakeTimers();
+  const held = holdUntilReply(waiters, A, 20000, timers);
+  timers.pending.fn();
+  assert.equal(await held, 'timeout');
+  assert.equal(waiters.size, 0, 'a timed-out hold leaves nothing behind for a late reply to trip over');
+});
+
+test('a reply for a DIFFERENT repeater does not end this hold', async () => {
+  // Several requests can be outstanding; only the one whose contact is overridden may
+  // end the override.
+  const waiters = new Map();
+  const timers = fakeTimers();
+  const held = holdUntilReply(waiters, A, 20000, timers);
+  assert.equal(releaseHold(waiters, B), false);
+  assert.equal(timers.cleared, false);
+  timers.pending.fn();
+  assert.equal(await held, 'timeout');
+});
+
+test('a reply with no hold waiting is a no-op', () => {
+  // The ordinary case: most repeaters are not saved contacts and never had a hold.
+  assert.equal(releaseHold(new Map(), A), false);
 });

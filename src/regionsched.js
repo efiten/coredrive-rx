@@ -18,7 +18,8 @@
 // requests can be outstanding at once, and "something is pending" would file one
 // repeater's regions under another.
 //
-// Everything here is pure: no DOM, no transport, no timers. app.js does the wiring.
+// No DOM and no transport here; app.js does the wiring. The one helper that involves
+// time (holdUntilReply) takes its timers as arguments.
 
 export const OUTSTANDING_TTL_MS = 120000; // how long an unanswered tag stays matchable
 
@@ -228,4 +229,33 @@ export function markAnswered(answered, queue, target) {
   answered.add(target);
   const at = queue.indexOf(target);
   if (at >= 0) queue.splice(at, 1);
+}
+
+// holdUntilReply waits for the reply to the ask whose contact path is currently
+// overridden, or for `timeoutMs`, whichever comes first, and resolves 'reply' or
+// 'timeout'. The one helper in this module that involves time; its timers are passed in
+// so the tests can drive it.
+//
+// Why it exists: a round that overrides a saved contact holds the queue until the path
+// is restored, and that hold used to be a flat 20s. In the 2026-09-14 log 49a98584fce5
+// and 72d171e63056 both answered 2s in and the queue sat blocked 18s more each, and
+// cafe314d00e2 waited 13s behind one of them. Across every field log so far, 11 answers
+// were visible and all arrived 1–2s after the ask. Ending the hold on the reply removes
+// only time AFTER the answer is in hand; how early a restore is safe while no reply has
+// come is a firmware question, so the timeout stays for that case.
+export function holdUntilReply(waiters, target, timeoutMs, timers = { setTimeout, clearTimeout }) {
+  return new Promise((resolve) => {
+    const timer = timers.setTimeout(() => { waiters.delete(target); resolve('timeout'); }, timeoutMs);
+    waiters.set(target, () => { timers.clearTimeout(timer); waiters.delete(target); resolve('reply'); });
+  });
+}
+
+// releaseHold ends the hold for `target` if one is waiting. Returns whether it did, so
+// a reply for a repeater whose contact was never overridden — the common case — is a
+// plain no-op.
+export function releaseHold(waiters, target) {
+  const release = waiters.get(target);
+  if (!release) return false;
+  release();
+  return true;
 }

@@ -33,7 +33,7 @@ import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE
 import { buildRegionsRequest, parseRegionsResponse, parseSentAck } from './regionreq.js';
 import {
   enqueue, dueToSend, takeNext, registerOutstanding, matchOutstanding, pruneOutstanding,
-  markAnswered, markAsked, newSignalRange, noteSignal,
+  markAnswered, markAsked, newSignalRange, noteSignal, holdUntilReply, releaseHold,
 } from './regionsched.js';
 import { regionsRows } from './regionsview.js';
 import { uplinkState, uplinkWarning, pushOutcome, regionInertReason, buildLogHeader, REGION_DISCOVERY_MIN_FW } from './uplink.js';
@@ -87,6 +87,9 @@ const state = {
     supported: false,
     queue: [], targets: new Map(), answered: new Set(), outstanding: new Map(), lastSignal: new Map(),
     lastSentAt: null, busy: false, overrideRaw: null,
+    // replyWaiters: target -> release, for the one round holding a contact override open
+    // until that repeater answers (see holdUntilReply)
+    replyWaiters: new Map(),
     heard: 0, queued: 0, asks: 0, replies: 0, flooded: 0, unmatched: 0, dropped: 0,
     capped: 0, bonus: 0,
     // The signal each ask went out on, split by what came back. If these two ranges
@@ -220,11 +223,11 @@ function fireDiscover(now) {
 // reception of that repeater and by nothing else. src/regionsched.js holds the rules
 // and the reasons; this is the wiring, the BLE round and the logging.
 const REGION_ACK_TIMEOUT_MS = 4000;
-// How long a contact whose stored path was forced to zero-hop is held that way before
-// it is put back. Whether restoring earlier costs the reply is a firmware question
-// nothing here can answer, so the hold stays as long as a reply might plausibly take.
-// A round that needs an override blocks the queue for this long; overrides were needed
-// twice across four field logs.
+// How long a contact whose stored path was forced to zero-hop is held that way when its
+// repeater does NOT answer. When it does answer the hold ends there (holdUntilReply);
+// every answer in the field logs so far came 1–2s after its ask. How early a restore is
+// safe while no reply has come is a firmware question nothing here can answer, so this
+// fallback keeps the old length.
 const OVERRIDE_HOLD_MS = 20000;
 
 // noteRepeaterHeard is called for every reception that identifies a repeater. It
@@ -337,9 +340,12 @@ async function askRepeater(target) {
         + ' this encounter, queue ' + r.queue.length + ', outstanding ' + r.outstanding.size + ')', 'tx');
     }
     if (overrode) {
-      await new Promise((done) => setTimeout(done, OVERRIDE_HOLD_MS));
+      // Held until this repeater answers, or OVERRIDE_HOLD_MS when it does not. A reply
+      // can in principle land before the hold starts; then there is nothing to wait for.
+      const ended = r.answered.has(target) ? 'reply' : await holdUntilReply(r.replyWaiters, target, OVERRIDE_HOLD_MS);
+      const why = ended === 'reply' ? 'reply in, hold ended early' : 'no reply in ' + Math.round(OVERRIDE_HOLD_MS / 1000) + 's';
       const restored = await writeContact(buildRestoreFrame(r.overrideRaw), CONTACT_WRITE_TIMEOUT_MS);
-      if (restored) { clearPendingRestore(target); dbg('regions: restored ' + target.slice(0, 12) + '…’s original path', 'st'); }
+      if (restored) { clearPendingRestore(target); dbg('regions: restored ' + target.slice(0, 12) + '…’s original path (' + why + ')', 'st'); }
       else dbg('regions: restore for ' + target.slice(0, 12) + '… did not ack — will retry on next connect', 'no');
     }
   } catch (e) {
@@ -455,6 +461,7 @@ function onRegionsFrame(dv) {
   r.replies++;
   noteSignal(r.sigAnswered, hit.snr, hit.rssi);
   markAnswered(r.answered, r.queue, hit.target);
+  releaseHold(r.replyWaiters, hit.target); // no-op unless this repeater's contact is held overridden
   noteRegionsAnswer(hit.target, hit.regions, hit.truncated);
   state.queue.add({
     kind: 'regions', at: new Date().toISOString(), target: hit.target,
