@@ -33,15 +33,22 @@ function withFakeDocument(fn) {
 }
 
 test('the three numbered steps walk from pending to done', () => {
-  const s = connectSteps({ companion: 'done', id: 'active', broker: 'pending', failed: false });
+  const s = connectSteps({ companion: 'done', id: 'active', broker: 'pending' });
   assert.deepStrictEqual(s.map((x) => x.state), ['done', 'active', 'pending']);
   assert.deepStrictEqual(s.map((x) => x.label), ['Companion', 'Identity', 'CoreScope']);
 });
 
-test('a failure marks the step it happened on and stops there', () => {
-  const s = connectSteps({ companion: 'done', id: 'failed', broker: 'pending', failed: true });
+test('a failure marks the step it happened on and forces every later step to pending', () => {
+  // broker is passed as 'done', not 'pending': without the truncation this would
+  // come back 'done' and the test would fail.
+  const s = connectSteps({ companion: 'done', id: 'failed', broker: 'done' });
   assert.strictEqual(s[1].state, 'failed');
   assert.strictEqual(s[2].state, 'pending');
+});
+
+test('a failure on the first step forces both later steps to pending too', () => {
+  const s = connectSteps({ companion: 'failed', id: 'done', broker: 'active' });
+  assert.deepStrictEqual(s.map((x) => x.state), ['failed', 'pending', 'pending']);
 });
 
 test('diagnostics hide what is off and name why regions are inert', () => {
@@ -101,7 +108,7 @@ test('renderStatus builds the three numbered steps and toggles diagnostics visib
       companion: fakeElement(),
     };
 
-    const steps = connectSteps({ companion: 'done', id: 'active', broker: 'pending', failed: false });
+    const steps = connectSteps({ companion: 'done', id: 'active', broker: 'pending' });
     const diagnostics = diagnosticsLines({
       config: { regionDiscovery: true },
       flags: { fullRfLog: true, rfSampler: false },
@@ -149,7 +156,7 @@ test('renderStatus marks a low battery with the warn class, never a colour', () 
     };
 
     renderStatus(els, {
-      steps: connectSteps({ companion: 'pending', id: 'pending', broker: 'pending', failed: false }),
+      steps: connectSteps({ companion: 'pending', id: 'pending', broker: 'pending' }),
       diagnostics: diagnosticsLines({
         config: null,
         flags: { fullRfLog: true, rfSampler: true },

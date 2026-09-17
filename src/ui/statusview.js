@@ -6,12 +6,18 @@ import { regionInertReason } from '../uplink.js';
 
 const STEP_LABELS = ['Companion', 'Identity', 'CoreScope'];
 
-export function connectSteps({ companion, id, broker, failed }) {
+// A failure is already visible in the states array, so there is no separate
+// `failed` flag: once a step's own state is 'failed', every step after it is
+// forced to 'pending' regardless of what was passed in for it — a failure
+// stops the walk, it does not just decorate one step.
+export function connectSteps({ companion, id, broker }) {
   const states = [companion, id, broker];
-  return STEP_LABELS.map((label, i) => ({
-    label,
-    state: failed && states[i] === 'failed' ? 'failed' : states[i],
-  }));
+  let stopped = false;
+  return STEP_LABELS.map((label, i) => {
+    const state = stopped ? 'pending' : states[i];
+    if (state === 'failed') stopped = true;
+    return { label, state };
+  });
 }
 
 // diagnosticsLines({ config, flags, fwVer, supported }):
