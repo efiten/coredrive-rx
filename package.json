@@ -14,6 +14,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:beta": "RX_BETA=1 vite build",
     "preview": "vite preview",
     "test": "node --test",
     "deploy": "bash deploy.sh"

@@ -1,6 +1,7 @@
 // Offline-first capture buffer (IndexedDB). The field often has no cellular, so
 // receptions are buffered locally and published when connectivity returns.
-const DB_NAME = 'coredrive-rx';
+import { dbName } from './storage.js';
+const DB_NAME = dbName('coredrive-rx');
 const STORE = 'pending';
 
 function openDB() {

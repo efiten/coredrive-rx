@@ -18,6 +18,7 @@
 // so a CMD_GET_CONTACT_BY_KEY reply can be echoed back as a CMD_ADD_UPDATE_CONTACT
 // command by rewriting byte 0 (and, for the override, byte 35).
 import { bytesToHex, hexToBytes } from './meshpacket.js';
+import { prefKey } from './storage.js';
 
 export const CMD_GET_CONTACT_BY_KEY = 30; // examples/companion_radio/MyMesh.cpp:35
 export const CMD_ADD_UPDATE_CONTACT = 9;  // examples/companion_radio/MyMesh.cpp:14
@@ -94,7 +95,7 @@ export function buildRestoreFrame(raw) {
 // after every successful restore: the ORIGINAL (unmodified) 148-byte contact frame,
 // which companion it belongs to (self pubkey), and which contact it targets — keyed
 // so app.js can refuse to replay it against a different companion on connect.
-export const RESTORE_STORAGE_KEY = 'coredrive.contactPathRestore';
+export const RESTORE_STORAGE_KEY = prefKey('contactPathRestore');
 
 export function encodePendingRestore(selfPubkeyHex, targetPubkeyHex, raw) {
   return JSON.stringify({
