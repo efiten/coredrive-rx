@@ -5,149 +5,140 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>CoreDrive RX — coverage capture</title>
   <link rel="manifest" href="/manifest.webmanifest" />
-  <meta name="theme-color" content="#0f1115" />
+  <!-- Literal value, not var(--ch-bg): a meta tag can't read a CSS variable.
+       Must stay equal to --ch-bg in the dark theme (src/styles/tokens.css). -->
+  <meta name="theme-color" content="#0b0e14" />
   <link rel="apple-touch-icon" href="/icon-192.png" />
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <style>
-    body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; background: #0f1115; color: #e6e6e6; }
-    h1 { font-size: 18px; }
-    .card { background: #1a1d24; border: 1px solid #2a2f3a; border-radius: 8px; padding: 12px; margin: 10px 0; }
-    label { display: block; font-size: 12px; color: #9aa4b2; margin: 6px 0 2px; }
-    button { width: 100%; padding: 12px; margin-top: 4px; font-size: 15px; border: 0; border-radius: 8px; background: #2ecc71; color: #07120a; font-weight: 600; }
-    button.danger { background: #e74c3c; color: #fff; }
-    button:disabled { opacity: .6; }
-    .btn2 { background: #3b82f6; color: #fff; }
-    .btn2.on { background: #2ecc71; color: #07120a; }
-    .stats { display: flex; gap: 16px; font-size: 24px; font-weight: 700; }
-    .stats div { flex: 1; text-align: center; }
-    .stats small { display: block; font-size: 11px; color: #9aa4b2; font-weight: 400; }
-    .muted { font-size: 12px; color: #9aa4b2; margin-top: 6px; }
-    .progress { margin-top: 10px; font: 12px/1.7 ui-monospace, monospace; }
-    .progress div { color: #9fe6b8; }
-    .progress div.pending { color: #9aa4b2; }
-    .progress div.err { color: #ff8b7a; }
-    .row { display: flex; gap: 8px; }
-    .row button { flex: 1; }
-    label.inline { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; font-size: 13px; color: #e6e6e6; }
-    label.inline input { width: auto; }
-    #log { background: #0a0c10; border: 1px solid #2a2f3a; border-radius: 6px; padding: 8px; font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow: auto; margin-top: 8px; }
-    #log .lg-ok { color: #9fe6b8; } /* captured / published (the data product) */
-    #log .lg-no { color: #ff8b7a; } /* held back / failed */
-    #log .lg-st { color: #9aa4b2; } /* status */
-    #log .lg-tx { color: #e6a23c; } /* our own outbound radio sends (discover / flood) */
-    .statusstrip { font-size: 12px; color: #9aa4b2; margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-    .statusstrip .udot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #9aa4b2; margin-right: 3px; }
-    .discstatus { font-size: 12px; margin-top: 4px; min-height: 13px; color: #9aa4b2; }
-    .lh { font-size: 13px; }
-    .meter { position: relative; height: 18px; background: #0a0c10; border: 1px solid #2a2f3a; border-radius: 5px; overflow: hidden; margin-top: 6px; }
-    .meterfill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: #2ecc71; transition: width .2s linear; }
-    .meterpeak { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; left: 0; transition: left .2s linear; }
-    .meterval { font: 12px ui-monospace, monospace; color: #9aa4b2; margin-top: 4px; }
-    .recent { display: flex; flex-direction: column; gap: 4px; }
-    .rr { display: flex; align-items: center; gap: 8px; padding: 7px 9px; background: #11141a; border: 1px solid #2a2f3a; border-radius: 6px; font-size: 13px; }
-    .rr .dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
-    .rr .rk { font-family: ui-monospace, monospace; }
-    .rr .rname { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .rr .rsnr { margin-left: auto; font-weight: 600; flex: 0 0 auto; }
-    .rr .rc { color: #9aa4b2; font-size: 11px; min-width: 34px; text-align: right; }
-    .rg { display: flex; flex-direction: column; gap: 4px; }
-    .rgrow { padding: 7px 9px; background: #11141a; border: 1px solid #2a2f3a; border-radius: 6px; font-size: 13px; }
-    .rgrow .rgname { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .rgrow .rgregions { font-size: 12px; color: #e6e6e6; margin-top: 2px; }
-    .rgrow .rgregions.none { color: #e6a23c; }
-    .rgrow .rgunscoped { margin-left: 6px; font-size: 10px; color: #9aa4b2; border: 1px solid #2a2f3a; border-radius: 4px; padding: 0 4px; white-space: nowrap; }
-    .rgrow .rgwarn { font-size: 11px; color: #ff8b7a; margin-top: 2px; }
-    body { padding-bottom: 70px; }
-    .bottombar { position: fixed; bottom: 0; left: 0; right: 0; height: 56px; display: flex; background: #1a1d24; border-top: 1px solid #2a2f3a; z-index: 1000; }
-    .bottombar .tab { flex: 1; background: transparent; color: #9aa4b2; border: 0; border-radius: 0; margin: 0; font-size: 14px; font-weight: 600; }
-    .bottombar .tab.active { color: #2ecc71; }
-    #view-map #liveMap { height: calc(100vh - 140px); min-height: 300px; border: 1px solid #2a2f3a; border-radius: 6px; }
-  </style>
+  <link rel="stylesheet" href="/src/styles/tokens.css" />
+  <link rel="stylesheet" href="/src/styles/app.css" />
+  <script>
+    try {
+      var p = localStorage.getItem('coredrive.theme')
+      document.documentElement.dataset.theme = (p === 'dark' || p === 'light') ? p
+        : matchMedia('(prefers-color-scheme: dark)').matches === false ? 'light' : 'dark'
+    } catch (e) {}
+  </script>
 </head>
 <body>
-  <h1>📡 CoreDrive RX <span id="appver" style="font-size:11px;font-weight:400;color:#9aa4b2"></span></h1>
-  <div class="muted" style="margin-top:-6px;margin-bottom:8px">Mobile RX coverage for CoreScope</div>
-  <div id="btnotice" style="display:none;background:#3a1414;color:#ff8b7a;border:1px solid #6b2020;border-radius:8px;padding:10px 12px;margin:10px 0;font-size:13px">⚠️ Web Bluetooth isn't available in this browser. On <b>iOS</b>, open this page in the <b>Bluefy</b> browser; on <b>Android</b>, use <b>Chrome</b>.</div>
-  <div id="view-home">
-  <div class="card">
-    <div class="stats">
-      <div><span id="cNodes">0</span><small>nodes</small></div>
-      <div><span id="cHex">0</span><small>hex cells</small></div>
-      <div><span id="cRx">0</span><small>receptions</small></div>
-      <div id="cRfLogRow" style="display:none"><span id="cRfLog">0</span><small>RF log</small></div>
+  <div id="map"></div>
+
+  <header id="topbar">
+    <div id="tb-counts" class="chip mono"></div>
+    <div id="tb-dots">
+      <i id="dot-ble"></i>
+      <i id="dot-mqtt"></i>
     </div>
-    <div class="statusstrip">
-      <span id="sGps">… no fix</span><span>·</span>
-      <span id="sPending">0 pending</span><span>·</span>
-      <span id="sUpload"><span class="udot" id="uDot"></span>upload</span><span>·</span>
-      <span id="sRate">0 pkt/min</span>
-    </div>
-    <div class="discstatus" id="discStatus"></div>
+    <button id="menu-btn" class="btn2" aria-label="Menu">⋮</button>
+  </header>
+
+  <div id="toast-stack">
+    <div id="btnotice" class="chip warn" hidden>Web Bluetooth isn't available in this browser. On iOS, open this page in the Bluefy browser; on Android, use Chrome.</div>
   </div>
-  <div class="card" id="lastHeardCard" style="display:none">
-    <label>Last reception</label>
-    <div class="lh" id="lhLine">—</div>
-    <div class="meter"><div class="meterfill" id="snrFill"></div><div class="meterpeak" id="snrPeak"></div></div>
-    <div class="meterval" id="snrVal"></div>
-  </div>
-  <div id="pausechip" style="display:none;background:#3a2e10;color:#e6a23c;border:1px solid #6b5212;border-radius:8px;padding:10px 12px;margin:10px 0;font-size:13px;font-weight:600"></div>
-  <!-- Uplink warning: shown continuously while receptions are being queued but not
-       uploaded. Red, not amber — the pause chip above is a normal condition, this
-       one is not. A degraded uplink used to be visible nowhere on this screen. -->
-  <div id="uplinkchip" style="display:none;background:#3a1414;color:#ff8a80;border:1px solid #6b1212;border-radius:8px;padding:10px 12px;margin:10px 0;font-size:13px;font-weight:600"></div>
-  <div class="card">
-    <label>Recently heard nodes (latest SNR)</label>
-    <div id="recent" class="recent"><div class="muted">— nothing yet —</div></div>
-  </div>
-  <div class="card" id="regionsCard" style="display:none">
-    <label>Last 5 declared scopes (region discovery)</label>
-    <div id="regionsList" class="rg"></div>
-  </div>
-  </div><!-- /view-home -->
-  <div id="view-map" style="display:none">
-    <label>Live coverage (this session) — hexes persist until you reload</label>
-    <div id="liveMap"></div>
-  </div>
-  <div id="view-settings" style="display:none">
+
+  <section id="screen-drive" class="screen">
+    <button id="fab-recenter" class="fab" aria-label="Recenter">⌖</button>
+    <div id="hud">
+      <div id="hud-snr" class="mono">—</div>
+      <div class="muted">
+        <span id="hud-rssi"></span>
+        <span id="hud-since"></span>
+        <span id="hud-sender"></span>
+      </div>
+      <div id="hud-backlog" class="muted"></div>
+      <div id="hud-discover" class="muted"></div>
+    </div>
+  </section>
+
+  <section id="screen-heard" class="screen" hidden>
+    <div id="hero" class="card">
+      <div id="hero-snr">—</div>
+      <div id="hero-meter" class="meter">
+        <div id="hero-fill" class="meter-fill"></div>
+        <div id="hero-peak" class="meter-peak"></div>
+      </div>
+      <div class="muted">
+        <span id="hero-name">—</span>
+        <span id="hero-rssi"></span>
+        <span id="hero-since"></span>
+      </div>
+      <button id="hero-pause" class="btn2">Pause</button>
+    </div>
+    <div id="status-line" class="muted">
+      <span id="sl-gps">… no fix</span>
+      <span id="sl-pending">0 pending</span>
+      <span id="sl-upload"><i id="sl-udot" class="dot"></i>upload</span>
+      <span id="sl-rate">0 pkt/min</span>
+    </div>
+    <div id="discover-line" class="muted">
+      <span id="discover-text"></span>
+      <button id="discover-btn" class="btn2">Discover</button>
+    </div>
+    <div id="recent" class="card recent"><div class="muted">— nothing yet —</div></div>
+    <details id="fold-counts" class="fold card">
+      <summary>Counts</summary>
+      <div id="fold-counts-body">
+        <div><span id="cNodes">0</span> <span class="muted">nodes</span></div>
+        <div><span id="cHex">0</span> <span class="muted">hex cells</span></div>
+        <div><span id="cRx">0</span> <span class="muted">receptions</span></div>
+        <div id="cRfLogRow" hidden><span id="cRfLog">0</span> <span class="muted">RF log</span></div>
+      </div>
+    </details>
+    <details id="fold-scopes" class="fold card">
+      <summary>Last 5 declared scopes</summary>
+      <div id="fold-scopes-body">
+        <div id="regionsList" class="rg"></div>
+      </div>
+    </details>
+  </section>
+
+  <section id="screen-status" class="screen" hidden>
     <div class="card">
-      <button id="btnConnect">Connect companion (BLE)</button>
-      <div class="progress" id="progress"></div>
-      <div class="muted" id="status"></div>
+      <button id="btnConnect" class="btn">Connect companion (BLE)</button>
+      <div id="progress" class="mono muted"></div>
+      <div id="status" class="muted"></div>
     </div>
     <div class="card">
-      <label>CoreScope</label>
-      <div class="muted" id="brokerStatus">— not connected —</div>
-      <button id="btnPush" class="btn2" style="margin-top:8px">Push pending now</button>
+      <div id="brokerStatus" class="muted">— not connected —</div>
+      <button id="btnPush" class="btn2">Push pending now</button>
     </div>
     <div class="card">
-      <label>Companion</label>
-      <div class="muted" id="companionInfo">— not connected —</div>
-      <div class="muted" id="hashinfo"></div>
+      <div id="companionInfo" class="muted">— not connected —</div>
+      <div id="hashinfo" class="muted"></div>
+      <div id="batteryInfo" class="muted"></div>
     </div>
     <div class="card">
-      <label>Capture</label>
-      <label class="inline"><input type="checkbox" id="chkSound"> Sound ping when a node is mapped</label>
+      <label><input type="checkbox" id="chkSound" /> Sound ping when a node is mapped</label>
+      <label><input type="checkbox" id="chkVerbose" /> Verbose (raw packet bytes + unattributable frames)</label>
     </div>
     <div class="card">
-      <label>Diagnostics</label>
-      <div class="muted" id="fullRfLogInfo" style="display:none">Full RF logging: on</div>
-      <div class="muted" id="rfSamplerInfo" style="display:none"></div>
-      <div class="muted" id="regionsInfo" style="display:none"></div>
-      <label class="inline"><input type="checkbox" id="chkVerbose"> Verbose (raw packet bytes + unattributable frames)</label>
-      <div class="row" style="margin-top:10px">
+      <div id="fullRfLogInfo" class="muted" hidden>Full RF logging: on</div>
+      <div id="rfSamplerInfo" class="muted" hidden></div>
+      <div id="regionsInfo" class="muted" hidden></div>
+      <div class="row">
         <button id="btnDbg" class="btn2">Show debug log</button>
         <button id="btnClear" class="btn2">Clear log</button>
       </div>
-      <button id="btnShareLog" class="btn2" style="margin-top:8px">📤 Share / mail debug log</button>
-      <pre id="log" style="display:none"></pre>
+      <button id="btnShareLog" class="btn2">Share / mail debug log</button>
     </div>
+    <div class="card">
+      <button id="btnTheme" class="btn2">Theme</button>
+      <span id="appver" class="muted"></span>
+      <button id="btnUpdate" class="btn2" hidden>Update available</button>
+    </div>
+  </section>
+
+  <div id="sheet-log" class="sheet" hidden>
+    <pre id="log" class="mono"></pre>
   </div>
-  <nav class="bottombar">
-    <button id="tabHome" class="tab active">🏠 Home</button>
-    <button id="tabMap" class="tab">🗺️ Map</button>
-    <button id="tabSettings" class="tab">⚙️ Settings</button>
+  <div id="sheet-whatsnew" class="sheet" hidden></div>
+  <div id="sheet-backdrop" hidden></div>
+
+  <nav id="tabs">
+    <button id="tab-drive" aria-selected="true">Drive</button>
+    <button id="tab-heard" aria-selected="false">Heard</button>
+    <button id="tab-status" aria-selected="false">Status</button>
   </nav>
+
   <script type="module" src="/src/app.js"></script>
 </body>
 </html>
