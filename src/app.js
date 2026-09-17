@@ -189,7 +189,7 @@ const STATUS = {
 // them. The first four are written on every monitor tick.
 const EL = {
   log: els('log'),
-  discoverText: els('discover-text'), hudDiscover: els('hud-discover'),
+  discoverText: els('discover-text'), discoverBtn: els('discover-btn'), hudDiscover: els('hud-discover'),
   tbCounts: els('tb-counts'), hudBacklog: els('hud-backlog'),
   heroPause: els('hero-pause'), rfSampleReadout: els('rfSampleReadout'),
   dotBle: els('dot-ble'), dotMqtt: els('dot-mqtt'),
@@ -248,13 +248,27 @@ function dbg(msg, level) {
   appendLogLine(EL.log, { text, level }, LOG_LINE_CAP);
 }
 
-// showTab is shell.show plus the one thing the shell cannot know: MapLibre only
-// sizes itself correctly while its container is visible, so the map is resized
-// every time Drive appears.
+// onTabShown is what the shell itself cannot know, and it runs whether the tab
+// changed through showTab or through the shell's own tab buttons:
+//
+//   - MapLibre only sizes itself correctly while its container is visible, so
+//     the map is resized every time Drive appears.
+//   - #map is a body-level layer that nothing hides, so without the gate the GL
+//     canvas repainted and fetched vector tiles on every GPS fix for a whole
+//     drive spent on Heard. Closed, the map records but does not paint; opening
+//     it replays what was missed, so Drive is correct the moment it is shown.
+//   - the battery and the update check are Status-screen work.
+function onTabShown(tab) {
+  if (state.map) {
+    state.map.setActive(tab === 'drive');
+    if (tab === 'drive') state.map.resize();
+  }
+  if (tab === 'status') { requestBattery(); checkForUpdate(); }
+}
+
 function showTab(tab) {
   shell.show(tab);
-  if (tab === 'drive' && state.map) state.map.resize();
-  if (tab === 'status') { requestBattery(); checkForUpdate(); }
+  onTabShown(tab);
 }
 
 // --- Discover (inbound: who can I hear?) ---
@@ -884,8 +898,13 @@ function onBrokerStatus(s, arg, id) {
   if (s === 'connect') drain().then(renderHeardScreen).catch(() => {}); // flush backlog on (re)connect
 }
 
-function renderConnectButton() {
+// renderConnectionControls paints the two controls that follow the connection
+// state and nothing else. Discover is in here because its handler no-ops while
+// disconnected: a button that is enabled and does nothing is indistinguishable
+// from one whose sweep went out and heard nobody.
+function renderConnectionControls() {
   els('btnConnect').textContent = state.connected ? 'Disconnect' : 'Connect companion (BLE)';
+  EL.discoverBtn.disabled = !state.connected;
 }
 
 // setStep moves one of the three numbered connect steps and repaints them.
@@ -1218,7 +1237,7 @@ async function connectAll() {
     setStep('broker', uploading ? 'done' : 'failed');
     if (!uploading) dbg('capturing + buffering, NOT uploading — config.json not loaded; needs internet once (retrying)', 'no');
     state.connected = true;
-    renderConnectButton();
+    renderConnectionControls();
     state.lastFireAt = 0; // fire a discover sweep immediately on the first tick
     state.tick = setInterval(monitorTick, 1000);
     startRfSampler();
@@ -1325,6 +1344,12 @@ async function disconnectAll(keepSteps) {
   state.motion = null;
   state.paused = false;
   state.batteryMv = null; // a stale reading must not keep the BLE dot amber
+  // The previous companion's firmware version must not decide anything about the
+  // next one: regionInertReason and the exported log header both read it, so
+  // after a swap the Status regions line issued a verdict about a device that is
+  // no longer attached. state.regions.supported is already reset before the
+  // query in connectAll; this is the same rule for the number it came from.
+  state.fwVer = null;
   renderPauseChip();
   clearInterval(state.tick); state.tick = null;
   stopRfSampler();
@@ -1346,7 +1371,7 @@ async function disconnectAll(keepSteps) {
   // keepSteps is set by a FAILED connect, so the step that failed stays on screen
   // instead of being reset to three pending ones by the disconnect that follows it.
   if (!keepSteps) { state.steps = { companion: 'pending', id: 'pending', broker: 'pending' }; log('disconnected.'); }
-  renderConnectButton();
+  renderConnectionControls();
   renderStatusScreen();
 }
 
@@ -1489,7 +1514,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     renderStatusScreen();
   }
   renderUplinkChip();
-  renderConnectButton();
+  renderConnectionControls();
   state.wakeLock = createWakeLock();
   // Audio cue (#7): default off, but remember the choice across app starts.
   state.beeper = createBeeper();
@@ -1565,11 +1590,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   els('discover-btn').addEventListener('click', () => { if (state.connected) fireDiscover(Date.now()); });
   els('fab-recenter').addEventListener('click', () => { if (state.map) state.map.follow(true); });
   els('menu-btn').addEventListener('click', () => showTab('status'));
-  // The shell's own tab buttons do not go through showTab: MapLibre can only size
-  // itself while its container is visible, and the battery/update check happen
-  // when the Status screen appears.
-  els('tab-drive').addEventListener('click', () => { if (state.map) state.map.resize(); });
-  els('tab-status').addEventListener('click', () => { requestBattery(); checkForUpdate(); });
+  // The shell's own tab buttons do not go through showTab, so they get the same
+  // per-tab work here. Heard is listed too: leaving Drive is what closes the
+  // map's sync gate (onTabShown).
+  for (const t of ['drive', 'heard', 'status']) {
+    els('tab-' + t).addEventListener('click', () => onTabShown(t));
+  }
   applyTheme(storedThemePref());
   els('btnTheme').addEventListener('click', () => applyTheme(nextThemePref(state.themePref)));
   // Cold-start splash gate: dismissed persists (prefKey), so this reads false
@@ -1600,6 +1626,10 @@ window.addEventListener('DOMContentLoaded', async () => {
   // on screen before that bundle is fetched.
   try {
     state.map = await createMap({ container: 'map', theme: resolveTheme(state.themePref, prefersDark()) });
+    // The map is built after the first tab is shown, so it has to be told which
+    // one that is: a boot onto Status must not leave the gate open. Only the map
+    // half of onTabShown — the Status work already ran when that tab was shown.
+    state.map.setActive(shell.current() === 'drive');
     if (shell.current() === 'drive') state.map.resize();
   } catch (e) {
     dbg('the session map could not start: ' + e.message, 'no');
