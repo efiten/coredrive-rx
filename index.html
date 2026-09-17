@@ -139,7 +139,10 @@
   </section>
 
   <div id="sheet-log" class="sheet" hidden>
-    <pre id="log" class="mono"></pre>
+    <!-- A div, not a <pre>: src/ui/statusview.js's appendLogLine gives each line
+         its own <div class="lg-*">, which is not legal inside a <pre>. The
+         pre-wrap and the monospace font come from #log and .mono in app.css. -->
+    <div id="log" class="mono"></div>
   </div>
   <div id="sheet-whatsnew" class="sheet" hidden></div>
   <div id="sheet-backdrop" hidden></div>

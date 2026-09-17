@@ -89,8 +89,9 @@ const state = {
   // client's endless reconnect loop is named once rather than flooding the log.
   pubFailures: new Map(), staleReported: new Set(),
   lastHeard: null, snrBarPct: 0, snrPeakPct: 0,
-  // auto-discover
-  lastHeardAt: null, lastFireAt: 0, tick: null,
+  // auto-discover; discover is the last decision rendered, so a pause/resume can
+  // repaint the HUD line without waiting for the next tick
+  lastHeardAt: null, lastFireAt: 0, tick: null, discover: { state: 'paused', secs: 0 },
   // RF environment sampler; lastRfSample is the Status screen's readout
   rfTimer: null, lastRfSample: null, rfGen: 0,
   // linkQuiet: true while the BLE link is down, so the pause and the resume are each
@@ -141,10 +142,12 @@ const HEX_COUNT_RES = 10; // fixed res (~90 m cells) for the distinct-hex sessio
 // Build version, injected from package.json by Vite (see vite.config.js).
 const VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev';
 
-// --- Element sets handed to the src/ui renderers ----------------------------
-// Looked up once: index.html's ids are static markup, and this module is a
-// deferred `type="module"` script, so the document is parsed before it runs.
-// app.js owns this id → renderer mapping; no src/ui module knows an id.
+// --- Elements ---------------------------------------------------------------
+// Every element a renderer touches is looked up once here: index.html's ids are
+// static markup, and this module is a deferred `type="module"` script, so the
+// document is parsed before it runs. app.js owns this id → renderer mapping; no
+// src/ui module knows an id. (One-off lookups in the boot block and in event
+// handlers still use els() directly; those run on a gesture, not per render.)
 const HERO = {
   snr: els('hero-snr'), rssi: els('hero-rssi'), since: els('hero-since'),
   name: els('hero-name'), fill: els('hero-fill'), peak: els('hero-peak'),
@@ -165,6 +168,15 @@ const STATUS = {
   progress: els('progress'),
   fullRfLog: els('fullRfLogInfo'), rfSampler: els('rfSamplerInfo'), regions: els('regionsInfo'),
   battery: els('batteryInfo'), broker: els('brokerStatus'), companion: els('companionInfo'),
+};
+// The single elements app.js writes itself, because no src/ui renderer owns
+// them. The first four are written on every monitor tick.
+const EL = {
+  log: els('log'),
+  discoverText: els('discover-text'), hudDiscover: els('hud-discover'),
+  tbCounts: els('tb-counts'), hudBacklog: els('hud-backlog'),
+  heroPause: els('hero-pause'), rfSampleReadout: els('rfSampleReadout'),
+  dotBle: els('dot-ble'), dotMqtt: els('dot-mqtt'),
 };
 
 // The shell owns every "which element is visible" decision (tabs, sheets,
@@ -205,7 +217,7 @@ function dbg(msg, level) {
   const text = '[' + new Date().toLocaleTimeString() + '] ' + msg;
   state.logLines.unshift(text);
   if (state.logLines.length > LOG_LINE_CAP) state.logLines.length = LOG_LINE_CAP;
-  appendLogLine(els('log'), { text, level }, LOG_LINE_CAP);
+  appendLogLine(EL.log, { text, level }, LOG_LINE_CAP);
 }
 
 // showTab is shell.show plus the one thing the shell cannot know: MapLibre only
@@ -499,12 +511,20 @@ function onRegionsFrame(dv) {
     + ' (' + r.replies + ' of ' + r.asks + ' asks answered)', 'ok');
 }
 
-// renderDiscoverStatus writes the same sentence to the Heard discover line and
-// to the Drive HUD, which are the two places the sweep is visible.
+// PAUSED_TEXT is one state on two surfaces: the hero card's chip on Heard and
+// the HUD's own line on Drive.
+const PAUSED_TEXT = '⏸ Paused — stationary (resumes when you move)';
+
+// renderDiscoverStatus writes the Heard discover line and the Drive HUD line,
+// the two places the sweep is visible. On Drive the map is all you look at, so
+// while the motion gate is pausing capture the HUD line carries the gate's own
+// text instead of the countdown — "why did capture stop" is the question the
+// chip answers, and the chip itself is on the other screen. The countdown comes
+// back on the tick after the gate releases.
 function renderDiscoverStatus(dec) {
-  const text = discoverText(dec);
-  els('discover-text').textContent = text;
-  els('hud-discover').textContent = text;
+  state.discover = dec; // kept so renderPauseChip can repaint the HUD line at once
+  EL.discoverText.textContent = discoverText(dec);
+  EL.hudDiscover.textContent = state.paused ? PAUSED_TEXT : discoverText(dec);
 }
 
 function discoverText(dec) {
@@ -519,9 +539,9 @@ function discoverText(dec) {
 // no manual pause in this app. The chip is the reading's own, so it sits with it
 // rather than in the toast stack.
 function renderPauseChip() {
-  const el = els('hero-pause');
-  el.textContent = '⏸ Paused — stationary (resumes when you move)';
-  el.hidden = !state.paused;
+  EL.heroPause.textContent = PAUSED_TEXT;
+  EL.heroPause.hidden = !state.paused;
+  renderDiscoverStatus(state.discover); // the HUD line follows the same state
 }
 
 // setPaused reacts to a moving↔stationary transition. Capture is gated in processFrame
@@ -577,6 +597,9 @@ function renderStatusScreen() {
       flags: { fullRfLog: featureEnabled(cfg, 'fullRfLog'), rfSampler: featureEnabled(cfg, 'rfSampler') },
       fwVer: state.fwVer,
       supported: state.regions.supported,
+      // Whether a companion has been read at all: with none, an unknown firmware
+      // version is not yet a reason for anything (src/ui/statusview.js).
+      connected: state.connected,
     }),
     battery: batteryLine(state.batteryMv),
     broker: state.publisher ? (BROKER_TEXT[state.brokerState] || state.brokerState) : '— not connected —',
@@ -593,7 +616,7 @@ function renderStatusScreen() {
 // ("RF sampler: on") that src/ui/statusview.js owns, and a second writer there
 // would leave the two fighting over one line. Hidden until a sample exists.
 function renderRfSampleReadout() {
-  const el = els('rfSampleReadout');
+  const el = EL.rfSampleReadout;
   const s = state.lastRfSample;
   el.hidden = !s;
   if (s) el.textContent = 'RF: ' + s.noise_floor + ' dBm · RX air ' + s.rx_air_secs + ' s';
@@ -603,8 +626,8 @@ function renderRfSampleReadout() {
 // goes amber on a low companion battery (src/ui/battery.js), which is the only
 // place a low pack is visible from the map.
 function renderDots() {
-  els('dot-ble').className = !state.connected ? '' : isLowBattery(state.batteryMv) ? 'warn' : 'on';
-  els('dot-mqtt').className = !state.publisher ? ''
+  EL.dotBle.className = !state.connected ? '' : isLowBattery(state.batteryMv) ? 'warn' : 'on';
+  EL.dotMqtt.className = !state.publisher ? ''
     : state.brokerState === 'connect' ? 'on'
     : state.brokerState === 'reconnect' ? 'warn'
     : 'bad'; // offline / close / error — a dead link must not read as idle
@@ -774,8 +797,8 @@ async function renderHeardScreen() {
     counts,
     answers: state.regions.answers,
   });
-  els('tb-counts').textContent = counts.summary;
-  els('hud-backlog').textContent = state.pendingCount ? state.pendingCount + ' unsent' : '';
+  EL.tbCounts.textContent = counts.summary;
+  EL.hudBacklog.textContent = state.pendingCount ? state.pendingCount + ' unsent' : '';
   renderDots();
 }
 
@@ -1355,7 +1378,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (state.soundEnabled) state.beeper.ensure(); // unlock audio in the same gesture
     connectAll();
   });
-  els('btnClear').addEventListener('click', () => { state.logLines.length = 0; els('log').textContent = ''; });
+  els('btnClear').addEventListener('click', () => { state.logLines.length = 0; EL.log.replaceChildren(); });
   els('chkVerbose').addEventListener('change', (e) => { state.verbose = e.target.checked; });
   els('chkSound').addEventListener('change', (e) => {
     state.soundEnabled = e.target.checked;

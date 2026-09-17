@@ -188,6 +188,52 @@ test('renderStatus marks a low battery with the warn class, never a colour', () 
   });
 });
 
+test('with no companion yet, regions read as on and say the firmware is checked on connect', () => {
+  // Controller ruling (fix round 2): before a companion has been read, supported
+  // is false and fwVer null, so regionInertReason's firmware sentence would be a
+  // verdict on nothing gathered. v1.18.2 guarded this case and this is its wording.
+  const lines = diagnosticsLines({
+    config: { regionDiscovery: true },
+    flags: { fullRfLog: true, rfSampler: true },
+    fwVer: null,
+    supported: false,
+    connected: false,
+  });
+  const byId = Object.fromEntries(lines.map((l) => [l.id, l]));
+  assert.strictEqual(byId.regions.show, true);
+  assert.strictEqual(byId.regions.text, 'Region discovery: on (firmware checked on connect)');
+});
+
+test('once a companion IS connected, an unreadable firmware version is a real reason', () => {
+  // Same inputs as the test above apart from `connected`: without that flag
+  // reaching regionsText, this would read "checked on connect" forever.
+  const lines = diagnosticsLines({
+    config: { regionDiscovery: true },
+    flags: { fullRfLog: true, rfSampler: true },
+    fwVer: null,
+    supported: false,
+    connected: true,
+  });
+  const byId = Object.fromEntries(lines.map((l) => [l.id, l]));
+  assert.match(byId.regions.text, /^Region discovery: off — /);
+  assert.match(byId.regions.text, /firmware version could not be read/);
+});
+
+test('the pre-connect wording never hides a config that has regions switched off', () => {
+  // regionDiscovery off plus no companion: the config's own answer wins, and the
+  // line still shows rather than being hidden the way v1.18.2 hid it.
+  const lines = diagnosticsLines({
+    config: { regionDiscovery: false },
+    flags: { fullRfLog: true, rfSampler: true },
+    fwVer: null,
+    supported: false,
+    connected: false,
+  });
+  const byId = Object.fromEntries(lines.map((l) => [l.id, l]));
+  assert.strictEqual(byId.regions.show, true);
+  assert.match(byId.regions.text, /regionDiscovery is off in config\.json/);
+});
+
 test('logClass maps each dbg level to its own class, and anything else to status', () => {
   assert.strictEqual(logClass('ok'), 'lg-ok');
   assert.strictEqual(logClass('no'), 'lg-no');

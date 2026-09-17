@@ -20,7 +20,7 @@ export function connectSteps({ companion, id, broker }) {
   });
 }
 
-// diagnosticsLines({ config, flags, fwVer, supported }):
+// diagnosticsLines({ config, flags, fwVer, supported, connected }):
 //   - config is the RAW config object or null, passed straight through to
 //     regionInertReason (src/uplink.js:97) — its first gate needs the real
 //     "not loaded yet" case, which a pre-resolved flags object would hide.
@@ -28,17 +28,28 @@ export function connectSteps({ companion, id, broker }) {
 //     featureEnabled(cfg, name) (src/config.js) — this file does not read
 //     config.fullRfLog/config.rfSampler itself, so it cannot drift from what
 //     FEATURE_DEFAULTS/NO_CONFIG_DEFAULTS decide a missing key means.
-export function diagnosticsLines({ config, flags, fwVer, supported }) {
+//   - connected is whether a companion is connected, which is the one thing
+//     regionInertReason cannot know; see regionsText.
+export function diagnosticsLines({ config, flags, fwVer, supported, connected }) {
   const inert = regionInertReason({ config, supported, fwVer });
   return [
     { id: 'fullRfLog', show: !!flags.fullRfLog, text: 'Full RF logging: on' },
     { id: 'rfSampler', show: !!flags.rfSampler, text: 'RF sampler: on' },
-    {
-      id: 'regions',
-      show: true,
-      text: inert ? `Region discovery: off — ${inert}` : 'Region discovery: on',
-    },
+    { id: 'regions', show: true, text: regionsText({ config, fwVer, connected, inert }) },
   ];
+}
+
+// Before a companion has ever been read there is no evidence either way:
+// `supported` is still false and fwVer unknown, so regionInertReason's firmware
+// sentence would be a verdict on nothing gathered. v1.18.2 guarded exactly this
+// case and said "checked on connect"; that wording is kept. The config gate is
+// read raw here because regionInertReason's own gate (src/uplink.js:99) reads
+// the same field the same way, and normalizeConfig always fills it in.
+function regionsText({ config, fwVer, connected, inert }) {
+  if (config && config.regionDiscovery && fwVer == null && !connected) {
+    return 'Region discovery: on (firmware checked on connect)';
+  }
+  return inert ? `Region discovery: off — ${inert}` : 'Region discovery: on';
 }
 
 // --- The debug log ---------------------------------------------------------
