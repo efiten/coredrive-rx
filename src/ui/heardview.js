@@ -39,23 +39,34 @@ export function countsModel({ nodes = 0, hex = 0, rx = 0, rfLog = 0, fullRfLog }
   };
 }
 
-// scopeRows turns regionsRows' answers into the two strings the "declared scopes"
-// card shows per row: a resolved name (or the raw target when unresolved) and the
-// region text. An empty region list reads as "declares nothing" UNLESS the answer
-// is also unscoped or truncated, in which case that fact is shown instead — the
-// same override regionsview.js's own comment describes ('*' and truncation are
-// both real facts, never left blank).
+// The two sentences v1.18.2 showed, kept out of the renderer so the test and the
+// screen cannot drift apart.
+export const SCOPE_NOTHING_TEXT = 'declares no regions flood-allowed';
+export const SCOPE_TRUNCATED_TEXT = '⚠ truncated — some regions may be missing';
+
+// scopeRows turns regionsRows' answers into one row model for the "declared
+// scopes" card. The three facts stay three fields, exactly as regionsview.js
+// separates them, because they answer different questions:
+//
+//   regions    the named scopes this repeater forwards
+//   unscoped   it forwards plain, unscoped FLOOD as well ('*', the wildcard —
+//              not a region name, so never inside the list)
+//   truncated  the reply did not fit; regions is incomplete
+//
+// declaresNothing is regionsview.js's own: an EMPTY named list is an answer
+// ("flood-allows nothing"), not a blank. It is orthogonal to the other two — a
+// repeater can declare no regions and still be unscoped — so it is carried
+// through rather than merged into a single string. Joining all of this into one
+// ' · ' list, with truncation as a bare '…', is what this replaces: it flattened
+// the very distinction regionsview.js exists to make.
 export function scopeRows(answers) {
-  return regionsRows(answers).map((r) => {
-    const parts = [];
-    if (r.regions.length) parts.push(r.regions.join(', '));
-    if (r.unscoped) parts.push('unscoped');
-    if (r.truncated) parts.push('…');
-    return {
-      name: r.name || r.target,
-      text: parts.length ? parts.join(' · ') : 'declares nothing',
-    };
-  });
+  return regionsRows(answers).map((r) => ({
+    name: r.name || r.target,
+    regions: r.regions.join(', '),
+    unscoped: r.unscoped,
+    truncated: r.truncated,
+    declaresNothing: r.declaresNothing,
+  }));
 }
 
 // setTrailingText replaces every sibling AFTER `keepEl` inside `container` with a
@@ -110,17 +121,37 @@ export function renderHeard(els, { status, recent, counts, answers }) {
   els.cRfLog.textContent = String(counts.rfLog);
   els.countsSummary.textContent = counts.summary;
 
+  // One answer is a wrapper, not a row: a truncated answer is two lines of the
+  // same answer (the warning under it), so the separator belongs to the pair.
   const scopes = scopeRows(answers);
   els.regionsList.replaceChildren(...scopes.map((r) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'rg-row';
     const row = document.createElement('div');
     row.className = 'row';
     const name = document.createElement('span');
     name.textContent = r.name;
+    const scope = document.createElement('span');
+    scope.className = 'rg-scope';
     const regions = document.createElement('span');
-    regions.className = 'muted';
-    regions.textContent = r.text;
-    row.append(name, regions);
-    return row;
+    regions.className = r.declaresNothing ? 'rg-nothing' : 'rg-regions';
+    regions.textContent = r.declaresNothing ? SCOPE_NOTHING_TEXT : r.regions;
+    scope.append(regions);
+    if (r.unscoped) {
+      const unscoped = document.createElement('span');
+      unscoped.className = 'rg-unscoped';
+      unscoped.textContent = '+ unscoped';
+      scope.append(unscoped);
+    }
+    row.append(name, scope);
+    wrap.append(row);
+    if (r.truncated) {
+      const warn = document.createElement('div');
+      warn.className = 'rg-truncated';
+      warn.textContent = SCOPE_TRUNCATED_TEXT;
+      wrap.append(warn);
+    }
+    return wrap;
   }));
   els.foldScopes.hidden = scopes.length === 0;
 }

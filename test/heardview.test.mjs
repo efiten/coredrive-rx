@@ -3,7 +3,11 @@
 // app.js already keeps; no capture logic lives in this file.
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { statusLine, recentRows, countsModel, scopeRows, renderHeard } from '../src/ui/heardview.js';
+import { readFileSync } from 'node:fs';
+import {
+  statusLine, recentRows, countsModel, scopeRows, renderHeard,
+  SCOPE_NOTHING_TEXT, SCOPE_TRUNCATED_TEXT,
+} from '../src/ui/heardview.js';
 
 // A minimal fake DOM for renderHeard: plain objects with the handful of Node/Element
 // members it touches. Installed on globalThis.document for the duration of one test
@@ -80,11 +84,17 @@ test('the counters fold shows its summary closed, and the RF-log row only when l
   assert.strictEqual(off.showRfLog, false);
 });
 
+// scopeRows returns three separate fields plus the declares-nothing state, not
+// one joined string. These cases were written against that joined string and are
+// kept case for case, asserting the same facts on the fields that replaced it.
 test('scopeRows: a plain region list joins the names', () => {
   const rows = scopeRows([{ target: 'aa', name: 'Rpt1', regions: ['be', 'be-vlg'], truncated: false }]);
   assert.strictEqual(rows.length, 1);
   assert.strictEqual(rows[0].name, 'Rpt1');
-  assert.strictEqual(rows[0].text, 'be, be-vlg');
+  assert.strictEqual(rows[0].regions, 'be, be-vlg');
+  assert.strictEqual(rows[0].unscoped, false);
+  assert.strictEqual(rows[0].truncated, false);
+  assert.strictEqual(rows[0].declaresNothing, false);
 });
 
 test('scopeRows: falls back to the raw target when no name has resolved yet', () => {
@@ -92,29 +102,47 @@ test('scopeRows: falls back to the raw target when no name has resolved yet', ()
   assert.strictEqual(rows[0].name, 'deadbeef');
 });
 
-test('scopeRows: unscoped (a wildcard match) is tagged onto the region list', () => {
+test('scopeRows: unscoped (a wildcard match) is its own field, never a region name', () => {
   const rows = scopeRows([{ target: 'aa', regions: ['be', '*'], truncated: false }]);
-  assert.strictEqual(rows[0].text, 'be · unscoped');
+  assert.strictEqual(rows[0].regions, 'be');
+  assert.strictEqual(rows[0].unscoped, true);
 });
 
-test('scopeRows: a truncated answer is tagged onto the region list', () => {
+test('scopeRows: a truncated answer is its own field, not a mark in the list', () => {
   const rows = scopeRows([{ target: 'aa', regions: ['be'], truncated: true }]);
-  assert.strictEqual(rows[0].text, 'be · …');
+  assert.strictEqual(rows[0].regions, 'be');
+  assert.strictEqual(rows[0].truncated, true);
 });
 
 test('scopeRows: an empty region list declares nothing', () => {
   const rows = scopeRows([{ target: 'aa', regions: [], truncated: false }]);
-  assert.strictEqual(rows[0].text, 'declares nothing');
+  assert.strictEqual(rows[0].declaresNothing, true);
+  assert.strictEqual(rows[0].regions, '');
 });
 
-test('scopeRows: unscoped alone overrides declares-nothing, even with an empty list', () => {
+// The three facts are orthogonal: a repeater that names no region can still
+// flood-allow the unscoped root, and can still have had its reply truncated.
+// The old single string could only ever show one of the two.
+test('scopeRows: unscoped and declares-nothing are both true together', () => {
   const rows = scopeRows([{ target: 'aa', regions: ['*'], truncated: false }]);
-  assert.strictEqual(rows[0].text, 'unscoped');
+  assert.strictEqual(rows[0].declaresNothing, true);
+  assert.strictEqual(rows[0].unscoped, true);
+  assert.strictEqual(rows[0].truncated, false);
 });
 
-test('scopeRows: truncated alone overrides declares-nothing, even with an empty list', () => {
+test('scopeRows: truncated and declares-nothing are both true together', () => {
   const rows = scopeRows([{ target: 'aa', regions: [], truncated: true }]);
-  assert.strictEqual(rows[0].text, '…');
+  assert.strictEqual(rows[0].declaresNothing, true);
+  assert.strictEqual(rows[0].truncated, true);
+  assert.strictEqual(rows[0].unscoped, false);
+});
+
+test('scopeRows: all three facts at once stay all three facts', () => {
+  const rows = scopeRows([{ target: 'aa', regions: ['be', '*'], truncated: true }]);
+  assert.strictEqual(rows[0].regions, 'be');
+  assert.strictEqual(rows[0].unscoped, true);
+  assert.strictEqual(rows[0].truncated, true);
+  assert.strictEqual(rows[0].declaresNothing, false);
 });
 
 test('renderHeard writes the collapsed counts summary into the fold, so it reads without opening it', () => {
@@ -234,4 +262,125 @@ test('setTrailingText (via renderHeard) replaces the upload label but never the 
     assert.strictEqual(appended.length, 1);
     assert.strictEqual(appended[0].nodeValue, 'up 2s');
   });
+});
+
+// --- The declared-scopes card's DOM -----------------------------------------
+// scopeRows keeps the three facts apart; these check renderHeard keeps them
+// apart on screen too — each in its own element, with its own class, so the
+// stylesheet can colour "declares nothing" differently from a region list and
+// the truncation warning can sit on its own line.
+function scopeEls() {
+  return {
+    gps: { textContent: '' },
+    pending: { textContent: '' },
+    udot: { className: '', nextSibling: null },
+    upload: { appendChild() {} },
+    rate: { textContent: '' },
+    recent: fakeElement(),
+    cNodes: { textContent: '' },
+    cHex: { textContent: '' },
+    cRx: { textContent: '' },
+    cRfLogRow: { hidden: false },
+    cRfLog: { textContent: '' },
+    countsSummary: { textContent: '' },
+    regionsList: fakeElement(),
+    foldScopes: { hidden: false },
+  };
+}
+
+function renderScopes(els, answers) {
+  const status = statusLine({ fix: null, pending: 0, brokerState: null, lastPublishAt: null, rate: 0, now: 0 });
+  const counts = countsModel({ nodes: 0, hex: 0, rx: 0, rfLog: 0, fullRfLog: false });
+  renderHeard(els, { status, recent: [], counts, answers });
+}
+
+test('renderHeard: a plain answer is one row, name and regions, no extra elements', () => {
+  withFakeDocument(() => {
+    const els = scopeEls();
+    renderScopes(els, [{ target: 'aa', name: 'Rpt1', regions: ['be', 'be-vlg'], truncated: false }]);
+
+    assert.strictEqual(els.regionsList.children.length, 1);
+    const [wrap] = els.regionsList.children;
+    assert.strictEqual(wrap.className, 'rg-row');
+    assert.strictEqual(wrap.children.length, 1, 'no truncation line without truncation');
+    const [row] = wrap.children;
+    const [name, scope] = row.children;
+    assert.strictEqual(name.textContent, 'Rpt1');
+    assert.strictEqual(scope.children.length, 1, 'no unscoped marker without the wildcard');
+    assert.strictEqual(scope.children[0].className, 'rg-regions');
+    assert.strictEqual(scope.children[0].textContent, 'be, be-vlg');
+  });
+});
+
+test('renderHeard: the wildcard gets its own marker element beside the list', () => {
+  withFakeDocument(() => {
+    const els = scopeEls();
+    renderScopes(els, [{ target: 'aa', regions: ['be', '*'], truncated: false }]);
+
+    const [row] = els.regionsList.children[0].children;
+    const [, scope] = row.children;
+    assert.strictEqual(scope.children.length, 2);
+    assert.strictEqual(scope.children[0].textContent, 'be', 'the wildcard is never in the region text');
+    assert.strictEqual(scope.children[1].className, 'rg-unscoped');
+    assert.strictEqual(scope.children[1].textContent, '+ unscoped');
+  });
+});
+
+test('renderHeard: declares-nothing is its own class, so it can be coloured amber', () => {
+  withFakeDocument(() => {
+    const els = scopeEls();
+    renderScopes(els, [{ target: 'aa', regions: [], truncated: false }]);
+
+    const [row] = els.regionsList.children[0].children;
+    const [, scope] = row.children;
+    assert.strictEqual(scope.children[0].className, 'rg-nothing');
+    assert.strictEqual(scope.children[0].textContent, SCOPE_NOTHING_TEXT);
+  });
+});
+
+test('renderHeard: truncation is a line of its own under the answer, not a "…" in it', () => {
+  withFakeDocument(() => {
+    const els = scopeEls();
+    renderScopes(els, [{ target: 'aa', regions: ['be'], truncated: true }]);
+
+    const [wrap] = els.regionsList.children;
+    assert.strictEqual(wrap.children.length, 2);
+    const warn = wrap.children[1];
+    assert.strictEqual(warn.className, 'rg-truncated');
+    assert.strictEqual(warn.textContent, SCOPE_TRUNCATED_TEXT);
+    // The region text itself is untouched by the warning.
+    const [, scope] = wrap.children[0].children;
+    assert.strictEqual(scope.children[0].textContent, 'be');
+  });
+});
+
+test('renderHeard: all three facts at once each keep their own element', () => {
+  withFakeDocument(() => {
+    const els = scopeEls();
+    renderScopes(els, [{ target: 'aa', regions: ['*'], truncated: true }]);
+
+    const [wrap] = els.regionsList.children;
+    assert.strictEqual(wrap.children.length, 2);
+    const [, scope] = wrap.children[0].children;
+    assert.strictEqual(scope.children[0].className, 'rg-nothing');
+    assert.strictEqual(scope.children[0].textContent, SCOPE_NOTHING_TEXT);
+    assert.strictEqual(scope.children[1].className, 'rg-unscoped');
+    assert.strictEqual(wrap.children[1].className, 'rg-truncated');
+  });
+});
+
+test('renderHeard: with no answers at all the whole fold is hidden', () => {
+  withFakeDocument(() => {
+    const els = scopeEls();
+    renderScopes(els, []);
+    assert.strictEqual(els.regionsList.children.length, 0);
+    assert.strictEqual(els.foldScopes.hidden, true);
+  });
+});
+
+test('every class the declared-scopes card emits exists in app.css', () => {
+  const css = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
+  for (const cls of ['rg-row', 'rg-regions', 'rg-unscoped', 'rg-nothing', 'rg-truncated']) {
+    assert.ok(css.includes(`.${cls} {`), `CSS must define .${cls}`);
+  }
 });
