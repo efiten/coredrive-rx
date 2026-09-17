@@ -3,6 +3,10 @@ dist/
 *.log
 .DS_Store
 .vite/
+
+# Playwright smoke-test output (test:smoke) — regenerated on every run
+test-results/
+playwright-report/
 .env
 .env.local
 .env.*.local

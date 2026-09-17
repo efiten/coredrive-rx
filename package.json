@@ -16,7 +16,8 @@
     "build": "vite build",
     "build:beta": "RX_BETA=1 vite build",
     "preview": "vite preview",
-    "test": "node --test",
+    "test": "node --test test/*.test.mjs",
+    "test:smoke": "playwright test",
     "deploy": "bash deploy.sh"
   },
   "dependencies": {
@@ -25,6 +26,7 @@
     "mqtt": "^5.10.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "vite": "^5.4.0"
   }
 }
