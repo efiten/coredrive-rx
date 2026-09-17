@@ -4,7 +4,7 @@
 // is the only check that the bundle boots in a browser. Kept out of `npm test`
 // on purpose — it needs a browser, node --test does not.
 export default {
-  testDir: 'test/e2e',
+  testDir: 'e2e',
   use: { baseURL: 'http://localhost:4173' },
   webServer: {
     command: 'npm run build && npm run preview',
