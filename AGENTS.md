@@ -8,6 +8,9 @@ CoreScope's AGENTS.md — this repo has its own conventions below.
 - `src/` is split by responsibility: `transport` (BLE), `frames`/`meshpacket` (parsing), `gps`,
   `queue` (IndexedDB), `publisher` (MQTT), `names` (resolve), `config` (runtime config), `app` (wiring/UI).
 - Tests live in `test/*.test.mjs`, run with `node --test` (`npm test`). Add a test with every logic change.
+  Playwright specs are the one exception: they live in `e2e/` at the repo root and must never go under
+  any `test/` directory, because bare `node --test` recursively treats every file under a directory
+  named `test` as a test file, which breaks `npm test`. Run them with `npm run test:smoke`.
 
 ## Configuration (runtime, not build-time)
 - All per-deployment values live in a runtime `config.json` (served next to `index.html`), loaded by
