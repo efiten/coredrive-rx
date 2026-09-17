@@ -87,7 +87,15 @@ export function mvToPercent(mv) {
 // failure as one that never fires. mvToPercent is what knows that — it answers
 // null for a missing reading and for a pack whose endpoints we do not have —
 // so the threshold below only ever sees a 1S pack on the firmware curve.
+//
+// It does NOT know the one sentinel: a literal 0 is firmware's "no VBAT sense",
+// and mvToPercent clamps it to 0% rather than answering null. batteryLine has
+// always caught that itself, but src/app.js's renderDots calls isLowBattery
+// directly, so a companion with no battery sense sat behind a permanent amber
+// BLE dot for the whole drive. The sentinel is handled here, where every caller
+// gets it.
 export function isLowBattery(mv) {
+  if (!Number.isFinite(mv) || mv === 0) return false
   if (mvToPercent(mv) === null) return false
   return mv < LOW_BATT_MV
 }

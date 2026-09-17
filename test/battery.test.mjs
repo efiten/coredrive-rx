@@ -37,3 +37,19 @@ test('the Status line shows a voltage when a percentage would be a guess', () =>
   assert.deepStrictEqual(batteryLine(null), { text: 'Battery — not reported', low: false });
   assert.strictEqual(batteryLine(3400).low, true);
 });
+
+// A board without VBAT sense reports exactly 0 (src/rfstats.js passes firmware's
+// raw value through). mvToPercent clamps that to 0%, not null, so isLowBattery's
+// multi-cell guard never caught it — and src/app.js's renderDots calls
+// isLowBattery directly, bypassing batteryLine's own sentinel handling. The
+// result was a permanent amber BLE dot on a companion that has no pack to warn
+// about. 0 is "not reported", which is not "low".
+test('a companion with no battery sense is not low', () => {
+  assert.strictEqual(isLowBattery(0), false);
+  assert.strictEqual(isLowBattery(undefined), false);
+  assert.strictEqual(isLowBattery(NaN), false);
+  // The sentinel is the only new exemption: a real reading under the firmware
+  // threshold still warns, and 1mV is a reading, not the sentinel.
+  assert.strictEqual(isLowBattery(1), true);
+  assert.strictEqual(isLowBattery(3000), true);
+});
