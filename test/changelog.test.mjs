@@ -10,7 +10,11 @@
 // label, and whereLabel does not exist in src/ui/changelog.js.
 import { test } from 'node:test';
 import assert from 'node:assert';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { hasUnseenEntries, unseenEntryCount, migratedSeenId, renderWhatsNew } from '../src/ui/changelog.js';
+import { parseReleaseNote } from '../scripts/changelog-notes.mjs';
 
 // Entries as changelog.json actually ships them: newest first, one per change
 // a user could notice, ids being the release's own version string (see the
@@ -156,4 +160,36 @@ test('renderWhatsNew says so when there are no entries at all', () => {
     assert.strictEqual(el.children.length, 1);
     assert.strictEqual(el.children[0].textContent, 'No release notes available.');
   });
+});
+
+// --- parseReleaseNote against every real docs/releases/*.md file -----------
+// Regression coverage for fix round 1: 19 of the 36 release files do NOT
+// open with a plain-prose summary line — 9 go straight from the "#" heading
+// into a "## What's new" sub-heading, 10 open directly with a "- **Bold**"
+// bullet — and the old parser (first non-blank line, unconditionally) took
+// either as the title, producing sheet rows like "v1.1.0 — ## What's new"
+// and silently dropping the bullet's own lead clause out of the body. Reads
+// the directory rather than listing filenames, so a new release file is
+// covered automatically.
+const RELEASES_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'docs', 'releases');
+
+test('parseReleaseNote never mistakes markup for a title, over every real release file', () => {
+  const files = readdirSync(RELEASES_DIR).filter((f) => /^v\d+\.\d+\.\d+\.md$/.test(f));
+  assert.ok(files.length > 0, 'docs/releases has release files to check');
+  for (const file of files) {
+    const text = readFileSync(join(RELEASES_DIR, file), 'utf8');
+    const entry = parseReleaseNote(file, text);
+    assert.doesNotMatch(entry.title, /^[#\-*]/, `${file}: title must not be a heading or a bullet`);
+    assert.ok(entry.body.length > 0, `${file}: body must not be empty`);
+    // Independently re-derive "the first non-blank line after the heading",
+    // the same way parseReleaseNote does, so this checks the file itself
+    // rather than trusting the parser's own bookkeeping.
+    const lines = text.split('\n');
+    let i = 1;
+    while (i < lines.length && lines[i].trim() === '') i++;
+    const first = (lines[i] || '').trim();
+    if (/^[-*]/.test(first)) {
+      assert.ok(entry.body.includes(first), `${file}: the opening bullet's own text must survive into the body`);
+    }
+  }
 });

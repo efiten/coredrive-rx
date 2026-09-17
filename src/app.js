@@ -1457,7 +1457,12 @@ async function checkForUpdate() {
     const res = await fetch('version.json', { cache: 'no-store' });
     const latest = parseVersion(await res.text());
     els('btnUpdate').hidden = !isUpdateAvailable(VERSION, latest);
-  } catch (e) { /* offline — leave the button as it was */ }
+  } catch (e) {
+    // Only a network-level failure (offline, DNS) lands here. A 404 or a
+    // non-JSON body does not throw: parseVersion returns null for either,
+    // isUpdateAvailable(VERSION, null) is false, and the button is hidden,
+    // not left as it was.
+  }
 }
 
 window.addEventListener('DOMContentLoaded', async () => {

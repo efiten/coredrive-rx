@@ -75,7 +75,7 @@ export function renderWhatsNew(el, entries) {
   const [newest, ...older] = entries;
   const title = document.createElement('div');
   title.className = 'wn-title';
-  title.textContent = `${newest.version} — ${newest.title}`;
+  title.textContent = entryLabel(newest);
   el.appendChild(title);
   const body = document.createElement('pre');
   body.className = 'mono wn-body';
@@ -87,9 +87,18 @@ export function renderWhatsNew(el, entries) {
     for (const e of older) {
       const row = document.createElement('div');
       row.className = 'wn-row';
-      row.textContent = `${e.version} — ${e.title}`;
+      row.textContent = entryLabel(e);
       list.appendChild(row);
     }
     el.appendChild(list);
   }
+}
+
+// entryLabel is "version — title" when a release carries a summary line, or
+// just the version when it does not — some early release files go straight
+// from the heading into "## What's new" or their first bullet with no
+// summary of their own (scripts/changelog-notes.mjs's parseReleaseNote
+// leaves `title` empty rather than mistaking that markup for one).
+function entryLabel(entry) {
+  return entry.title ? `${entry.version} — ${entry.title}` : entry.version;
 }
