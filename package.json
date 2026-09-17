@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@noble/ed25519": "^3.2.0",
+    "maplibre-gl": "^4.7.1",
     "mqtt": "^5.10.1"
   },
   "devDependencies": {
