@@ -14,7 +14,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "build:beta": "RX_BETA=1 vite build",
+    "build:beta": "vite build --mode beta",
     "preview": "vite preview",
     "test": "node --test",
     "test:smoke": "playwright test",
