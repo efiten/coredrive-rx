@@ -33,6 +33,11 @@
 
   <div id="toast-stack">
     <div id="btnotice" class="chip warn" hidden>Web Bluetooth isn't available in this browser. On iOS, open this page in the Bluefy browser; on Android, use Chrome.</div>
+    <!-- Written by src/app.js through shell.toast(): the uplink warning
+         (src/uplink.js owns its sentence) and the motion gate's paused chip.
+         Both are visible on every tab, which is why they are toasts. -->
+    <div id="toast-uplink" class="chip warn" hidden></div>
+    <div id="toast-pause" class="chip warn" hidden></div>
   </div>
 
   <section id="screen-drive" class="screen">
@@ -61,7 +66,10 @@
         <span id="hero-rssi"></span>
         <span id="hero-since"></span>
       </div>
-      <button id="hero-pause" class="btn2">Pause</button>
+      <!-- Hidden: no task defines what this control does, and capture is paused
+           by the motion gate (src/motion.js), never by hand. See the Task 8
+           report's open question. -->
+      <button id="hero-pause" class="btn2" hidden>Pause</button>
     </div>
     <div id="status-line" class="muted">
       <span id="sl-gps">… no fix</span>

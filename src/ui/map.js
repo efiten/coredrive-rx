@@ -1,5 +1,5 @@
 // The session map: the hexes this drive has covered, coloured by the best SNR
-// heard in each. Replaces the Leaflet localmap.js; the hex maths stays in
+// heard in each. Replaces the Leaflet map this app had; the hex maths stays in
 // hexgrid.js, which is a port of CoreScope's own binning and is tested.
 //
 // maplibre-gl (and its CSS) is loaded lazily, inside createMap, via a dynamic

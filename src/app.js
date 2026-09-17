@@ -1,12 +1,14 @@
-// coredrive-rx — wiring + Home monitor UI + Settings + on-screen debug.
+// coredrive-rx — the orchestrator: state, the BLE/queue/publish wiring, and the
+// calls into src/ui that paint it. No DOM is built here (test/appdom.test.mjs
+// pins that); every element write goes through a src/ui renderer.
 // Pipeline: companion BLE 0x88 frame → parse raw packet → direct-heard filter →
 // tag with phone GPS → IndexedDB queue → MQTT publish to CoreScope's ingestor.
 // The companion's own pubkey (from SELF_INFO) is the identity / clientId / topic;
 // the user never types it.
 //
-// Home is a pure monitor (counters, status strip, last-reception SNR meter, recently
-// heard). Discover runs automatically with a traffic backoff (see monitor.js). Config
-// and diagnostics live on the Settings tab.
+// Three tabs (src/ui/shell.js): Drive is the session map with its HUD, Heard is
+// the glance-first monitor, Status holds Connect, the broker and the
+// diagnostics. Discover runs automatically with a traffic backoff (monitor.js).
 import { WebBluetoothTransport } from './transport.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute, ADV_TYPE_REPEATER } from './meshpacket.js';
@@ -16,7 +18,6 @@ import { upsertHeard, sameNode, addNodeKey } from './recent.js';
 import { updateMotion, captureDecision } from './motion.js';
 import { createWakeLock } from './wakelock.js';
 import { createBeeper } from './beeper.js';
-import { createLocalMap } from './localmap.js';
 import { hexCellAt } from './hexgrid.js';
 import {
   discoverDecision, isOrganicHeard, snrToPct, decayPeak, pruneTimestamps, linkTransition,
@@ -35,13 +36,20 @@ import {
   enqueue, dueToSend, takeNext, registerOutstanding, matchOutstanding, pruneOutstanding,
   markAnswered, markAsked, newSignalRange, noteSignal, holdUntilReply, releaseHold,
 } from './regionsched.js';
-import { regionsRows } from './regionsview.js';
 import { uplinkState, uplinkWarning, pushOutcome, regionInertReason, buildLogHeader, REGION_DISCOVERY_MIN_FW } from './uplink.js';
 import {
   buildGetContactByKey, parseContactReply, needsPathOverride, buildOverrideFrame,
   buildRestoreFrame, encodePendingRestore, decodePendingRestore, RESP_CODE_OK, RESP_CODE_ERR,
   RESTORE_STORAGE_KEY,
 } from './contactpath.js';
+import { prefKey, themeKey } from './storage.js';
+import { createShell, nextTab, tabOnConnect, TAB_STORAGE_KEY } from './ui/shell.js';
+import { readingModel, renderReading } from './ui/reading.js';
+import { statusLine, recentRows, countsModel, renderHeard } from './ui/heardview.js';
+import { connectSteps, diagnosticsLines, renderStatus } from './ui/statusview.js';
+import { batteryLine, isLowBattery } from './ui/battery.js';
+import { createMap } from './ui/map.js';
+import { resolveTheme, nextThemePref } from './ui/theme.js';
 
 const LOG_LINE_CAP = 200; // dbg ring buffer; stated in the exported log header
 
@@ -49,8 +57,25 @@ const els = (id) => document.getElementById(id);
 const state = {
   transport: null, gps: new Gps(), queue: new Queue(), publisher: null,
   companionPubkey: '', companionName: '', connected: false, recent: [],
-  localMap: null, verbose: false, motion: null, paused: false, wakeLock: null,
+  map: null, verbose: false, motion: null, paused: false, wakeLock: null,
   soundEnabled: false, beeper: null,
+  // logLines: the debug-log ring buffer, newest first. Held here rather than read
+  // back out of the DOM, so the shared log (buildLogHeader + these lines) does not
+  // depend on how the #sheet-log sheet happens to render them.
+  logLines: [],
+  // The three numbered connect steps (src/ui/statusview.js owns their labels and
+  // the "a failure stops the walk" rule); each is 'pending' | 'active' | 'done' |
+  // 'failed'.
+  steps: { companion: 'pending', id: 'pending', broker: 'pending' },
+  // firstConnect: the tab only jumps to Drive on the FIRST connect of a session
+  // (tabOnConnect) — a reconnect while Heard is open must not yank the screen away.
+  firstConnect: true,
+  themePref: 'system',
+  // batteryMv: the companion's last reported pack voltage, read off the RF
+  // sampler's STATS_CORE reply (src/rfstats.js already owns that request; a
+  // second requester would install a second listener for the same frame).
+  // 0 is firmware's "no VBAT sense" sentinel and src/ui/battery.js treats it so.
+  batteryMv: null,
   // monitor counters / state
   rxTotal: 0, rfLogged: 0, nodeKeys: [], hexCells: new Set(), rxTimes: [],
   lastUploadAt: null, brokerState: 'offline',
@@ -67,7 +92,7 @@ const state = {
   // auto-discover
   lastHeardAt: null, lastFireAt: 0, tick: null,
   // RF environment sampler
-  rfTimer: null, lastRfSample: null, rfGen: 0,
+  rfTimer: null, rfGen: 0,
   // linkQuiet: true while the BLE link is down, so the pause and the resume are each
   // said once instead of once per tick.
   linkQuiet: false,
@@ -95,7 +120,7 @@ const state = {
     // The signal each ask went out on, split by what came back. If these two ranges
     // do not overlap, a signal floor is worth having and this says where it sits.
     sigAnswered: newSignalRange(), sigSilent: newSignalRange(),
-    // answers: accepted replies, oldest first, for the Home "declared scopes" panel
+    // answers: accepted replies, oldest first, for the Heard "declared scopes" fold
     // (src/regionsview.js does the last-5/most-recent-first transform). Each entry
     // is { target, regions, truncated, at, name }; name is filled in lazily once
     // resolveName returns (see noteRegionsAnswer).
@@ -115,14 +140,36 @@ const REGIONS_ANSWERS_MAX = 200; // display only shows the last 5 (regionsview.j
 const HEX_COUNT_RES = 10; // fixed res (~90 m cells) for the distinct-hex session counter
 // Build version, injected from package.json by Vite (see vite.config.js).
 const VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev';
-// SNR → colour bucket (LoRa-ish). Returns a CSS colour.
-function snrColor(snr) {
-  if (snr == null) return '#95a5a6';
-  if (snr >= 5) return '#2ecc71';
-  if (snr >= -3) return '#f1c40f';
-  if (snr >= -10) return '#e67e22';
-  return '#e74c3c';
-}
+
+// --- Element sets handed to the src/ui renderers ----------------------------
+// Looked up once: index.html's ids are static markup, and this module is a
+// deferred `type="module"` script, so the document is parsed before it runs.
+// app.js owns this id → renderer mapping; no src/ui module knows an id.
+const HERO = {
+  snr: els('hero-snr'), rssi: els('hero-rssi'), since: els('hero-since'),
+  name: els('hero-name'), fill: els('hero-fill'), peak: els('hero-peak'),
+};
+const HUD = {
+  snr: els('hud-snr'), rssi: els('hud-rssi'), since: els('hud-since'),
+  name: els('hud-sender'),
+};
+const HEARD = {
+  gps: els('sl-gps'), pending: els('sl-pending'), upload: els('sl-upload'),
+  udot: els('sl-udot'), rate: els('sl-rate'), recent: els('recent'),
+  cNodes: els('cNodes'), cHex: els('cHex'), cRx: els('cRx'),
+  cRfLogRow: els('cRfLogRow'), cRfLog: els('cRfLog'),
+  countsSummary: els('fold-counts-summary'),
+  regionsList: els('regionsList'), foldScopes: els('fold-scopes'),
+};
+const STATUS = {
+  progress: els('progress'),
+  fullRfLog: els('fullRfLogInfo'), rfSampler: els('rfSamplerInfo'), regions: els('regionsInfo'),
+  battery: els('batteryInfo'), broker: els('brokerStatus'), companion: els('companionInfo'),
+};
+
+// The shell owns every "which element is visible" decision (tabs, sheets,
+// toasts). Created in the boot block, before anything can render.
+let shell = null;
 
 // noteHeard merges a heard node into the recent list (most-recent first). The same
 // node can arrive under different key representations (path hash vs pubkey); the merge
@@ -137,28 +184,10 @@ function noteHeard(key, keylen, snr, rssi, src) {
     e._req = true;
     const canon = e.key;
     resolveName(canon)
-      .then((nm) => { const cur = state.recent.find((x) => sameNode(x.key, canon)); if (cur) { cur.name = nm || ''; renderRecent(); } })
+      .then((nm) => { const cur = state.recent.find((x) => sameNode(x.key, canon)); if (cur) { cur.name = nm || ''; renderHeardScreen(); } })
       .catch(() => { const cur = state.recent.find((x) => sameNode(x.key, canon)); if (cur) cur._req = false; });
   }
-  renderRecent();
-}
-
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
-function renderRecent() {
-  const el = els('recent');
-  if (!state.recent.length) { el.innerHTML = '<div class="muted">— nothing yet —</div>'; return; }
-  el.innerHTML = state.recent.map((e) => {
-    const snr = e.snr != null ? e.snr.toFixed(1) + ' dB' : 'no sig';
-    const label = e.name ? esc(e.name) : '<span class="rk">' + e.key + '</span>';
-    return '<div class="rr">' +
-      '<span class="dot" style="background:' + snrColor(e.snr) + '"></span>' +
-      '<span class="rname">' + label + '</span>' +
-      '<span class="rsnr" style="color:' + snrColor(e.snr) + '">' + snr + '</span>' +
-      '<span class="rc">×' + e.count + '</span></div>';
-  }).join('');
+  renderHeardScreen();
 }
 
 // MQTT config comes from the runtime config.json (loaded at startup via
@@ -167,28 +196,22 @@ function renderRecent() {
 
 function log(msg) { els('status').textContent = msg; }
 
-// dbg(msg, level): newest-first log line. level 'ok'=green (captured/published),
-// 'tx'=orange (our own discover sends), 'no'=red (held back/failed), default=grey (status).
+// dbg(msg, level): newest-first log line, kept in state.logLines and painted as
+// the text of the #sheet-log sheet. `level` is still taken from every caller
+// (src/drain.js passes it too) and is what the shared log would colour by; the
+// new shell's log sheet is plain monospaced text, so nothing reads it today.
 function dbg(msg, level) {
-  const el = els('log');
-  const line = document.createElement('div');
-  line.className = level === 'ok' ? 'lg-ok' : level === 'no' ? 'lg-no' : level === 'tx' ? 'lg-tx' : 'lg-st';
-  line.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
-  el.insertBefore(line, el.firstChild);
-  while (el.childNodes.length > LOG_LINE_CAP) el.removeChild(el.lastChild);
+  state.logLines.unshift('[' + new Date().toLocaleTimeString() + '] ' + msg);
+  if (state.logLines.length > LOG_LINE_CAP) state.logLines.length = LOG_LINE_CAP;
+  els('log').textContent = state.logLines.join('\n');
 }
 
-// switchView cycles between Home (monitor), the full-screen Map, and Settings via the
-// bottom bar. Leaflet must be invalidated when its container becomes visible, otherwise
-// the tiles render at the wrong size.
-function switchView(v) {
-  els('view-home').style.display = v === 'home' ? 'block' : 'none';
-  els('view-map').style.display = v === 'map' ? 'block' : 'none';
-  els('view-settings').style.display = v === 'settings' ? 'block' : 'none';
-  els('tabHome').classList.toggle('active', v === 'home');
-  els('tabMap').classList.toggle('active', v === 'map');
-  els('tabSettings').classList.toggle('active', v === 'settings');
-  if (v === 'map' && state.localMap) state.localMap.invalidate();
+// showTab is shell.show plus the one thing the shell cannot know: MapLibre only
+// sizes itself correctly while its container is visible, so the map is resized
+// every time Drive appears.
+function showTab(tab) {
+  shell.show(tab);
+  if (tab === 'drive' && state.map) state.map.resize();
 }
 
 // --- Discover (inbound: who can I hear?) ---
@@ -473,18 +496,25 @@ function onRegionsFrame(dv) {
     + ' (' + r.replies + ' of ' + r.asks + ' asks answered)', 'ok');
 }
 
+// renderDiscoverStatus writes the same sentence to the Heard discover line and
+// to the Drive HUD, which are the two places the sweep is visible.
 function renderDiscoverStatus(dec) {
-  const el = els('discStatus');
-  if (dec.state === 'link-down') { el.textContent = '🎯 Discover paused — companion link down'; return; }
-  if (!state.connected || dec.state === 'paused') { el.textContent = ''; return; }
-  if (dec.state === 'backoff') { el.textContent = '🎯 Backoff (verkeer actief)'; return; }
-  el.textContent = dec.secs > 0 ? '🎯 Discover actief — volgende in ' + dec.secs + 's' : '🎯 Discover actief';
+  const text = discoverText(dec);
+  els('discover-text').textContent = text;
+  els('hud-discover').textContent = text;
 }
 
+function discoverText(dec) {
+  if (dec.state === 'link-down') return 'Discover paused — companion link down';
+  if (!state.connected || dec.state === 'paused') return '';
+  if (dec.state === 'backoff') return 'Backoff — mesh traffic is arriving';
+  return dec.secs > 0 ? 'Discover active — next in ' + dec.secs + 's' : 'Discover active';
+}
+
+// The paused chip is a toast: the motion gate can pause capture on any tab, and
+// the toast stack is the one surface that is visible on all three.
 function renderPauseChip() {
-  const el = els('pausechip');
-  if (state.paused) { el.textContent = '⏸ Paused — stationary (resumes when you move)'; el.style.display = 'block'; }
-  else { el.style.display = 'none'; }
+  shell.toast('toast-pause', state.paused ? '⏸ Paused — stationary (resumes when you move)' : '');
 }
 
 // setPaused reacts to a moving↔stationary transition. Capture is gated in processFrame
@@ -513,30 +543,52 @@ function currentUplink() {
 function renderUplinkChip() {
   state.uplink = currentUplink();
   const warn = uplinkWarning(state.uplink, state.connected);
-  const el = els('uplinkchip');
-  if (warn) { el.textContent = warn; el.style.display = 'block'; } else { el.style.display = 'none'; }
+  shell.toast('toast-uplink', warn || '');
   if (state.uplink !== state.lastUplinkLogged) {
     if (state.lastUplinkLogged !== null) dbg('uplink → ' + state.uplink, state.uplink === 'ok' ? 'ok' : 'no');
     state.lastUplinkLogged = state.uplink;
   }
 }
 
-// applyConfigToSettings reflects the EFFECTIVE config on the Settings screen. Called
-// at startup, after a successful retry, and after the firmware check, so a late
-// config never leaves the screen describing one that failed to arrive. It is the
-// single writer of regionsInfo — two writers previously disagreed.
-function applyConfigToSettings() {
+// The broker's own words for its lifecycle states, for the Status line.
+const BROKER_TEXT = { connect: 'connected', reconnect: 'reconnecting…', offline: 'offline', close: 'disconnected', error: 'error' };
+
+// renderStatusScreen paints the whole Status screen: the three numbered connect
+// steps, the diagnostics lines, the battery, the broker and the companion. One
+// writer, called after anything it shows changes — a late config must never
+// leave the screen describing one that failed to arrive.
+//
+// The raw config (or null) goes straight to diagnosticsLines, whose
+// regionInertReason needs the real "not loaded" case; the two logging flags are
+// resolved here with featureEnabled, which owns what a missing key means.
+function renderStatusScreen() {
   const cfg = getConfig();
-  els('fullRfLogInfo').style.display = featureEnabled(cfg, 'fullRfLog') ? '' : 'none';
-  els('rfSamplerInfo').style.display = featureEnabled(cfg, 'rfSampler') ? '' : 'none';
-  const regionsOn = featureEnabled(cfg, 'regionDiscovery');
-  els('regionsInfo').style.display = regionsOn ? '' : 'none';
-  if (!regionsOn) return;
-  // Before the firmware is read, `supported` is still false and fwVer unknown —
-  // reporting it "off" there would be a verdict on no evidence.
-  if (state.fwVer == null && !state.connected) { els('regionsInfo').textContent = 'Region discovery: on (firmware checked on connect)'; return; }
-  const why = regionInertReason({ config: cfg, supported: state.regions.supported, fwVer: state.fwVer });
-  els('regionsInfo').textContent = why ? 'Region discovery: off — ' + why : 'Region discovery: on';
+  renderStatus(STATUS, {
+    steps: connectSteps(state.steps),
+    diagnostics: diagnosticsLines({
+      config: cfg,
+      flags: { fullRfLog: featureEnabled(cfg, 'fullRfLog'), rfSampler: featureEnabled(cfg, 'rfSampler') },
+      fwVer: state.fwVer,
+      supported: state.regions.supported,
+    }),
+    battery: batteryLine(state.batteryMv),
+    broker: state.publisher ? (BROKER_TEXT[state.brokerState] || state.brokerState) : '— not connected —',
+    companion: state.transport && state.companionPubkey
+      ? (state.companionName ? state.companionName + ' · ' : '') + state.companionPubkey.slice(0, 20) + '…'
+      : '— not connected —',
+  });
+  renderDots();
+}
+
+// renderDots is the topbar pair: BLE on the left, MQTT on the right. The BLE dot
+// goes amber on a low companion battery (src/ui/battery.js), which is the only
+// place a low pack is visible from the map.
+function renderDots() {
+  els('dot-ble').className = !state.connected ? '' : isLowBattery(state.batteryMv) ? 'warn' : 'on';
+  els('dot-mqtt').className = !state.publisher ? ''
+    : state.brokerState === 'connect' ? 'on'
+    : state.brokerState === 'reconnect' ? 'warn'
+    : 'bad'; // offline / close / error — a dead link must not read as idle
 }
 
 // noteRegionInert says ONCE, in the debug log, whether region discovery can
@@ -569,7 +621,7 @@ async function startPublisher() {
   state.publisher.onStatus(onBrokerStatus);
   await state.publisher.connect();
   state.brokerState = 'connect';
-  renderBroker();
+  renderStatusScreen();
   renderUplinkChip();
   return true;
 }
@@ -586,7 +638,7 @@ async function retryConfig() {
     return false;
   }
   dbg('config.json loaded on retry — uploading and feature flags are live now', 'ok');
-  applyConfigToSettings();
+  renderStatusScreen();
   noteRegionInert();
   if (state.connected) {
     try { await startPublisher(); } catch (e) { dbg('broker connect after config retry failed: ' + e.message, 'no'); }
@@ -636,105 +688,74 @@ function monitorTick() {
   }
   renderUplinkChip();
   state.snrPeakPct = decayPeak(state.snrPeakPct, state.snrBarPct, 1000);
-  renderSnrMeter();
   state.rxTimes = pruneTimestamps(state.rxTimes, now);
-  renderStatusStrip();
-  renderLastHeard();
+  renderReadingCards();
+  renderHeardScreen();
 }
 
-// --- Home renderers ---
-function renderCounters() {
-  els('cNodes').textContent = String(state.nodeKeys.length);
-  els('cHex').textContent = String(state.hexCells.size);
-  els('cRx').textContent = String(state.rxTotal);
-  const cfg = getConfig();
-  const fullRfLog = featureEnabled(cfg, 'fullRfLog');
-  els('cRfLogRow').style.display = fullRfLog ? '' : 'none';
-  if (fullRfLog) els('cRfLog').textContent = String(state.rfLogged);
+// --- The reading: the Heard hero card and the Drive HUD (src/ui/reading.js) ---
+// One model, painted twice at two sizes. Nothing to paint before the first
+// reception, so index.html's own placeholders stay until then.
+function renderReadingCards() {
+  if (!state.lastHeard) return;
+  const { key, snr, rssi, at } = state.lastHeard;
+  // The name is derived on every render so it upgrades from key → resolved name
+  // once names.js answers (the per-second tick re-renders this).
+  const m = readingModel({ snr, rssi, name: nodeLabel(key), at, now: Date.now(), peakPct: state.snrPeakPct });
+  renderReading(HERO, m);
+  renderReading(HUD, m);
 }
 
-function agoText(at, now) {
-  if (at == null) return '—';
-  const s = Math.max(0, Math.round((now - at) / 1000));
-  if (s < 60) return s + 's geleden';
-  return Math.floor(s / 60) + 'm geleden';
-}
-
-async function renderStatusStrip() {
+// --- The Heard screen (src/ui/heardview.js) ---
+// One writer for the status line, the recent list, the counts fold and the
+// declared-scopes fold, plus the two places the counts summary also appears:
+// the topbar chip and the Drive HUD's backlog line.
+async function renderHeardScreen() {
   const now = Date.now();
-  const fix = currentFix();
-  els('sGps').textContent = fix ? '✓ ' + Math.round(fix.acc_m) + 'm' : '… no fix';
   state.pendingCount = await state.queue.count(); // also stamped into the exported log header
-  els('sPending').textContent = state.pendingCount + ' pending';
-  els('sRate').textContent = state.rxTimes.length + ' pkt/min';
-  const dot = els('uDot');
-  const color = !state.publisher ? '#9aa4b2'
-    : state.brokerState === 'connect' ? '#2ecc71'
-    : state.brokerState === 'reconnect' ? '#e6a23c'
-    : '#e74c3c'; // offline / close / error → red so a dead link is obvious, not idle-grey
-  dot.style.background = color;
-  els('sUpload').lastChild.textContent = state.lastUploadAt ? 'upload ' + agoText(state.lastUploadAt, now) : 'upload —';
+  const counts = countsModel({
+    nodes: state.nodeKeys.length, hex: state.hexCells.size, rx: state.rxTotal,
+    rfLog: state.rfLogged, fullRfLog: featureEnabled(getConfig(), 'fullRfLog'),
+  });
+  renderHeard(HEARD, {
+    status: statusLine({
+      fix: currentFix(), pending: state.pendingCount, brokerState: uploadState(),
+      lastPublishAt: state.lastUploadAt, rate: state.rxTimes.length, now,
+    }),
+    recent: recentRows(state.recent, now),
+    counts,
+    answers: state.regions.answers,
+  });
+  els('tb-counts').textContent = counts.summary;
+  els('hud-backlog').textContent = state.pendingCount ? state.pendingCount + ' unsent' : '';
+  renderDots();
 }
 
-function renderLastHeard() {
-  if (!state.lastHeard) { els('lastHeardCard').style.display = 'none'; return; }
-  els('lastHeardCard').style.display = 'block';
-  // Derive the label live so it upgrades from ID → resolved name once names.js
-  // returns (the per-second tick re-renders this).
-  const { key, at } = state.lastHeard;
-  els('lhLine').textContent = nodeLabel(key) + ' — ' + agoText(at, Date.now());
+// uploadState translates the publisher's own lifecycle word into the one
+// heardview's UPLOAD_CLASS keys the healthy state on ('connected'), and null
+// when there is no publisher at all — which is neither healthy nor an error.
+function uploadState() {
+  if (!state.publisher) return null;
+  return state.brokerState === 'connect' ? 'connected' : state.brokerState;
 }
 
-// renderRegionsCard shows the last 5 repeaters that answered a region-discovery
-// request, most recent first. Hidden entirely until there is at least one answer.
-// declaresNothing is a real answer (the repeater flood-allows nothing), rendered
-// distinctly from a non-empty list — never left blank as if unknown.
-function renderRegionsCard() {
-  const rows = regionsRows(state.regions.answers);
-  if (!rows.length) { els('regionsCard').style.display = 'none'; return; }
-  els('regionsCard').style.display = 'block';
-  els('regionsList').innerHTML = rows.map((r) => {
-    const label = r.name ? esc(r.name) : '<span class="rk">' + r.target.slice(0, 12) + '…</span>';
-    const regionsCls = r.declaresNothing ? 'rgregions none' : 'rgregions';
-    // '*' is not a region name — it declares that plain, unscoped floods are
-    // forwarded. Shown as a separate marker so it cannot be read as a scope.
-    const unscopedTag = r.unscoped ? '<span class="rgunscoped">+ unscoped</span>' : '';
-    const regionsText = (r.declaresNothing ? 'declares no regions flood-allowed' : esc(r.regions.join(', '))) + unscopedTag;
-    const warn = r.truncated ? '<div class="rgwarn">⚠ truncated — some regions may be missing</div>' : '';
-    return '<div class="rgrow"><div class="rgname">' + label + '</div>' +
-      '<div class="' + regionsCls + '">' + regionsText + '</div>' + warn + '</div>';
-  }).join('');
-}
-
-// noteRegionsAnswer records an accepted region-discovery reply for the Home panel
-// (renderRegionsCard). Name resolution reuses names.js's session cache — one lookup
-// per newly-seen target, not a network call on every render.
+// noteRegionsAnswer records an accepted region-discovery reply for the Heard
+// screen's declared-scopes fold. Name resolution reuses names.js's session cache
+// — one lookup per newly-seen target, not a network call on every render.
 function noteRegionsAnswer(target, regions, truncated) {
   const rec = { target, regions, truncated, at: Date.now(), name: undefined };
   state.regions.answers.push(rec);
   if (state.regions.answers.length > REGIONS_ANSWERS_MAX) state.regions.answers.shift();
-  resolveName(target).then((nm) => { rec.name = nm || ''; renderRegionsCard(); });
-  renderRegionsCard();
+  resolveName(target).then((nm) => { rec.name = nm || ''; renderHeardScreen(); });
+  renderHeardScreen();
 }
 
-function renderSnrMeter() {
-  els('snrFill').style.width = state.snrBarPct + '%';
-  els('snrFill').style.background = snrColor(state.lastHeard ? state.lastHeard.snr : null);
-  els('snrPeak').style.left = state.snrPeakPct + '%';
-  els('snrVal').textContent = state.lastHeard && state.lastHeard.snr != null ? state.lastHeard.snr.toFixed(1) + ' dB' : '';
-}
-
-// noteSnr updates the SNR meter from the latest reception (any packet, even no-GPS).
+// noteSnr updates the meter fill and its peak marker from the latest reception
+// (any packet, even one with no GPS fix).
 function noteSnr(snr) {
   state.snrBarPct = snrToPct(snr);
   if (state.snrBarPct > state.snrPeakPct) state.snrPeakPct = state.snrBarPct;
-  renderSnrMeter();
-}
-
-// --- Settings renderers ---
-function renderBroker() {
-  const m = { connect: 'connected', reconnect: 'reconnecting…', offline: 'offline', close: 'disconnected', error: 'error' };
-  els('brokerStatus').textContent = state.publisher ? (m[state.brokerState] || state.brokerState) : '— not connected —';
+  renderReadingCards();
 }
 
 // onBrokerStatus logs every MQTT lifecycle change to the debug log (previously invisible,
@@ -759,25 +780,28 @@ function onBrokerStatus(s, arg, id) {
   else if (s === 'offline') dbg('CoreScope offline (no network?)', 'no');
   else if (s === 'close') dbg('CoreScope connection closed', 'no');
   else if (s === 'error') dbg('CoreScope error: ' + ((arg && arg.message) || arg), 'no');
-  renderBroker();
-  renderStatusStrip();
-  if (s === 'connect') drain().then(refreshCounters).catch(() => {}); // flush backlog on (re)connect
+  renderStatusScreen();
+  renderHeardScreen();
+  if (s === 'connect') drain().then(renderHeardScreen).catch(() => {}); // flush backlog on (re)connect
 }
 
-function setButton() {
-  const b = els('btnConnect');
-  b.textContent = state.connected ? 'Disconnect' : 'Connect companion (BLE)';
-  b.classList.toggle('danger', state.connected);
+function renderConnectButton() {
+  els('btnConnect').textContent = state.connected ? 'Disconnect' : 'Connect companion (BLE)';
 }
 
-// Stepped progress block under the button.
-function progressReset() { els('progress').innerHTML = ''; }
-function step(msg, cls) {
-  const d = document.createElement('div');
-  d.textContent = msg;
-  if (cls) d.className = cls;
-  els('progress').appendChild(d);
-  return d;
+// setStep moves one of the three numbered connect steps and repaints them.
+// src/ui/statusview.js decides what a 'failed' step does to the ones after it.
+function setStep(name, value) {
+  state.steps[name] = value;
+  renderStatusScreen();
+}
+
+// failActiveStep marks whichever step was in flight as failed, so the screen
+// says WHERE a connect died rather than only that it did.
+function failActiveStep() {
+  for (const name of ['companion', 'id', 'broker']) {
+    if (state.steps[name] === 'active') { setStep(name, 'failed'); return; }
+  }
 }
 
 function currentFix() { return state.gps.latest(); }
@@ -834,7 +858,7 @@ async function processFrame(dv) {
     if (!rfRec) return;
     state.rfLogged++;
     await state.queue.add(rfRec);
-    renderCounters();
+    renderHeardScreen();
     return;
   }
 
@@ -904,10 +928,11 @@ async function processFrame(dv) {
   state.rxTotal++;
   state.rxTimes.push(Date.now());
   addNodeKey(state.nodeKeys, hk.heardKey);
-  state.lastHeard = { key: hk.heardKey, snr: f.snr, at: Date.now() };
-  noteSnr(f.snr); // sets bar/peak + colour from the now-current lastHeard
-  renderCounters();
-  renderLastHeard();
+  // rssi is kept alongside snr because the hero card and the HUD both show it
+  // (src/ui/reading.js); the pipeline itself never reads it back.
+  state.lastHeard = { key: hk.heardKey, snr: f.snr, rssi: f.rssi, at: Date.now() };
+  noteSnr(f.snr); // sets bar/peak + tier from the now-current lastHeard
+  renderHeardScreen(); // before the two early returns below, so the counts always move
 
   const fix = currentFix();
   if (!fix) { dbg('heard ' + hk.heardKey + ' (' + hk.src + ')' + sig + ' — no GPS, not queued', 'no'); return; }
@@ -921,23 +946,17 @@ async function processFrame(dv) {
   if (!dec.capture) { dbg('heard ' + hk.heardKey + ' (' + hk.src + ')' + sig + ' — stationary, not queued', 'no'); return; }
   dbg('heard ' + hk.heardKey + ' (' + hk.heardKeyLen + 'B, ' + hk.src + ')' + sig, 'ok');
   state.hexCells.add(hexCellAt(fix.lat, fix.lon, HEX_COUNT_RES));
-  renderCounters();
   const rec = { rx_at: new Date().toISOString(), raw: rawHex, snr: f.snr, rssi: f.rssi, lat: fix.lat, lon: fix.lon, acc_m: fix.acc_m };
   await state.queue.add(rec);
   if (state.soundEnabled && state.beeper) state.beeper.beep(); // audio cue per mapped node (#7)
-  if (state.localMap) state.localMap.addPoint(fix.lat, fix.lon, f.snr); // live hex on the map
-  refreshCounters();
+  if (state.map) state.map.addPoint(fix.lat, fix.lon, f.snr); // live hex on the session map
+  renderHeardScreen();
 }
 
 // nodeLabel returns the resolved name for a heard key if known, else the key itself.
 function nodeLabel(key) {
   const e = state.recent.find((x) => sameNode(x.key, key));
   return e && e.name ? e.name : key;
-}
-
-async function refreshCounters() {
-  renderCounters();
-  renderStatusStrip();
 }
 
 // drain publishes as much of the buffered queue as the link allows, once. The loop and
@@ -975,7 +994,7 @@ const drain = serialiseDrain(async () => {
 async function drainLoop() {
   try {
     await drain();
-    refreshCounters();
+    renderHeardScreen();
   } catch (e) {
     dbg('publish error (kept buffered): ' + e.message, 'no');
   } finally {
@@ -1011,18 +1030,16 @@ async function pushNow() {
     dbg('push failed (kept buffered): ' + e.message, 'no');
   } finally {
     b.disabled = false;
-    refreshCounters();
+    renderHeardScreen();
     renderUplinkChip();
   }
 }
 
 async function connectAll() {
   els('btnConnect').disabled = true;
-  progressReset();
-  els('companionInfo').textContent = '— not connected —';
   els('hashinfo').textContent = '';
   log('');
-  const s1 = step('① Connecting to companion…', 'pending');
+  setStep('companion', 'active');
   try {
     state.transport = new WebBluetoothTransport();
     state.transport.onFrame(processFrame);
@@ -1032,16 +1049,13 @@ async function connectAll() {
       if (state.connected) log(s === 'connected' ? 'capturing' : 'BLE ' + s + '…');
     });
     await state.transport.connect();
-    s1.textContent = '① Companion connected ✓';
-    s1.className = '';
+    setStep('companion', 'done');
 
-    const s2 = step('② Reading companion ID…', 'pending');
+    setStep('id', 'active');
     const info = await requestSelfInfo(state.transport);
     state.companionPubkey = info.pubkey.toLowerCase();
     state.companionName = info.name || ''; // sent as "origin" so the server can name this observer
-    s2.textContent = '② Companion: ' + (info.name || '(unnamed)') + ' ✓';
-    s2.className = '';
-    els('companionInfo').textContent = (info.name ? info.name + ' · ' : '') + state.companionPubkey.slice(0, 20) + '…';
+    setStep('id', 'done');
     dbg('SELF_INFO → ' + (info.name || '(unnamed)') + ' ' + state.companionPubkey);
     await maybeReplayPendingRestore(); // fix up any contact left zero-hop by a crash/BLE-drop last session, before anything else touches it
 
@@ -1075,56 +1089,52 @@ async function connectAll() {
       state.regions.supported = di.fwVer >= REGION_DISCOVERY_MIN_FW;
     } catch (e) {
       // requestDeviceInfo threw or timed out — supported stays false and fwVer stays
-      // null, and applyConfigToSettings/noteRegionInert below both report that as the
+      // null, and renderStatusScreen/noteRegionInert below both report that as the
       // reason rather than leaving an enabled-looking feature that never transmits.
       dbg('hash-mode check skipped: ' + e.message);
     }
-    // One writer for the Settings line and one for the log, both fed by the same
+    // One writer for the Status screen and one for the log, both fed by the same
     // pure regionInertReason — the two former writers could disagree.
-    applyConfigToSettings();
+    renderStatusScreen();
     noteRegionInert();
 
     state.gps.start((fix) => {
-      if (state.localMap) state.localMap.setPosition(fix.lat, fix.lon);
+      if (state.map) state.map.setPosition(fix);
       state.motion = updateMotion(state.motion, fix, Date.now());
       setPaused(state.motion.paused);
     });
 
-    const s3 = step('③ Connecting to CoreScope…', 'pending');
+    setStep('broker', 'active');
     // One more attempt at the fetch whose single startup failure used to sink the
     // entire session. Connecting is a deliberate user action with the radio up, so
     // it is the best moment to retry.
     await retryConfig();
     const uploading = await startPublisher();
-    if (uploading) {
-      s3.textContent = '③ CoreScope connected ✓';
-      s3.className = '';
-    } else {
-      s3.textContent = '③ NOT uploading — config.json not loaded; needs internet once (retrying)';
-      s3.className = 'err';
-    }
-
-    // Never claim an uplink we do not have. This line read "✅ All connected —
-    // capturing" through an entire session that published nothing at all.
-    if (uploading) step('✅ All connected — capturing');
-    else step('⚠️ Capturing + buffering — NOT uploading', 'err');
+    // Never claim an uplink we do not have: a failed third step is what says
+    // "capturing and buffering, NOT uploading". The old summary line read
+    // "✅ All connected — capturing" through a session that published nothing.
+    setStep('broker', uploading ? 'done' : 'failed');
+    if (!uploading) dbg('capturing + buffering, NOT uploading — config.json not loaded; needs internet once (retrying)', 'no');
     state.connected = true;
-    setButton();
+    renderConnectButton();
     state.lastFireAt = 0; // fire a discover sweep immediately on the first tick
     state.tick = setInterval(monitorTick, 1000);
     startRfSampler();
     renderUplinkChip();
     log('capturing as ' + (info.name || state.companionPubkey.slice(0, 12)));
-    switchView('home'); // connected → jump to the live monitor
+    // The first connect of a session moves off Status once (src/ui/shell.js);
+    // a later reconnect leaves whatever tab is open where it is.
+    showTab(tabOnConnect(shell.current(), state.firstConnect));
+    state.firstConnect = false;
 
   } catch (e) {
-    step('✗ ' + e.message, 'err');
+    failActiveStep();
     dbg('connect failed: ' + e.message, 'no');
     log('connect failed: ' + e.message);
     await disconnectAll(true);
   }
   els('btnConnect').disabled = false;
-  refreshCounters();
+  renderHeardScreen();
 }
 
 // RF environment sampler. Three local BLE queries per tick — nothing goes on
@@ -1132,11 +1142,6 @@ async function connectAll() {
 // responses within RF_TIMEOUT_MS is discarded, because a partial sample would
 // skew whichever delta chain it landed in on the server.
 const RF_TIMEOUT_MS = 2000;
-
-function renderRfSampler() {
-  if (!state.lastRfSample) return;
-  els('rfSamplerInfo').textContent = 'RF: ' + state.lastRfSample.noise_floor + ' dBm · RX air ' + state.lastRfSample.rx_air_secs + ' s';
-}
 
 function startRfSampler() {
   const cfg = getConfig();
@@ -1183,13 +1188,15 @@ function startRfSampler() {
     const fix = currentFix();
     if (fix) {
       const core = await ask(STATS_CORE);
+      // The companion's battery rides along on the core stats this sampler already
+      // asks for: src/ui/battery.js turns battery_mv into the Status line and the
+      // amber BLE dot, and nothing else is put on the BLE link for it.
+      if (core) { state.batteryMv = core.battery_mv; renderStatusScreen(); }
       const radio = await ask(STATS_RADIO);
       const packets = await ask(STATS_PACKETS);
       const sample = mergeSample(core, radio, packets, fix, new Date().toISOString(), state.motion ? state.motion.paused : false);
       if (sample) {
         await state.queue.add(sample);
-        state.lastRfSample = sample; // Settings diagnostics line
-        renderRfSampler();
         dbg('rf sample noise=' + sample.noise_floor + 'dBm rx_air=' + sample.rx_air_secs + 's', 'st');
       } else {
         dbg('rf sample incomplete — discarded', 'no');
@@ -1207,10 +1214,11 @@ function stopRfSampler() {
   if (state.rfTimer) { clearTimeout(state.rfTimer); state.rfTimer = null; }
 }
 
-async function disconnectAll(keepProgress) {
+async function disconnectAll(keepSteps) {
   state.connected = false;
   state.motion = null;
   state.paused = false;
+  state.batteryMv = null; // a stale reading must not keep the BLE dot amber
   renderPauseChip();
   clearInterval(state.tick); state.tick = null;
   stopRfSampler();
@@ -1222,20 +1230,43 @@ async function disconnectAll(keepProgress) {
   // covers — leave it in place (do NOT restore over a transport that's gone, and do NOT
   // clear the record) so maybeReplayPendingRestore fixes it on the next connect.
   if (state.regions.overridePending) { clearTimeout(state.regions.overridePending.timer); state.regions.overridePending = null; }
-  els('discStatus').textContent = '';
+  renderDiscoverStatus({ state: 'paused', secs: 0 }); // clears both discover lines
   if (state.wakeLock) state.wakeLock.disable(); // let the screen sleep again
   if (state.publisher) { state.publisher.end(); state.publisher = null; }
   state.brokerState = 'offline';
-  renderBroker();
   try { state.gps.stop(); } catch (e) {}
   if (state.transport) { try { await state.transport.disconnect(); } catch (e) {} state.transport = null; }
-  els('companionInfo').textContent = '— not connected —';
   els('hashinfo').textContent = '';
-  if (!keepProgress) { progressReset(); log('disconnected.'); }
-  setButton();
+  // keepSteps is set by a FAILED connect, so the step that failed stays on screen
+  // instead of being reset to three pending ones by the disconnect that follows it.
+  if (!keepSteps) { state.steps = { companion: 'pending', id: 'pending', broker: 'pending' }; log('disconnected.'); }
+  renderConnectButton();
+  renderStatusScreen();
+}
+
+// --- Theme (src/ui/theme.js) ------------------------------------------------
+// index.html paints the theme from the same stored key before any module loads
+// (themeKey() is deliberately un-namespaced so that inline script can read it).
+// applyTheme keeps the cycle, the painted theme and the map's basemap in step.
+function prefersDark() {
+  return typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)').matches : undefined;
+}
+
+function storedThemePref() {
+  try { return localStorage.getItem(themeKey()) || 'system'; } catch (e) { return 'system'; }
+}
+
+function applyTheme(pref) {
+  state.themePref = pref;
+  try { localStorage.setItem(themeKey(), pref); } catch (e) { /* private mode */ }
+  const theme = resolveTheme(pref, prefersDark());
+  document.documentElement.dataset.theme = theme;
+  els('btnTheme').textContent = 'Theme: ' + pref;
+  if (state.map) state.map.setTheme(theme);
 }
 
 window.addEventListener('DOMContentLoaded', async () => {
+  shell = createShell(); // owns the tabs, the sheets and the toast stack
   els('appver').textContent = 'v' + VERSION;
   // First line of every session names the build. The exported log also carries it in
   // a header (buildLogHeader) because this line rolls out of the 200-line buffer
@@ -1244,7 +1275,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   dbg('CoreDrive RX v' + VERSION + ' started', 'st');
   try {
     await loadConfig();
-    applyConfigToSettings();
+    renderStatusScreen();
   } catch (e) {
     // Loud on THREE surfaces. This failure previously wrote one line to els('status'),
     // which connectAll then cleared with log('') — so the most consequential startup
@@ -1255,33 +1286,35 @@ window.addEventListener('DOMContentLoaded', async () => {
     // user to infer it: capture and buffering are unaffected, only uploading waits.
     dbg('the app needs an internet connection at startup to fetch config.json — capture and buffering still work, uploading waits; retrying every minute and as soon as the network returns', 'no');
     log('Config error: ' + e.message + ' — needs internet to load settings; retrying automatically.');
-    applyConfigToSettings();
+    renderStatusScreen();
   }
   renderUplinkChip();
-  setButton();
+  renderConnectButton();
   state.wakeLock = createWakeLock();
   // Audio cue (#7): default off, but remember the choice across app starts.
   state.beeper = createBeeper();
-  state.soundEnabled = localStorage.getItem('coredrive.sound') === '1';
+  state.soundEnabled = localStorage.getItem(prefKey('sound')) === '1';
   els('chkSound').checked = state.soundEnabled;
-  // Web Bluetooth missing (e.g. iOS Safari) — point the user to a supported browser.
-  if (!navigator.bluetooth) els('btnotice').style.display = 'block';
+  // Web Bluetooth missing (e.g. iOS Safari) — point the user to a supported
+  // browser. The sentence itself stays in index.html, where the rest of the
+  // shell's copy lives; this only reveals the toast.
+  if (!navigator.bluetooth) els('btnotice').hidden = false;
   els('btnConnect').addEventListener('click', () => {
     if (state.connected) { disconnectAll(); return; }
     state.wakeLock.enable(); // acquire in the user gesture (iOS needs it for video.play())
     if (state.soundEnabled) state.beeper.ensure(); // unlock audio in the same gesture
     connectAll();
   });
-  els('btnClear').addEventListener('click', () => { els('log').textContent = ''; });
+  els('btnClear').addEventListener('click', () => { state.logLines.length = 0; els('log').textContent = ''; });
   els('chkVerbose').addEventListener('change', (e) => { state.verbose = e.target.checked; });
   els('chkSound').addEventListener('change', (e) => {
     state.soundEnabled = e.target.checked;
-    localStorage.setItem('coredrive.sound', state.soundEnabled ? '1' : '0');
+    localStorage.setItem(prefKey('sound'), state.soundEnabled ? '1' : '0');
     if (state.soundEnabled) state.beeper.ensure(); // unlock + confirm audio in this gesture
   });
   els('btnPush').addEventListener('click', pushNow);
   els('btnShareLog').addEventListener('click', async () => {
-    const lines = Array.from(els('log').childNodes).map((n) => n.textContent);
+    const lines = state.logLines;
     // Built HERE, at share time, so it can never roll out of the ring buffer the way
     // a logged startup line does. It carries everything a reader of a shared log
     // needs and previously had to guess: app version, the EFFECTIVE config flags
@@ -1316,30 +1349,44 @@ window.addEventListener('DOMContentLoaded', async () => {
     const text = header + (lines.join('\n') || '(empty log)');
     try { await shareLog(text); } catch (e) { dbg('share failed: ' + e.message, 'no'); }
   });
-  els('btnDbg').addEventListener('click', () => {
-    const logEl = els('log');
-    const show = logEl.style.display === 'none';
-    logEl.style.display = show ? 'block' : 'none';
-    els('btnDbg').textContent = show ? 'Hide debug log' : 'Show debug log';
-  });
-  renderRecent();
-  renderCounters();
-  renderStatusStrip();
-  renderBroker();
+  // The debug log and "What's new" are sheets over the map; the backdrop closes
+  // them (src/ui/shell.js). #sheet-whatsnew is still empty — Task 9 fills it.
+  els('btnDbg').addEventListener('click', () => shell.openSheet('sheet-log'));
+  // One manual zero-hop sweep, the same call the per-second tick makes.
+  els('discover-btn').addEventListener('click', () => { if (state.connected) fireDiscover(Date.now()); });
+  els('fab-recenter').addEventListener('click', () => { if (state.map) state.map.follow(true); });
+  els('menu-btn').addEventListener('click', () => showTab('status'));
+  // The shell's own tab buttons do not go through showTab, and MapLibre can only
+  // size itself while its container is visible.
+  els('tab-drive').addEventListener('click', () => { if (state.map) state.map.resize(); });
+  applyTheme(storedThemePref());
+  els('btnTheme').addEventListener('click', () => applyTheme(nextThemePref(state.themePref)));
+  renderStatusScreen();
+  renderHeardScreen();
   drainLoop();
-  state.localMap = createLocalMap('liveMap');
-  els('tabHome').addEventListener('click', () => switchView('home'));
-  els('tabMap').addEventListener('click', () => switchView('map'));
-  els('tabSettings').addEventListener('click', () => switchView('settings'));
-  switchView(state.connected ? 'home' : 'settings'); // land on Settings (where Connect lives) until connected
+  // Nothing works without a companion, so an unconnected start lands on Status
+  // where the Connect button is (src/ui/shell.js).
+  showTab(nextTab(localStorage.getItem(TAB_STORAGE_KEY), state.connected));
+  // The map last: it imports maplibre-gl lazily, so everything above is already
+  // on screen before that bundle is fetched.
+  try {
+    state.map = await createMap({ container: 'map', theme: resolveTheme(state.themePref, prefersDark()) });
+    if (shell.current() === 'drive') state.map.resize();
+  } catch (e) {
+    dbg('the session map could not start: ' + e.message, 'no');
+  }
   // Network came back (e.g. cellular→WiFi handoff, or the radio finally up after a
   // cold start in a garage). Retry the config FIRST: this is the moment the fetch
   // that failed at startup can finally succeed, and draining before it is pointless
   // — with no config there is no publisher to drain into.
   window.addEventListener('online', () => {
-    retryConfig().finally(() => { drain().then(refreshCounters).catch(() => {}); });
+    retryConfig().finally(() => { drain().then(renderHeardScreen).catch(() => {}); });
   });
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  // 'sw.js' without the leading slash, so it resolves under the build's `base`:
+  // a worker registered from /beta/ with an absolute path would claim the ROOT
+  // scope and serve the experiment at the production URL. __REGISTER_SW__ is
+  // false for the beta build (vite.config.js).
+  if (__REGISTER_SW__ && 'serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
   }
 });

@@ -6,13 +6,20 @@ body { background: var(--ch-bg); color: var(--ch-text);
   overscroll-behavior: none; }
 .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace; }
 .muted { color: var(--ch-muted); }
+/* The shell hides everything by the `hidden` attribute (src/ui/shell.js and the
+   renderers in src/ui/*), and an author-level `display` beats the UA's
+   [hidden] rule — `.chip` alone left every hidden toast on screen. */
+[hidden] { display: none !important; }
 
 /* Screens: one is visible at a time; the map host lives under the Drive screen */
 #map { position: absolute; inset: 0; }
 .screen { position: fixed; inset: 44px 0 52px 0; overflow-y: auto;
-  -webkit-overflow-scrolling: touch; padding: 10px 12px; }
+  -webkit-overflow-scrolling: touch; padding: 10px 12px;
+  /* Opaque: #map sits under every screen and stays alive across tabs (hiding it
+     would cost MapLibre its size), so only Drive lets it show through. */
+  background: var(--ch-bg); }
 .screen[hidden] { display: none !important; }
-#screen-drive { padding: 0; overflow: hidden; }
+#screen-drive { padding: 0; overflow: hidden; background: none; }
 
 /* Topbar */
 #topbar { position: fixed; top: 0; left: 0; right: 0; height: 44px; z-index: 600;
@@ -110,5 +117,11 @@ body { background: var(--ch-bg); color: var(--ch-text);
   gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--ch-border); }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
   margin-right: 6px; }
+/* The upload dot's three states (src/ui/heardview.js writes the class) and the
+   topbar's dead-link state: the classes come from JS, the colours stay here.
+   Without these rules .dot.on/.warn/.bad have no background at all. */
+.dot.on { background: var(--ch-accent); }
+.dot.warn { background: var(--ch-accent-2); }
+.dot.bad, #tb-dots i.bad { background: var(--ch-sig-hot); }
 #log { white-space: pre-wrap; word-break: break-word; font-size: 11px;
   max-height: 60vh; overflow-y: auto; }
