@@ -46,7 +46,7 @@ import { prefKey, themeKey } from './storage.js';
 import { createShell, nextTab, tabOnConnect, TAB_STORAGE_KEY } from './ui/shell.js';
 import { readingModel, renderReading } from './ui/reading.js';
 import { statusLine, recentRows, countsModel, renderHeard } from './ui/heardview.js';
-import { connectSteps, diagnosticsLines, renderStatus } from './ui/statusview.js';
+import { connectSteps, diagnosticsLines, renderStatus, appendLogLine } from './ui/statusview.js';
 import { batteryLine, isLowBattery } from './ui/battery.js';
 import { createMap } from './ui/map.js';
 import { resolveTheme, nextThemePref } from './ui/theme.js';
@@ -91,8 +91,8 @@ const state = {
   lastHeard: null, snrBarPct: 0, snrPeakPct: 0,
   // auto-discover
   lastHeardAt: null, lastFireAt: 0, tick: null,
-  // RF environment sampler
-  rfTimer: null, rfGen: 0,
+  // RF environment sampler; lastRfSample is the Status screen's readout
+  rfTimer: null, lastRfSample: null, rfGen: 0,
   // linkQuiet: true while the BLE link is down, so the pause and the resume are each
   // said once instead of once per tick.
   linkQuiet: false,
@@ -196,14 +196,16 @@ function noteHeard(key, keylen, snr, rssi, src) {
 
 function log(msg) { els('status').textContent = msg; }
 
-// dbg(msg, level): newest-first log line, kept in state.logLines and painted as
-// the text of the #sheet-log sheet. `level` is still taken from every caller
-// (src/drain.js passes it too) and is what the shared log would colour by; the
-// new shell's log sheet is plain monospaced text, so nothing reads it today.
+// dbg(msg, level): newest-first log line. level 'ok' = captured/published,
+// 'tx' = our own discover/region sends, 'no' = held back or failed, anything
+// else plain status; src/ui/statusview.js turns that into the line's class.
+// The text is ALSO kept in state.logLines, because the shared log
+// (buildLogHeader + these lines) must not depend on reading the DOM back.
 function dbg(msg, level) {
-  state.logLines.unshift('[' + new Date().toLocaleTimeString() + '] ' + msg);
+  const text = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+  state.logLines.unshift(text);
   if (state.logLines.length > LOG_LINE_CAP) state.logLines.length = LOG_LINE_CAP;
-  els('log').textContent = state.logLines.join('\n');
+  appendLogLine(els('log'), { text, level }, LOG_LINE_CAP);
 }
 
 // showTab is shell.show plus the one thing the shell cannot know: MapLibre only
@@ -212,6 +214,7 @@ function dbg(msg, level) {
 function showTab(tab) {
   shell.show(tab);
   if (tab === 'drive' && state.map) state.map.resize();
+  if (tab === 'status') requestBattery();
 }
 
 // --- Discover (inbound: who can I hear?) ---
@@ -511,10 +514,14 @@ function discoverText(dec) {
   return dec.secs > 0 ? 'Discover active — next in ' + dec.secs + 's' : 'Discover active';
 }
 
-// The paused chip is a toast: the motion gate can pause capture on any tab, and
-// the toast stack is the one surface that is visible on all three.
+// renderPauseChip shows the motion gate's state in the hero card: capture is
+// paused while src/motion.js reports standing still (75 m / 5 min), and there is
+// no manual pause in this app. The chip is the reading's own, so it sits with it
+// rather than in the toast stack.
 function renderPauseChip() {
-  shell.toast('toast-pause', state.paused ? '⏸ Paused — stationary (resumes when you move)' : '');
+  const el = els('hero-pause');
+  el.textContent = '⏸ Paused — stationary (resumes when you move)';
+  el.hidden = !state.paused;
 }
 
 // setPaused reacts to a moving↔stationary transition. Capture is gated in processFrame
@@ -577,7 +584,19 @@ function renderStatusScreen() {
       ? (state.companionName ? state.companionName + ' · ' : '') + state.companionPubkey.slice(0, 20) + '…'
       : '— not connected —',
   });
+  renderRfSampleReadout();
   renderDots();
+}
+
+// renderRfSampleReadout is the sampler's latest READING, in its own element
+// below the diagnostics lines: #rfSamplerInfo carries the flag sentence
+// ("RF sampler: on") that src/ui/statusview.js owns, and a second writer there
+// would leave the two fighting over one line. Hidden until a sample exists.
+function renderRfSampleReadout() {
+  const el = els('rfSampleReadout');
+  const s = state.lastRfSample;
+  el.hidden = !s;
+  if (s) el.textContent = 'RF: ' + s.noise_floor + ' dBm · RX air ' + s.rx_air_secs + ' s';
 }
 
 // renderDots is the topbar pair: BLE on the left, MQTT on the right. The BLE dot
@@ -589,6 +608,35 @@ function renderDots() {
     : state.brokerState === 'connect' ? 'on'
     : state.brokerState === 'reconnect' ? 'warn'
     : 'bad'; // offline / close / error — a dead link must not read as idle
+}
+
+// requestBattery asks the companion for STATS_CORE once, when the Status screen
+// becomes visible. The RF sampler collects the same reply on its own cadence and
+// battery_mv is taken off that too, but the sampler is a config flag: with it off
+// the battery would otherwise never be read, and a low pack has to be visible
+// either way (it is what turns #dot-ble amber). Nothing goes on the air — this is
+// a local BLE query (src/rfstats.js).
+//
+// The listener is temporary, the same one-shot pattern getContact/writeContact
+// use: a second PERMANENT listener for a frame the sampler already listens for
+// is exactly what the design amendment forbids. A stray core reply reaching the
+// sampler's listener while one of its own asks is pending is still a genuine core
+// sample, so a tick that picks this one up is not a partial sample.
+const BATTERY_TIMEOUT_MS = 2000;
+
+function requestBattery() {
+  if (!state.transport || !bleLinkUp()) return;
+  const onFrame = (dv) => {
+    const s = parseStats(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength));
+    if (!s || s.subType !== STATS_CORE) return;
+    cleanup();
+    state.batteryMv = s.battery_mv;
+    renderStatusScreen();
+  };
+  const timer = setTimeout(cleanup, BATTERY_TIMEOUT_MS);
+  function cleanup() { clearTimeout(timer); if (state.transport) state.transport.offFrame(onFrame); }
+  state.transport.onFrame(onFrame);
+  state.transport.send(buildStatsRequest(STATS_CORE)).catch(() => cleanup());
 }
 
 // noteRegionInert says ONCE, in the debug log, whether region discovery can
@@ -1197,6 +1245,8 @@ function startRfSampler() {
       const sample = mergeSample(core, radio, packets, fix, new Date().toISOString(), state.motion ? state.motion.paused : false);
       if (sample) {
         await state.queue.add(sample);
+        state.lastRfSample = sample; // Status screen's RF readout
+        renderStatusScreen();
         dbg('rf sample noise=' + sample.noise_floor + 'dBm rx_air=' + sample.rx_air_secs + 's', 'st');
       } else {
         dbg('rf sample incomplete — discarded', 'no');
@@ -1356,9 +1406,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   els('discover-btn').addEventListener('click', () => { if (state.connected) fireDiscover(Date.now()); });
   els('fab-recenter').addEventListener('click', () => { if (state.map) state.map.follow(true); });
   els('menu-btn').addEventListener('click', () => showTab('status'));
-  // The shell's own tab buttons do not go through showTab, and MapLibre can only
-  // size itself while its container is visible.
+  // The shell's own tab buttons do not go through showTab: MapLibre can only size
+  // itself while its container is visible, and the battery is asked for when the
+  // Status screen appears.
   els('tab-drive').addEventListener('click', () => { if (state.map) state.map.resize(); });
+  els('tab-status').addEventListener('click', requestBattery);
   applyTheme(storedThemePref());
   els('btnTheme').addEventListener('click', () => applyTheme(nextThemePref(state.themePref)));
   renderStatusScreen();

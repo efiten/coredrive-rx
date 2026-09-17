@@ -125,3 +125,11 @@ body { background: var(--ch-bg); color: var(--ch-text);
 .dot.bad, #tb-dots i.bad { background: var(--ch-sig-hot); }
 #log { white-space: pre-wrap; word-break: break-word; font-size: 11px;
   max-height: 60vh; overflow-y: auto; }
+/* dbg(msg, level): one class per level, written by src/ui/statusview.js's
+   logClass. Reading a shared field log depends on these four apart: what was
+   captured or published, what was held back, what this app transmitted, and
+   plain status. */
+.lg-ok { color: var(--ch-accent); }
+.lg-no { color: var(--ch-sig-hot); }
+.lg-tx { color: var(--ch-accent-2); }
+.lg-st { color: var(--ch-muted); }

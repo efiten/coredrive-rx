@@ -4,7 +4,8 @@
 // uplink.js; this only chooses what is shown.
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { connectSteps, diagnosticsLines, renderStatus } from '../src/ui/statusview.js';
+import { connectSteps, diagnosticsLines, renderStatus, logClass, appendLogLine } from '../src/ui/statusview.js';
+import { readFileSync } from 'node:fs';
 
 // A minimal fake DOM: plain objects with the handful of Node/Element members
 // renderStatus touches. Installed on globalThis.document for one test only,
@@ -19,6 +20,21 @@ function fakeElement() {
     children: [],
     append(...nodes) { this.children.push(...nodes); },
     replaceChildren(...nodes) { this.children = nodes; },
+    // appendLogLine works on childNodes/insertBefore/removeChild, the way the
+    // real #sheet-log element does; children mirrors it so both are readable.
+    childNodes: [],
+    get firstChild() { return this.childNodes[0] || null; },
+    get lastChild() { return this.childNodes[this.childNodes.length - 1] || null; },
+    insertBefore(node, ref) {
+      const i = ref ? this.childNodes.indexOf(ref) : this.childNodes.length;
+      this.childNodes.splice(i < 0 ? this.childNodes.length : i, 0, node);
+      return node;
+    },
+    removeChild(node) {
+      const i = this.childNodes.indexOf(node);
+      if (i >= 0) this.childNodes.splice(i, 1);
+      return node;
+    },
   };
 }
 
@@ -169,5 +185,44 @@ test('renderStatus marks a low battery with the warn class, never a colour', () 
     });
 
     assert.strictEqual(els.battery.className, 'muted warn');
+  });
+});
+
+test('logClass maps each dbg level to its own class, and anything else to status', () => {
+  assert.strictEqual(logClass('ok'), 'lg-ok');
+  assert.strictEqual(logClass('no'), 'lg-no');
+  assert.strictEqual(logClass('tx'), 'lg-tx');
+  assert.strictEqual(logClass('st'), 'lg-st');
+  assert.strictEqual(logClass(undefined), 'lg-st');
+  assert.strictEqual(logClass('nonsense'), 'lg-st');
+});
+
+test('every class logClass can emit exists in src/styles/app.css', () => {
+  // The colours are tokens in the stylesheet, never picked in JS, so a rename
+  // there would otherwise silently drop the level colouring a shared field log
+  // is read by.
+  const css = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
+  for (const level of ['ok', 'no', 'tx', 'st', undefined]) {
+    const selector = '.' + logClass(level) + ' {';
+    assert.ok(css.includes(selector), selector + ' must be defined in app.css');
+  }
+});
+
+test('appendLogLine puts the newest line first, with its level class', () => {
+  withFakeDocument(() => {
+    const el = fakeElement();
+    appendLogLine(el, { text: 'first', level: 'st' }, 200);
+    appendLogLine(el, { text: 'second', level: 'ok' }, 200);
+    assert.deepStrictEqual(el.childNodes.map((n) => n.textContent), ['second', 'first']);
+    assert.deepStrictEqual(el.childNodes.map((n) => n.className), ['lg-ok', 'lg-st']);
+  });
+});
+
+test('appendLogLine drops the oldest line beyond the cap', () => {
+  withFakeDocument(() => {
+    const el = fakeElement();
+    for (let i = 1; i <= 5; i++) appendLogLine(el, { text: 'line ' + i, level: 'no' }, 3);
+    assert.strictEqual(el.childNodes.length, 3);
+    assert.deepStrictEqual(el.childNodes.map((n) => n.textContent), ['line 5', 'line 4', 'line 3']);
   });
 });

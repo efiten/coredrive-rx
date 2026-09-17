@@ -41,6 +41,30 @@ export function diagnosticsLines({ config, flags, fwVer, supported }) {
   ];
 }
 
+// --- The debug log ---------------------------------------------------------
+// dbg(msg, level) has always distinguished four kinds of line, and that
+// colouring is how a shared field log is read at a glance: 'ok' is what was
+// captured or published, 'no' what was held back or failed, 'tx' what this app
+// transmitted, and anything else plain status. The classes are defined in
+// src/styles/app.css; this file only picks one.
+const LOG_CLASS = { ok: 'lg-ok', no: 'lg-no', tx: 'lg-tx' };
+
+export function logClass(level) {
+  return LOG_CLASS[level] || 'lg-st';
+}
+
+// appendLogLine puts one newest-first line in the log element and drops the
+// oldest beyond `cap`, so a busy log costs one element per line rather than a
+// re-render of the whole buffer.
+export function appendLogLine(el, { text, level }, cap) {
+  const line = document.createElement('div');
+  line.className = logClass(level);
+  line.textContent = text;
+  el.insertBefore(line, el.firstChild);
+  while (el.childNodes.length > cap) el.removeChild(el.lastChild);
+  return line;
+}
+
 // renderStatus is the only writer of the Status screen's DOM. `els` is an
 // element set the caller looked up; this file never touches ids itself. Rows
 // are built with textContent/createElement, never innerHTML.
