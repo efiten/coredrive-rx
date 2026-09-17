@@ -39,6 +39,25 @@ export function countsModel({ nodes = 0, hex = 0, rx = 0, rfLog = 0, fullRfLog }
   };
 }
 
+// scopeRows turns regionsRows' answers into the two strings the "declared scopes"
+// card shows per row: a resolved name (or the raw target when unresolved) and the
+// region text. An empty region list reads as "declares nothing" UNLESS the answer
+// is also unscoped or truncated, in which case that fact is shown instead — the
+// same override regionsview.js's own comment describes ('*' and truncation are
+// both real facts, never left blank).
+export function scopeRows(answers) {
+  return regionsRows(answers).map((r) => {
+    const parts = [];
+    if (r.regions.length) parts.push(r.regions.join(', '));
+    if (r.unscoped) parts.push('unscoped');
+    if (r.truncated) parts.push('…');
+    return {
+      name: r.name || r.target,
+      text: parts.length ? parts.join(' · ') : 'declares nothing',
+    };
+  });
+}
+
 // setTrailingText replaces every sibling AFTER `keepEl` inside `container` with a
 // single text node. #sl-upload holds the dot (#sl-udot) plus a bare text node for
 // the label side by side; a plain textContent write on the container would wipe
@@ -76,7 +95,12 @@ export function renderHeard(els, { status, recent, counts, answers }) {
     row.append(left, right);
     return row;
   }));
-  if (!recent.length) els.recent.textContent = '— nothing yet —';
+  if (!recent.length) {
+    const empty = document.createElement('div');
+    empty.className = 'muted';
+    empty.textContent = '— nothing yet —';
+    els.recent.replaceChildren(empty);
+  }
 
   const [nodes, hex, rx] = counts.rows;
   els.cNodes.textContent = String(nodes);
@@ -86,21 +110,17 @@ export function renderHeard(els, { status, recent, counts, answers }) {
   els.cRfLog.textContent = String(counts.rfLog);
   els.countsSummary.textContent = counts.summary;
 
-  const rows = regionsRows(answers);
-  els.regionsList.replaceChildren(...rows.map((r) => {
+  const scopes = scopeRows(answers);
+  els.regionsList.replaceChildren(...scopes.map((r) => {
     const row = document.createElement('div');
     row.className = 'row';
     const name = document.createElement('span');
-    name.textContent = r.name || r.target;
+    name.textContent = r.name;
     const regions = document.createElement('span');
     regions.className = 'muted';
-    const parts = [];
-    if (r.regions.length) parts.push(r.regions.join(', '));
-    if (r.unscoped) parts.push('unscoped');
-    if (r.truncated) parts.push('…');
-    regions.textContent = parts.length ? parts.join(' · ') : 'declares nothing';
+    regions.textContent = r.text;
     row.append(name, regions);
     return row;
   }));
-  els.foldScopes.hidden = rows.length === 0;
+  els.foldScopes.hidden = scopes.length === 0;
 }
