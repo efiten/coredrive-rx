@@ -3,7 +3,7 @@
 // app.js already keeps; no capture logic lives in this file.
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { statusLine, recentRows, countsModel } from '../src/ui/heardview.js';
+import { statusLine, recentRows, countsModel, renderHeard } from '../src/ui/heardview.js';
 
 test('the status line says what the strip said before it', () => {
   const m = statusLine({
@@ -50,4 +50,38 @@ test('the counters fold shows its summary closed, and the RF-log row only when l
   assert.strictEqual(on.showRfLog, true);
   const off = countsModel({ nodes: 1, hex: 1, rx: 1, rfLog: 0, fullRfLog: false });
   assert.strictEqual(off.showRfLog, false);
+});
+
+test('renderHeard writes the collapsed counts summary into the fold, so it reads without opening it', () => {
+  // node:test has no DOM; renderHeard's non-empty-list branches build real elements,
+  // so give it just enough of a fake document for the empty-list case exercised here.
+  const priorDocument = globalThis.document;
+  globalThis.document = { createTextNode: (text) => ({ textContent: text }) };
+  try {
+    const els = {
+      gps: { textContent: '' },
+      pending: { textContent: '' },
+      udot: { className: '', nextSibling: null },
+      upload: { appendChild() {} },
+      rate: { textContent: '' },
+      recent: { textContent: '', replaceChildren() {} },
+      cNodes: { textContent: '' },
+      cHex: { textContent: '' },
+      cRx: { textContent: '' },
+      cRfLogRow: { hidden: false },
+      cRfLog: { textContent: '' },
+      countsSummary: { textContent: '' },
+      regionsList: { replaceChildren() {} },
+      foldScopes: { hidden: false },
+    };
+
+    const status = statusLine({ fix: null, pending: 0, brokerState: null, lastPublishAt: null, rate: 0, now: 0 });
+    const counts = countsModel({ nodes: 142, hex: 88, rx: 1900, rfLog: 40, fullRfLog: true });
+
+    renderHeard(els, { status, recent: [], counts, answers: [] });
+
+    assert.strictEqual(els.countsSummary.textContent, '142 nodes · 88 hex · 1900 rx');
+  } finally {
+    globalThis.document = priorDocument;
+  }
 });

@@ -84,6 +84,7 @@ export function renderHeard(els, { status, recent, counts, answers }) {
   els.cRx.textContent = String(rx);
   els.cRfLogRow.hidden = !counts.showRfLog;
   els.cRfLog.textContent = String(counts.rfLog);
+  els.countsSummary.textContent = counts.summary;
 
   const rows = regionsRows(answers);
   els.regionsList.replaceChildren(...rows.map((r) => {
