@@ -50,6 +50,13 @@ import { connectSteps, diagnosticsLines, renderStatus, appendLogLine } from './u
 import { batteryLine, isLowBattery } from './ui/battery.js';
 import { createMap } from './ui/map.js';
 import { resolveTheme, nextThemePref } from './ui/theme.js';
+import {
+  splashState, splashRows, dismissBanner, SPLASH_ERRORS, COACH_MARKS, APP_NAME,
+  renderSplashRows, positionCoachMarks,
+} from './ui/splash.js';
+import { calloutPosition } from './ui/calloutPosition.js';
+import { hasUnseenEntries, migratedSeenId, renderWhatsNew } from './ui/changelog.js';
+import { parseVersion, isUpdateAvailable } from './ui/update.js';
 
 const LOG_LINE_CAP = 200; // dbg ring buffer; stated in the exported log header
 
@@ -71,6 +78,15 @@ const state = {
   // (tabOnConnect) — a reconnect while Heard is open must not yank the screen away.
   firstConnect: true,
   themePref: 'system',
+  // Cold-start splash gate (src/ui/splash.js): splashDismissed is persisted
+  // (prefKey('splashSeen')) once the gate first resolves, so it is a genuine
+  // cold-start experience — shown at most once per install. splashBleError is
+  // session-only, set by a failed connectAll and cleared by the next attempt.
+  splashDismissed: false,
+  splashBleError: false,
+  // changelog: entries from changelog.json (vite.config.js's rx-changelog-json
+  // plugin), fetched once at boot; null until that fetch resolves.
+  changelog: null,
   // batteryMv: the companion's last reported pack voltage, read off the RF
   // sampler's STATS_CORE reply (src/rfstats.js already owns that request; a
   // second requester would install a second listener for the same frame).
@@ -178,6 +194,18 @@ const EL = {
   heroPause: els('hero-pause'), rfSampleReadout: els('rfSampleReadout'),
   dotBle: els('dot-ble'), dotMqtt: els('dot-mqtt'),
 };
+// Splash gate + coach marks (src/ui/splash.js).
+const SPLASH = {
+  root: els('splash'), name: els('splash-name'), rows: els('splash-rows'),
+  status: els('splash-status'), dismiss: els('splash-dismiss'),
+};
+// Each mark's own element, plus its real anchor element — passed straight
+// into positionCoachMarks (src/ui/splash.js) alongside calloutPosition.
+const COACH_ELS = COACH_MARKS.map((m) => ({
+  el: els(m.id), anchor: els(m.anchor), opts: { side: m.side },
+}));
+// "What's new" sheet + its unseen badge, and the update-available button.
+const WHATSNEW = { body: els('wn-body'), dot: els('wn-dot'), btn: els('btnWhatsNew') };
 
 // The shell owns every "which element is visible" decision (tabs, sheets,
 // toasts). Created in the boot block, before anything can render.
@@ -226,7 +254,7 @@ function dbg(msg, level) {
 function showTab(tab) {
   shell.show(tab);
   if (tab === 'drive' && state.map) state.map.resize();
-  if (tab === 'status') requestBattery();
+  if (tab === 'status') { requestBattery(); checkForUpdate(); }
 }
 
 // --- Discover (inbound: who can I hear?) ---
@@ -1111,6 +1139,7 @@ async function connectAll() {
   els('hashinfo').textContent = '';
   log('');
   setStep('companion', 'active');
+  state.splashBleError = false; // a fresh attempt clears the splash gate's last failure
   try {
     state.transport = new WebBluetoothTransport();
     state.transport.onFrame(processFrame);
@@ -1121,6 +1150,7 @@ async function connectAll() {
     });
     await state.transport.connect();
     setStep('companion', 'done');
+    refreshSplash(); // radio is up — the gate moves from intro to waiting-gps
 
     setStep('id', 'active');
     const info = await requestSelfInfo(state.transport);
@@ -1173,6 +1203,7 @@ async function connectAll() {
       if (state.map) state.map.setPosition(fix);
       state.motion = updateMotion(state.motion, fix, Date.now());
       setPaused(state.motion.paused);
+      refreshSplash(); // the splash gate's own hasFix condition
     });
 
     setStep('broker', 'active');
@@ -1202,8 +1233,10 @@ async function connectAll() {
     failActiveStep();
     dbg('connect failed: ' + e.message, 'no');
     log('connect failed: ' + e.message);
+    state.splashBleError = true;
     await disconnectAll(true);
   }
+  refreshSplash();
   els('btnConnect').disabled = false;
   renderHeardScreen();
 }
@@ -1338,6 +1371,95 @@ function applyTheme(pref) {
   if (state.map) state.map.setTheme(theme);
 }
 
+// --- Cold-start splash gate + coach-mark tour (src/ui/splash.js) -----------
+// initSplashContent writes the copy that never changes while the gate is up
+// (splash-name, each coach mark's text). Called once at startup.
+function initSplashContent() {
+  SPLASH.name.textContent = APP_NAME;
+  for (let i = 0; i < COACH_MARKS.length; i++) {
+    const textEl = COACH_ELS[i].el.querySelector('.coach-text');
+    if (textEl) textEl.textContent = COACH_MARKS[i].text;
+  }
+}
+
+// splashArgs is the one place splashState's input is assembled, so the gate
+// and the dismiss banner cannot disagree about what "connected"/"hasFix" mean.
+// gpsError stays false: Gps (src/gps.js) does not surface a watch error to
+// its caller, only the last-known fix, so this app's gate never reaches
+// 'gps-error' in practice — the state itself stays fully testable (see
+// test/splash.test.mjs) even though nothing here can trigger it.
+function splashArgs(overrides) {
+  return {
+    // bleLinkUp(), not state.connected: the gate only cares whether the
+    // radio itself is up, not whether SELF_INFO/the broker have finished —
+    // those can still be in flight while GPS is already worth waiting for.
+    hasFix: !!state.gps.latest(), connected: bleLinkUp(),
+    bleError: state.splashBleError, gpsError: false,
+    dismissed: state.splashDismissed, ...overrides,
+  };
+}
+
+// persistSplashDismissed is the ONLY writer of the persisted flag, whether the
+// gate resolved itself (a real fix arrived) or the Skip button forced it —
+// either way this is a true cold-start gate: shown at most once per install.
+function persistSplashDismissed() {
+  state.splashDismissed = true;
+  try { localStorage.setItem(prefKey('splashSeen'), '1'); } catch (e) { /* private mode */ }
+}
+
+// refreshSplash is the gate's one writer, called on every input change
+// (connect attempt, GPS fix, dismiss, resize while visible).
+function refreshSplash() {
+  const s = splashState(splashArgs());
+  const visible = s !== 'hidden';
+  if (!visible && !state.splashDismissed) persistSplashDismissed();
+  SPLASH.root.hidden = !visible;
+  for (const c of COACH_ELS) c.el.hidden = !visible;
+  if (!visible) return; // already dismissed or never yet needed — nothing left to paint
+  renderSplashRows(SPLASH.rows, splashRows(s, { name: state.companionName }));
+  SPLASH.status.textContent = SPLASH_ERRORS[s] || '';
+  positionCoachMarks(COACH_ELS, { width: window.innerWidth, height: window.innerHeight }, calloutPosition);
+}
+
+// --- "What's new" (src/ui/changelog.js) -------------------------------------
+// renderWhatsNewDot shows the badge while the newest fetched entry is not the
+// one this install has acknowledged (storage.js's prefKey, never a literal).
+function renderWhatsNewDot() {
+  if (!state.changelog) { WHATSNEW.dot.hidden = true; return; }
+  const seen = localStorage.getItem(prefKey('changelogSeen'));
+  WHATSNEW.dot.hidden = !hasUnseenEntries(state.changelog, seen);
+}
+
+// loadChangelog fetches changelog.json once at boot (built by vite.config.js's
+// rx-changelog-json plugin from docs/releases/*.md) and runs the one-time
+// migratedSeenId to seed a first install's "seen" marker silently — a
+// brand-new install must not badge every release that existed before it ever
+// ran. Failure (offline at boot) is silent: the sheet says so when opened.
+async function loadChangelog() {
+  try {
+    const res = await fetch('changelog.json', { cache: 'no-store' });
+    if (!res.ok) return;
+    state.changelog = await res.json();
+    const stored = localStorage.getItem(prefKey('changelogSeen'));
+    const newest = state.changelog[0] && state.changelog[0].id;
+    const migrated = migratedSeenId(stored, null, newest);
+    if (migrated && migrated !== stored) localStorage.setItem(prefKey('changelogSeen'), migrated);
+    renderWhatsNewDot();
+  } catch (e) { /* offline at boot — sheet reports "unavailable" if opened before a retry */ }
+}
+
+// --- Update check (src/ui/update.js) ----------------------------------------
+// checkForUpdate runs every time the Status screen becomes visible (showTab).
+// no-store: a cached version.json would report the build that was live the
+// last time this device fetched it, not the one on the server now.
+async function checkForUpdate() {
+  try {
+    const res = await fetch('version.json', { cache: 'no-store' });
+    const latest = parseVersion(await res.text());
+    els('btnUpdate').hidden = !isUpdateAvailable(VERSION, latest);
+  } catch (e) { /* offline — leave the button as it was */ }
+}
+
 window.addEventListener('DOMContentLoaded', async () => {
   shell = createShell(); // owns the tabs, the sheets and the toast stack
   els('appver').textContent = 'v' + VERSION;
@@ -1423,25 +1545,52 @@ window.addEventListener('DOMContentLoaded', async () => {
     try { await shareLog(text); } catch (e) { dbg('share failed: ' + e.message, 'no'); }
   });
   // The debug log and "What's new" are sheets over the map; the backdrop closes
-  // them (src/ui/shell.js). #sheet-whatsnew is still empty — Task 9 fills it.
+  // them (src/ui/shell.js).
   els('btnDbg').addEventListener('click', () => shell.openSheet('sheet-log'));
+  els('btnWhatsNew').addEventListener('click', () => {
+    renderWhatsNew(WHATSNEW.body, state.changelog || []);
+    if (state.changelog && state.changelog.length) {
+      localStorage.setItem(prefKey('changelogSeen'), state.changelog[0].id);
+      renderWhatsNewDot();
+    }
+    shell.openSheet('sheet-whatsnew');
+  });
+  els('btnUpdate').addEventListener('click', () => location.reload());
   // One manual zero-hop sweep, the same call the per-second tick makes.
   els('discover-btn').addEventListener('click', () => { if (state.connected) fireDiscover(Date.now()); });
   els('fab-recenter').addEventListener('click', () => { if (state.map) state.map.follow(true); });
   els('menu-btn').addEventListener('click', () => showTab('status'));
   // The shell's own tab buttons do not go through showTab: MapLibre can only size
-  // itself while its container is visible, and the battery is asked for when the
-  // Status screen appears.
+  // itself while its container is visible, and the battery/update check happen
+  // when the Status screen appears.
   els('tab-drive').addEventListener('click', () => { if (state.map) state.map.resize(); });
-  els('tab-status').addEventListener('click', requestBattery);
+  els('tab-status').addEventListener('click', () => { requestBattery(); checkForUpdate(); });
   applyTheme(storedThemePref());
   els('btnTheme').addEventListener('click', () => applyTheme(nextThemePref(state.themePref)));
+  // Cold-start splash gate: dismissed persists (prefKey), so this reads false
+  // on a truly first run and true ever after, whichever way it first resolved.
+  try { state.splashDismissed = localStorage.getItem(prefKey('splashSeen')) === '1'; } catch (e) { /* private mode */ }
+  initSplashContent();
+  refreshSplash();
+  SPLASH.dismiss.addEventListener('click', () => {
+    // dismissBanner names what Skip gives up before a fix has landed — said
+    // once, to the debug log, since the gate itself is about to disappear.
+    if (!state.gps.latest()) dbg(dismissBanner({ connected: bleLinkUp() }), 'no');
+    persistSplashDismissed();
+    refreshSplash();
+  });
+  window.addEventListener('resize', () => { if (!SPLASH.root.hidden) refreshSplash(); });
+  loadChangelog();
   renderStatusScreen();
   renderHeardScreen();
   drainLoop();
   // Nothing works without a companion, so an unconnected start lands on Status
   // where the Connect button is (src/ui/shell.js).
   showTab(nextTab(localStorage.getItem(TAB_STORAGE_KEY), state.connected));
+  // Coach marks anchor to real elements (#btnConnect included) whose layout
+  // only exists once their screen is no longer `hidden` — the call above is
+  // what first un-hides one, so positioning has to happen after it.
+  refreshSplash();
   // The map last: it imports maplibre-gl lazily, so everything above is already
   // on screen before that bundle is fetched.
   try {

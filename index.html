@@ -132,6 +132,7 @@
       <button id="btnShareLog" class="btn2">Share / mail debug log</button>
     </div>
     <div class="card">
+      <button id="btnWhatsNew" class="btn2">What's new<span id="wn-dot" class="chip warn" hidden>New</span></button>
       <button id="btnTheme" class="btn2">Theme</button>
       <span id="appver" class="muted"></span>
       <button id="btnUpdate" class="btn2" hidden>Update available</button>
@@ -144,8 +145,27 @@
          pre-wrap and the monospace font come from #log and .mono in app.css. -->
     <div id="log" class="mono"></div>
   </div>
-  <div id="sheet-whatsnew" class="sheet" hidden></div>
+  <!-- src/ui/changelog.js's renderWhatsNew is the only writer of #wn-body. -->
+  <div id="sheet-whatsnew" class="sheet" hidden>
+    <div id="wn-body"></div>
+  </div>
   <div id="sheet-backdrop" hidden></div>
+
+  <!-- Cold-start gate (src/ui/splash.js): shown until the first GPS fix
+       arrives or it is dismissed, then never again (the dismissal persists
+       via storage.js's prefKey). The three coach marks below point at their
+       real control and are positioned by calloutPosition.js against it. -->
+  <div id="splash" class="splash" hidden>
+    <div class="splash-card">
+      <div id="splash-name" class="mono"></div>
+      <div id="splash-rows"></div>
+      <div id="splash-status" class="muted"></div>
+      <button id="splash-dismiss" class="btn2">Skip</button>
+    </div>
+  </div>
+  <div id="cm-connect" class="coach" hidden><span class="coach-text"></span></div>
+  <div id="cm-drive" class="coach" hidden><span class="coach-text"></span></div>
+  <div id="cm-heard" class="coach" hidden><span class="coach-text"></span></div>
 
   <nav id="tabs">
     <button id="tab-drive" aria-selected="true">Drive</button>

@@ -133,3 +133,41 @@ body { background: var(--ch-bg); color: var(--ch-text);
 .lg-no { color: var(--ch-sig-hot); }
 .lg-tx { color: var(--ch-accent-2); }
 .lg-st { color: var(--ch-muted); }
+
+/* What's new sheet (src/ui/changelog.js's renderWhatsNew): the newest entry's
+   title + body as text, older entries listed below by version. */
+.wn-title { font-weight: 600; margin-bottom: 6px; }
+.wn-body { white-space: pre-wrap; word-break: break-word; font-size: 12px;
+  max-height: 40vh; overflow-y: auto; margin-bottom: 10px; }
+.wn-older { border-top: 1px solid var(--ch-border); padding-top: 6px; }
+.wn-row { padding: 3px 0; color: var(--ch-muted); font-size: 12px; }
+#btnWhatsNew { position: relative; }
+#wn-dot { margin-left: 6px; }
+
+/* Cold-start splash gate + its coach-mark tour (src/ui/splash.js). A
+   translucent backdrop like the sheets', with a centered card carrying the
+   two status rows (Bluetooth/GPS); the coach marks are separate floating
+   boxes positioned by calloutPosition.js against their real anchor, so the
+   real controls stay visible and tappable underneath — there is no
+   spotlight-ring/scrim layer here. */
+.splash { position: fixed; inset: 0; z-index: 800;
+  background: color-mix(in srgb, var(--ch-bg) 55%, transparent);
+  display: flex; align-items: center; justify-content: center; padding: 16px; }
+.splash-card { background: var(--ch-surface); border: 1px solid var(--ch-border);
+  border-radius: 14px; padding: 14px 16px; max-width: 320px; width: 100%; }
+.splash-srow { display: flex; align-items: center; gap: 8px; height: 38px; }
+.splash-skey { width: 70px; color: var(--ch-muted); }
+.splash-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--ch-bar-track); }
+.splash-dot.on { background: var(--ch-accent); }
+.splash-dot.err { background: var(--ch-sig-hot); }
+.splash-spin { width: 10px; height: 10px; border-radius: 50%;
+  border: 2px solid var(--ch-bar-track); border-top-color: var(--ch-accent);
+  animation: splash-spin .8s linear infinite; }
+@keyframes splash-spin { to { transform: rotate(360deg); } }
+.splash-stext { flex: 1; }
+.splash-stext.muted { color: var(--ch-muted); }
+
+.coach { position: fixed; z-index: 810; max-width: 220px;
+  background: var(--ch-surface); border: 1px solid var(--ch-accent);
+  border-radius: 10px; padding: 6px 10px; font-size: 12px; }
