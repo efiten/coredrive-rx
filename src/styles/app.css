@@ -40,6 +40,17 @@ body { background: var(--ch-bg); color: var(--ch-text);
 .row { display: flex; gap: 8px; }
 .row button { flex: 1; }
 
+/* Status screen: the three numbered connect steps */
+.step { padding: 2px 0; }
+.step.pending { color: var(--ch-muted); }
+.step.active { color: var(--ch-accent-2); }
+.step.done { color: var(--ch-accent); }
+.step.failed { color: var(--ch-sig-hot); }
+
+/* .muted.warn: the low-battery line (src/ui/statusview.js) — a class, never a
+   colour picked in JS; tokens.css owns what "warn" looks like in each theme. */
+.muted.warn { color: var(--ch-accent-2); }
+
 /* Hero reading (Heard) + HUD (Drive) share the meter and the tier colours */
 .meter { height: 10px; border-radius: 5px; background: var(--ch-bar-track);
   position: relative; overflow: hidden; margin: 8px 0; }
