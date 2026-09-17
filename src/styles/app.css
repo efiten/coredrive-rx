@@ -11,20 +11,55 @@ body { background: var(--ch-bg); color: var(--ch-text);
    [hidden] rule — `.chip` alone left every hidden toast on screen. */
 [hidden] { display: none !important; }
 
+/* The two fixed bars' full heights, safe-area insets included, derived once so
+   everything that has to clear them agrees. #topbar grows by the top inset and
+   #tabs by the bottom one; a screen that assumed a bare 52px had the tab bar
+   covering its last row on any phone with a bottom inset. */
+:root {
+  --rx-topbar-h: calc(44px + env(safe-area-inset-top, 0px));
+  --rx-tabs-h: calc(52px + env(safe-area-inset-bottom, 0px));
+}
+
+/* RX signal ramp. tokens.css is core-hunter's file kept byte-identical, and its
+   thermal ramp runs the other way: hot (#ff453a, red) is its STRONGEST tier, and
+   the same token is this app's failure colour (.lg-no, .step.failed, .dot.bad).
+   Painting a strong cell red on a coverage map reads as a problem area, and one
+   token would mean both "excellent" and "failed" on one screen. These aliases
+   put the ramp back the way CoreDrive RX has always painted it (v1.18.2's
+   snrColor: green / yellow / orange / red) without touching tokens.css.
+   The bands are SNR in dB, not the RSSI dBm tokens.css's comments describe —
+   src/ui/reading.js's snrTier owns them and its thresholds do not change:
+     hot  snr >= 5     warm  -3 .. 5     mid  -10 .. -3     cool  < -10
+   'cold' and 'faint' are core-hunter tiers snrTier never returns; only 'cold'
+   is kept here because src/ui/map.js's fill expression still lists it. */
+:root {
+  --rx-sig-hot:  var(--ch-accent);     /* strongest — green, as v1.18.2 painted it */
+  --rx-sig-warm: var(--ch-sig-mid);    /* yellow */
+  --rx-sig-mid:  var(--ch-sig-warm);   /* orange */
+  --rx-sig-cool: var(--ch-sig-hot);    /* weakest — red */
+  --rx-sig-cold: var(--ch-sig-cold);
+  --rx-sig-none: var(--ch-sig-none);   /* heard, no metric */
+}
+
 /* Screens: one is visible at a time; the map host lives under the Drive screen */
 #map { position: absolute; inset: 0; }
-.screen { position: fixed; inset: 44px 0 52px 0; overflow-y: auto;
+.screen { position: fixed; inset: var(--rx-topbar-h) 0 var(--rx-tabs-h) 0; overflow-y: auto;
   -webkit-overflow-scrolling: touch; padding: 10px 12px;
   /* Opaque: #map sits under every screen and stays alive across tabs (hiding it
-     would cost MapLibre its size), so only Drive lets it show through. */
+     would cost MapLibre its size), so only Drive lets it show through. Alive is
+     not the same as working: src/ui/map.js's sync gate, closed by app.js on any
+     other tab, keeps it from repainting and pulling tiles behind these. */
   background: var(--ch-bg); }
 .screen[hidden] { display: none !important; }
 #screen-drive { padding: 0; overflow: hidden; background: none; }
 
 /* Topbar */
-#topbar { position: fixed; top: 0; left: 0; right: 0; height: 44px; z-index: 600;
+/* The inset is padding at the TOP, where the notch is: as bottom padding it
+   squeezed the bar's own content instead of clearing anything. The bar grows by
+   the inset (--rx-topbar-h) so its 44px of content is never compressed. */
+#topbar { position: fixed; top: 0; left: 0; right: 0; height: var(--rx-topbar-h); z-index: 600;
   display: flex; align-items: center; justify-content: space-between;
-  gap: 8px; padding: 0 10px calc(0px + env(safe-area-inset-top, 0px));
+  gap: 8px; padding: env(safe-area-inset-top, 0px) 10px 0;
   background: var(--ch-surface); border-bottom: 1px solid var(--ch-border);
   backdrop-filter: blur(8px); }
 #tb-dots i { display: block; width: 7px; height: 7px; border-radius: 50%;
@@ -64,21 +99,23 @@ body { background: var(--ch-bg); color: var(--ch-text);
 .meter-fill { height: 100%; width: 0; }
 .meter-peak { position: absolute; top: 0; bottom: 0; width: 2px;
   background: var(--ch-text); }
-.tier-hot { color: var(--ch-sig-hot); } .tier-warm { color: var(--ch-sig-warm); }
-.tier-mid { color: var(--ch-sig-mid); } .tier-cool { color: var(--ch-sig-cool); }
-.tier-cold { color: var(--ch-sig-cold); } .tier-none { color: var(--ch-sig-none); }
-.fill-hot { background: var(--ch-sig-hot); } .fill-warm { background: var(--ch-sig-warm); }
-.fill-mid { background: var(--ch-sig-mid); } .fill-cool { background: var(--ch-sig-cool); }
-.fill-cold { background: var(--ch-sig-cold); } .fill-none { background: var(--ch-sig-none); }
+.tier-hot { color: var(--rx-sig-hot); } .tier-warm { color: var(--rx-sig-warm); }
+.tier-mid { color: var(--rx-sig-mid); } .tier-cool { color: var(--rx-sig-cool); }
+.tier-cold { color: var(--rx-sig-cold); } .tier-none { color: var(--rx-sig-none); }
+.fill-hot { background: var(--rx-sig-hot); } .fill-warm { background: var(--rx-sig-warm); }
+.fill-mid { background: var(--rx-sig-mid); } .fill-cool { background: var(--rx-sig-cool); }
+.fill-cold { background: var(--rx-sig-cold); } .fill-none { background: var(--rx-sig-none); }
 #hero-snr { font: 700 38px/1 ui-monospace, monospace; }
-#hud { position: fixed; left: 0; right: 0; bottom: 52px; z-index: 550;
-  padding: 10px 14px calc(10px + env(safe-area-inset-bottom, 0px));
+/* Sits directly on top of #tabs, which already clears the bottom inset, so the
+   HUD must not add that inset a second time to its own padding. */
+#hud { position: fixed; left: 0; right: 0; bottom: var(--rx-tabs-h); z-index: 550;
+  padding: 10px 14px;
   background: var(--ch-surface); border-top: 1px solid var(--ch-border);
   backdrop-filter: blur(8px); }
 #hud-snr { font: 700 26px/1 ui-monospace, monospace; }
 
 /* Toasts */
-#toast-stack { position: fixed; top: 50px; left: 12px; right: 12px; z-index: 620;
+#toast-stack { position: fixed; top: calc(var(--rx-topbar-h) + 6px); left: 12px; right: 12px; z-index: 620;
   display: flex; flex-direction: column; gap: 6px; pointer-events: none; }
 /* Background split out from the shared toast rule below: `.chip.warn` (#btnotice,
    the Web Bluetooth banner) must win its own amber tint. #toast-stack > * has id
@@ -99,7 +136,9 @@ body { background: var(--ch-bg); color: var(--ch-text);
   background: color-mix(in srgb, var(--ch-bg) 60%, transparent); }
 
 /* Tab bar */
-#tabs { position: fixed; left: 0; right: 0; bottom: 0; height: 52px; z-index: 640;
+/* box-sizing: border-box is global, so the inset has to be part of the height
+   or it eats into the 52px of buttons rather than sitting below them. */
+#tabs { position: fixed; left: 0; right: 0; bottom: 0; height: var(--rx-tabs-h); z-index: 640;
   display: flex; background: var(--ch-surface);
   border-top: 1px solid var(--ch-border);
   padding-bottom: env(safe-area-inset-bottom, 0px); }
@@ -107,14 +146,35 @@ body { background: var(--ch-bg); color: var(--ch-text);
   font: inherit; font-size: 11px; }
 #tabs button[aria-selected="true"] { color: var(--ch-accent); }
 
-/* FAB */
-.fab { position: fixed; right: 12px; width: 40px; height: 40px; border-radius: 50%;
+/* FAB — the recenter button, a child of #hud in index.html. Anchored to the HUD
+   (position: fixed gives it a containing block) rather than to the viewport: the
+   HUD's height depends on how many of its four lines carry text, so any viewport
+   offset is either on top of the HUD or floating away from it. `bottom: 100%`
+   puts the FAB's bottom edge on the HUD's top edge at every HUD height.
+   It used to be `position: fixed` with a `right` and no vertical anchor at all,
+   which left it wherever static flow happened to put it. */
+.fab { position: absolute; right: 12px; bottom: 100%; margin-bottom: 8px;
+  width: 40px; height: 40px; border-radius: 50%;
   background: var(--ch-surface); border: 1px solid var(--ch-border);
   color: var(--ch-text); z-index: 560; }
 
 /* Recent list, scopes, log */
 .recent .row, .rg .row { display: flex; justify-content: space-between;
-  gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--ch-border); }
+  gap: 8px; padding: 5px 0; }
+.recent .row { border-bottom: 1px solid var(--ch-border); }
+/* Declared scopes (src/ui/heardview.js). The three facts regionsview.js keeps
+   apart stay apart here: the region names, the '*' wildcard as its own marker
+   (it governs plain FLOOD, it is not a region), and the truncation warning on
+   its own line. A repeater that flood-allows nothing declared that — it is an
+   answer, not an absence — so it is amber, not muted grey. The separator sits
+   on the pair, because a truncated answer is two lines of one answer. */
+.rg-row { border-bottom: 1px solid var(--ch-border); }
+.rg-regions { color: var(--ch-muted); }
+.rg-unscoped { margin-left: 6px; font-size: 10px; white-space: nowrap;
+  border: 1px solid var(--ch-border); border-radius: 4px; padding: 0 4px;
+  color: var(--ch-muted); }
+.rg-nothing { color: var(--ch-accent-2); }
+.rg-truncated { font-size: 11px; color: var(--ch-sig-hot); padding-bottom: 5px; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
   margin-right: 6px; }
 /* The upload dot's three states (src/ui/heardview.js writes the class) and the
@@ -149,11 +209,20 @@ body { background: var(--ch-bg); color: var(--ch-text);
    two status rows (Bluetooth/GPS); the coach marks are separate floating
    boxes positioned by calloutPosition.js against their real anchor, so the
    real controls stay visible and tappable underneath — there is no
-   spotlight-ring/scrim layer here. */
-.splash { position: fixed; inset: 0; z-index: 800;
+   spotlight-ring/scrim layer here.
+
+   pointer-events is what makes "tappable underneath" true. Without it the
+   full-viewport backdrop swallowed every tap, #btnConnect included — and
+   connectAll is the only caller of state.gps.start, so neither `connected` nor
+   `hasFix` could ever become true while the gate was up: splashState could only
+   ever answer 'intro', and Skip was the single way out. The card takes its own
+   events back; the coach marks are text, never controls, and must not swallow a
+   tap meant for the control they sit beside. */
+.splash { position: fixed; inset: 0; z-index: 800; pointer-events: none;
   background: color-mix(in srgb, var(--ch-bg) 55%, transparent);
   display: flex; align-items: center; justify-content: center; padding: 16px; }
-.splash-card { background: var(--ch-surface); border: 1px solid var(--ch-border);
+.splash-card { pointer-events: auto;
+  background: var(--ch-surface); border: 1px solid var(--ch-border);
   border-radius: 14px; padding: 14px 16px; max-width: 320px; width: 100%; }
 .splash-srow { display: flex; align-items: center; gap: 8px; height: 38px; }
 .splash-skey { width: 70px; color: var(--ch-muted); }
@@ -168,6 +237,6 @@ body { background: var(--ch-bg); color: var(--ch-text);
 .splash-stext { flex: 1; }
 .splash-stext.muted { color: var(--ch-muted); }
 
-.coach { position: fixed; z-index: 810; max-width: 220px;
+.coach { position: fixed; z-index: 810; max-width: 220px; pointer-events: none;
   background: var(--ch-surface); border: 1px solid var(--ch-accent);
   border-radius: 10px; padding: 6px 10px; font-size: 12px; }

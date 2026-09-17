@@ -4,9 +4,14 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>CoreDrive RX — coverage capture</title>
-  <link rel="manifest" href="/manifest.webmanifest" />
+  <!-- The manifest link is injected by vite.config.js's rx-manifest plugin, so
+       its href carries the build's `base`. Written here it was "/…" in every
+       build, and the browser then read the PRODUCTION manifest — whose start_url
+       is "/" — while installing the /beta app. -->
   <!-- Literal value, not var(--ch-bg): a meta tag can't read a CSS variable.
-       Must stay equal to --ch-bg in the dark theme (src/styles/tokens.css). -->
+       Must stay equal to --ch-bg in the dark theme (src/styles/tokens.css).
+       The manifest's theme_color and background_color are taken from THIS tag at
+       build time (scripts/manifest.mjs), so there is one value, not three. -->
   <meta name="theme-color" content="#0b0e14" />
   <link rel="apple-touch-icon" href="/icon-192.png" />
   <link rel="stylesheet" href="/src/styles/tokens.css" />
@@ -40,8 +45,12 @@
   </div>
 
   <section id="screen-drive" class="screen">
-    <button id="fab-recenter" class="fab" aria-label="Recenter">⌖</button>
     <div id="hud">
+      <!-- Inside the HUD, not beside it: the FAB is anchored to the HUD's top
+           edge (app.css's .fab) because the HUD's height depends on how many of
+           its lines carry text. src/ui/shell.js still hides the two
+           separately. -->
+      <button id="fab-recenter" class="fab" aria-label="Recenter">⌖</button>
       <div id="hud-snr" class="mono">—</div>
       <div class="muted">
         <span id="hud-rssi"></span>
@@ -78,7 +87,9 @@
     </div>
     <div id="discover-line" class="muted">
       <span id="discover-text"></span>
-      <button id="discover-btn" class="btn2">Discover</button>
+      <!-- Enabled by src/app.js's renderConnectionControls once a companion is
+           connected; its handler can do nothing before that. -->
+      <button id="discover-btn" class="btn2" disabled>Discover</button>
     </div>
     <div id="recent" class="card recent"><div class="muted">— nothing yet —</div></div>
     <details id="fold-counts" class="fold card">

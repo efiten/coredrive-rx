@@ -127,3 +127,40 @@ test('COACH_MARKS points the heard mark at the Heard tab, naming receptions', ()
 test('APP_NAME is the CoreDrive RX display name', () => {
   assert.strictEqual(APP_NAME, 'CoreDrive RX');
 });
+
+// --- The gate must not eat the taps it tells you to make --------------------
+// .splash is a full-viewport fixed layer at z-index 800. The comment above it in
+// app.css promises the real controls stay tappable underneath, and only
+// pointer-events makes that true. Without it the gate was a dead end: connectAll
+// is the sole caller of state.gps.start, #btnConnect is the sole way into
+// connectAll, and it sits under this layer — so `connected` and `hasFix` could
+// never become true while the gate was up, splashState could only ever answer
+// 'intro', and Skip was the one way out.
+test('the splash backdrop passes taps through, and its card takes them back', () => {
+  const css = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
+  const rule = (selector) => {
+    const at = css.indexOf(selector + ' {');
+    assert.notStrictEqual(at, -1, `app.css must define ${selector}`);
+    return css.slice(at, css.indexOf('}', at));
+  };
+  assert.match(rule('.splash'), /pointer-events:\s*none/);
+  assert.match(rule('.splash-card'), /pointer-events:\s*auto/);
+  // The coach marks are text beside a control, never controls themselves, so
+  // they must not swallow a tap on the control they point at either.
+  assert.match(rule('.coach'), /pointer-events:\s*none/);
+});
+
+// With the taps passing through, each of splashState's inputs has a real source
+// again: connected is bleLinkUp() after connectAll's transport.connect(),
+// bleError is connectAll's catch, and hasFix is the gps.start callback
+// connectAll installs. gpsError has no source — src/gps.js swallows
+// watchPosition's error callback and app.js's splashArgs pins it false — so
+// three of the four are reachable in the field and the fourth stays a tested
+// state with no trigger.
+test('the three states the app can actually produce are all distinct', () => {
+  const base = { hasFix: false, dismissed: false, gpsError: false };
+  assert.strictEqual(splashState({ ...base, connected: false, bleError: false }), 'intro');
+  assert.strictEqual(splashState({ ...base, connected: true, bleError: false }), 'waiting-gps');
+  assert.strictEqual(splashState({ ...base, connected: false, bleError: true }), 'ble-error');
+  assert.strictEqual(splashState({ ...base, hasFix: true, connected: true, bleError: false }), 'hidden');
+});
