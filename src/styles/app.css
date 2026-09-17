@@ -37,6 +37,8 @@ body { background: var(--ch-bg); color: var(--ch-text);
   border: 1px solid var(--ch-border); border-radius: 10px; padding: 8px 12px; font: inherit; }
 .fold > summary { cursor: pointer; list-style: none; display: flex;
   justify-content: space-between; }
+.row { display: flex; gap: 8px; }
+.row button { flex: 1; }
 
 /* Hero reading (Heard) + HUD (Drive) share the meter and the tier colours */
 .meter { height: 10px; border-radius: 5px; background: var(--ch-bar-track);
@@ -60,8 +62,14 @@ body { background: var(--ch-bg); color: var(--ch-text);
 /* Toasts */
 #toast-stack { position: fixed; top: 50px; left: 12px; right: 12px; z-index: 620;
   display: flex; flex-direction: column; gap: 6px; pointer-events: none; }
-#toast-stack > * { pointer-events: auto; background: var(--ch-surface);
+/* Background split out from the shared toast rule below: `.chip.warn` (#btnotice,
+   the Web Bluetooth banner) must win its own amber tint. #toast-stack > * has id
+   specificity and would otherwise always beat a class selector for background,
+   so warn toasts are excluded here and get their background from .chip.warn
+   instead — no toast-stack rule competes with it for that property. */
+#toast-stack > * { pointer-events: auto;
   border: 1px solid var(--ch-border); border-radius: 12px; padding: 8px 10px; }
+#toast-stack > *:not(.warn) { background: var(--ch-surface); }
 
 /* Sheets */
 .sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 700;
