@@ -34,6 +34,12 @@ export function createShell(doc = document) {
     // The HUD and the recenter FAB belong to the map, not to the page.
     el('hud').hidden = tab !== 'drive';
     el('fab-recenter').hidden = tab !== 'drive';
+    // #map is a body-level layer (position:absolute; inset:0) that nothing else
+    // hides — .screen is opaque but inset above the tab bar/below the topbar, so
+    // without this a band of live map showed through there on Heard and Status.
+    // visibility, not display: none — createMap()'s resize() (src/ui/map.js)
+    // must still measure a real box when Drive is shown again.
+    el('map').style.visibility = tab === 'drive' ? 'visible' : 'hidden';
     try { localStorage.setItem(TAB_STORAGE_KEY, tab); } catch { /* private mode */ }
   }
 
