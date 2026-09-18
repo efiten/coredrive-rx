@@ -51,10 +51,9 @@ import { batteryLine, isLowBattery } from './ui/battery.js';
 import { createMap } from './ui/map.js';
 import { resolveTheme, nextThemePref } from './ui/theme.js';
 import {
-  splashState, splashRows, dismissBanner, SPLASH_ERRORS, COACH_MARKS, APP_NAME,
-  renderSplashRows, positionCoachMarks,
+  splashState, splashRows, dismissBanner, SPLASH_ERRORS, APP_NAME,
+  renderSplashRows,
 } from './ui/splash.js';
-import { calloutPosition } from './ui/calloutPosition.js';
 import { hasUnseenEntries, migratedSeenId, renderWhatsNew } from './ui/changelog.js';
 import { parseVersion, isUpdateAvailable } from './ui/update.js';
 
@@ -194,16 +193,11 @@ const EL = {
   heroPause: els('hero-pause'), rfSampleReadout: els('rfSampleReadout'),
   dotBle: els('dot-ble'), dotMqtt: els('dot-mqtt'),
 };
-// Splash gate + coach marks (src/ui/splash.js).
+// Splash gate (src/ui/splash.js).
 const SPLASH = {
   root: els('splash'), name: els('splash-name'), rows: els('splash-rows'),
   status: els('splash-status'), dismiss: els('splash-dismiss'),
 };
-// Each mark's own element, plus its real anchor element — passed straight
-// into positionCoachMarks (src/ui/splash.js) alongside calloutPosition.
-const COACH_ELS = COACH_MARKS.map((m) => ({
-  el: els(m.id), anchor: els(m.anchor), opts: { side: m.side },
-}));
 // "What's new" sheet + its unseen badge, and the update-available button.
 const WHATSNEW = { body: els('wn-body'), dot: els('wn-dot'), btn: els('btnWhatsNew') };
 
@@ -1396,15 +1390,11 @@ function applyTheme(pref) {
   if (state.map) state.map.setTheme(theme);
 }
 
-// --- Cold-start splash gate + coach-mark tour (src/ui/splash.js) -----------
+// --- Cold-start splash gate (src/ui/splash.js) ------------------------------
 // initSplashContent writes the copy that never changes while the gate is up
-// (splash-name, each coach mark's text). Called once at startup.
+// (splash-name). Called once at startup.
 function initSplashContent() {
   SPLASH.name.textContent = APP_NAME;
-  for (let i = 0; i < COACH_MARKS.length; i++) {
-    const textEl = COACH_ELS[i].el.querySelector('.coach-text');
-    if (textEl) textEl.textContent = COACH_MARKS[i].text;
-  }
 }
 
 // splashArgs is the one place splashState's input is assembled, so the gate
@@ -1433,17 +1423,15 @@ function persistSplashDismissed() {
 }
 
 // refreshSplash is the gate's one writer, called on every input change
-// (connect attempt, GPS fix, dismiss, resize while visible).
+// (connect attempt, GPS fix, dismiss).
 function refreshSplash() {
   const s = splashState(splashArgs());
   const visible = s !== 'hidden';
   if (!visible && !state.splashDismissed) persistSplashDismissed();
   SPLASH.root.hidden = !visible;
-  for (const c of COACH_ELS) c.el.hidden = !visible;
   if (!visible) return; // already dismissed or never yet needed — nothing left to paint
   renderSplashRows(SPLASH.rows, splashRows(s, { name: state.companionName }));
   SPLASH.status.textContent = SPLASH_ERRORS[s] || '';
-  positionCoachMarks(COACH_ELS, { width: window.innerWidth, height: window.innerHeight }, calloutPosition);
 }
 
 // --- "What's new" (src/ui/changelog.js) -------------------------------------
@@ -1610,7 +1598,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     persistSplashDismissed();
     refreshSplash();
   });
-  window.addEventListener('resize', () => { if (!SPLASH.root.hidden) refreshSplash(); });
   loadChangelog();
   renderStatusScreen();
   renderHeardScreen();
@@ -1618,10 +1605,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Nothing works without a companion, so an unconnected start lands on Status
   // where the Connect button is (src/ui/shell.js).
   showTab(nextTab(localStorage.getItem(TAB_STORAGE_KEY), state.connected));
-  // Coach marks anchor to real elements (#btnConnect included) whose layout
-  // only exists once their screen is no longer `hidden` — the call above is
-  // what first un-hides one, so positioning has to happen after it.
-  refreshSplash();
   // The map last: it imports maplibre-gl lazily, so everything above is already
   // on screen before that bundle is fetched.
   try {

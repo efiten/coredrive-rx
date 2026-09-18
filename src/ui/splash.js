@@ -50,16 +50,6 @@ export const SPLASH_ERRORS = {
   'ble-error': 'Could not connect. Retry to try again.',
 };
 
-// Three coach marks beside their own real control (index.html), each a plain
-// text callout positioned by calloutPosition.js against that element's own
-// getBoundingClientRect — this app has no spotlight-ring/scrim layer, so the
-// marks are plain floating boxes, not core-hunter's rings + leader lines.
-export const COACH_MARKS = [
-  { id: 'cm-connect', anchor: 'btnConnect', side: 'below', text: 'Connect your companion here' },
-  { id: 'cm-drive', anchor: 'tab-drive', side: 'above', text: 'Your covered hexes build up here as you drive' },
-  { id: 'cm-heard', anchor: 'tab-heard', side: 'above', text: 'Every reception, largest first — readable at a glance' },
-];
-
 // renderSplashRows is the gate's one DOM writer. Built with createElement,
 // never innerHTML — the text is app copy, but this keeps the same rule every
 // other src/ui renderer follows.
@@ -86,21 +76,4 @@ export function renderSplashRows(el, rows) {
     row.appendChild(tx);
     return row;
   }));
-}
-
-// positionCoachMarks places each mark's box beside its live anchor element,
-// via calloutPosition — the one bit of DOM glue that needs a real
-// getBoundingClientRect, so it is exercised in the browser, not under
-// node:test (see test/calloutPosition.test.mjs for the positioning math
-// itself). `marks` is [{ el, anchor, opts }]; called again on resize by the
-// caller since a rotated phone moves every anchor.
-export function positionCoachMarks(marks, viewport, calloutPositionFn) {
-  for (const m of marks) {
-    if (!m.el || !m.anchor) continue;
-    const targetRect = m.anchor.getBoundingClientRect();
-    const size = { width: m.el.offsetWidth, height: m.el.offsetHeight };
-    const pos = calloutPositionFn(targetRect, viewport, size, m.opts || {});
-    m.el.style.top = pos.top + 'px';
-    m.el.style.left = pos.left + 'px';
-  }
 }

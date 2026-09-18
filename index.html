@@ -164,8 +164,7 @@
 
   <!-- Cold-start gate (src/ui/splash.js): shown until the first GPS fix
        arrives or it is dismissed, then never again (the dismissal persists
-       via storage.js's prefKey). The three coach marks below point at their
-       real control and are positioned by calloutPosition.js against it. -->
+       via storage.js's prefKey). -->
   <div id="splash" class="splash" hidden>
     <div class="splash-card">
       <div id="splash-name" class="mono"></div>
@@ -174,9 +173,6 @@
       <button id="splash-dismiss" class="btn2">Skip</button>
     </div>
   </div>
-  <div id="cm-connect" class="coach" hidden><span class="coach-text"></span></div>
-  <div id="cm-drive" class="coach" hidden><span class="coach-text"></span></div>
-  <div id="cm-heard" class="coach" hidden><span class="coach-text"></span></div>
 
   <nav id="tabs">
     <button id="tab-drive" aria-selected="true">Drive</button>

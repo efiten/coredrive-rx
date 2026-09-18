@@ -204,20 +204,16 @@ body { background: var(--ch-bg); color: var(--ch-text);
 #btnWhatsNew { position: relative; }
 #wn-dot { margin-left: 6px; }
 
-/* Cold-start splash gate + its coach-mark tour (src/ui/splash.js). A
-   translucent backdrop like the sheets', with a centered card carrying the
-   two status rows (Bluetooth/GPS); the coach marks are separate floating
-   boxes positioned by calloutPosition.js against their real anchor, so the
-   real controls stay visible and tappable underneath — there is no
-   spotlight-ring/scrim layer here.
+/* Cold-start splash gate (src/ui/splash.js): a single centered card over a
+   translucent backdrop, like the sheets', carrying the app name and the two
+   status rows (Bluetooth/GPS).
 
-   pointer-events is what makes "tappable underneath" true. Without it the
-   full-viewport backdrop swallowed every tap, #btnConnect included — and
-   connectAll is the only caller of state.gps.start, so neither `connected` nor
-   `hasFix` could ever become true while the gate was up: splashState could only
-   ever answer 'intro', and Skip was the single way out. The card takes its own
-   events back; the coach marks are text, never controls, and must not swallow a
-   tap meant for the control they sit beside. */
+   pointer-events is what makes the real controls stay tappable underneath.
+   Without it the full-viewport backdrop swallowed every tap, #btnConnect
+   included — and connectAll is the only caller of state.gps.start, so
+   neither `connected` nor `hasFix` could ever become true while the gate was
+   up: splashState could only ever answer 'intro', and Skip was the single
+   way out. The card takes its own events back. */
 .splash { position: fixed; inset: 0; z-index: 800; pointer-events: none;
   background: color-mix(in srgb, var(--ch-bg) 55%, transparent);
   display: flex; align-items: center; justify-content: center; padding: 16px; }
@@ -236,7 +232,3 @@ body { background: var(--ch-bg); color: var(--ch-text);
 @keyframes splash-spin { to { transform: rotate(360deg); } }
 .splash-stext { flex: 1; }
 .splash-stext.muted { color: var(--ch-muted); }
-
-.coach { position: fixed; z-index: 810; max-width: 220px; pointer-events: none;
-  background: var(--ch-surface); border: 1px solid var(--ch-accent);
-  border-radius: 10px; padding: 6px 10px; font-size: 12px; }

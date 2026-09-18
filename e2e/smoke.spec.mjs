@@ -31,9 +31,9 @@ test('the shell renders, switches tabs, cycles theme and opens a sheet without c
   page.on('pageerror', (e) => errors.push(String(e)));
 
   // The cold-start splash (Task 9, #splash) gates the whole shell behind a
-  // coach-mark tour on a genuine first run. That gate is its own feature with
+  // centred card on a genuine first run. That gate is its own feature with
   // its own unit test (test/splash.test.mjs); driving it here would make this
-  // a splash test wearing a smoke test's name, and a failure inside the tour
+  // a splash test wearing a smoke test's name, and a failure inside the gate
   // would say nothing about whether the app itself renders. Pre-seed the
   // localStorage key it reads (storage.js's prefKey('splashSeen'), unnamespaced
   // in this non-beta build: 'coredrive.splashSeen') so the run starts on the

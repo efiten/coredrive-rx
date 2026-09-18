@@ -15,18 +15,19 @@
 //   - SPLASH_CALLOUTS / SPLASH_CALLOUTS.fabs copy / SPLASH_FAB_IDS: these
 //     describe core-hunter's map FAB stack (layer-toggle, sound-toggle,
 //     nodepos-toggle, etc.) and its spotlight-ring CSS. None of those ids or
-//     that ring/scrim system exist in this app's index.html or app.css — the
-//     coach marks here point at #btnConnect/#tab-drive/#tab-heard instead,
-//     covered under COACH_MARKS below. Not ported.
-//   - "COACH_MARKS paint above the bar" describe block: pins z-index/DOM
-//     nesting against core-hunter's #splash aside + .splash-ring/.splash-lead
-//     scrim, which this app does not build (YAGNI — no spotlight-ring layer).
-//     Not ported.
+//     that ring/scrim system exist in this app's index.html or app.css. Not
+//     ported.
+//   - The cold-start coach-mark tour (COACH_MARKS, positionCoachMarks,
+//     calloutPosition.js) shipped briefly on this branch, pointing at
+//     #btnConnect/#tab-drive/#tab-heard, and was removed again: all three
+//     marks rendered at once, two overlapped above the tab bar and the third
+//     sat over the connect steps rather than beside Connect. The gate is the
+//     centred card (splashRows) alone now.
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 import {
-  splashState, splashRows, dismissBanner, SPLASH_ERRORS, COACH_MARKS, APP_NAME,
+  splashState, splashRows, dismissBanner, SPLASH_ERRORS, APP_NAME,
 } from '../src/ui/splash.js';
 
 test('splashState hides once a GPS fix has been acquired, regardless of other state', () => {
@@ -98,32 +99,6 @@ test('SPLASH_ERRORS has a fallback line for exactly the two retryable states', (
   for (const v of Object.values(SPLASH_ERRORS)) assert.ok(v.length > 0);
 });
 
-// Three coach marks beside their own control, each pointing at a real element
-// this app ships.
-test('COACH_MARKS is three marks with copy, each anchored to an element index.html ships', () => {
-  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  assert.strictEqual(COACH_MARKS.length, 3);
-  for (const m of COACH_MARKS) {
-    assert.ok(m.text.length > 0);
-    assert.ok(html.includes(`id="${m.anchor}"`), `index.html has id="${m.anchor}"`);
-  }
-});
-
-test('COACH_MARKS points the connect mark at the Connect button', () => {
-  const m = COACH_MARKS.find((x) => x.anchor === 'btnConnect');
-  assert.match(m.text, /connect/i);
-});
-
-test('COACH_MARKS points the drive mark at the Drive tab, naming hexes', () => {
-  const m = COACH_MARKS.find((x) => x.anchor === 'tab-drive');
-  assert.match(m.text, /hexes/i);
-});
-
-test('COACH_MARKS points the heard mark at the Heard tab, naming receptions', () => {
-  const m = COACH_MARKS.find((x) => x.anchor === 'tab-heard');
-  assert.match(m.text, /reception/i);
-});
-
 test('APP_NAME is the CoreDrive RX display name', () => {
   assert.strictEqual(APP_NAME, 'CoreDrive RX');
 });
@@ -145,9 +120,6 @@ test('the splash backdrop passes taps through, and its card takes them back', ()
   };
   assert.match(rule('.splash'), /pointer-events:\s*none/);
   assert.match(rule('.splash-card'), /pointer-events:\s*auto/);
-  // The coach marks are text beside a control, never controls themselves, so
-  // they must not swallow a tap on the control they point at either.
-  assert.match(rule('.coach'), /pointer-events:\s*none/);
 });
 
 // With the taps passing through, each of splashState's inputs has a real source
