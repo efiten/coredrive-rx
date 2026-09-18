@@ -243,7 +243,19 @@ export function markAnswered(answered, queue, target) {
 // were visible and all arrived 1–2s after the ask. Ending the hold on the reply removes
 // only time AFTER the answer is in hand; how early a restore is safe while no reply has
 // come is a firmware question, so the timeout stays for that case.
-export function holdUntilReply(waiters, target, timeoutMs, timers = { setTimeout, clearTimeout }) {
+// The default timers are wrapped, not passed by reference. A browser requires the
+// native timer functions to be called with the global as `this`, and
+// `({ setTimeout }).setTimeout(fn, ms)` hands them the object literal instead, which
+// Chromium rejects with "TypeError: Illegal invocation". Node's timers do not check,
+// so every test here passed while the field log of 2026-09-18 lost the hold AND the
+// contact-path restore on the first ask to each saved-contact repeater (three of them
+// that morning). test/regionsched-timers.test.mjs pins the receiver rule.
+const defaultTimers = () => ({
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (id) => clearTimeout(id),
+});
+
+export function holdUntilReply(waiters, target, timeoutMs, timers = defaultTimers()) {
   return new Promise((resolve) => {
     const timer = timers.setTimeout(() => { waiters.delete(target); resolve('timeout'); }, timeoutMs);
     waiters.set(target, () => { timers.clearTimeout(timer); waiters.delete(target); resolve('reply'); });
