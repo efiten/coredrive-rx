@@ -1004,8 +1004,10 @@ async function pushNow() {
     if (outcome.reloadConfig) {
       if (await retryConfig()) await drain(); // config arrived — flush immediately
     } else if (outcome.reconnect) {
-      if (state.publisher) state.publisher.reconnect(); // drain fires on the 'connect' event
-      else if (state.connected) await startPublisher();
+      if (state.publisher) {
+        // drain fires on the 'connect' event
+        if (!state.publisher.reconnect()) dbg('a connection attempt is already under way — not starting a second one', 'st');
+      } else if (state.connected) await startPublisher();
     }
   } catch (e) {
     dbg('push failed (kept buffered): ' + e.message, 'no');
