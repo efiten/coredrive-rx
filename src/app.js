@@ -65,6 +65,12 @@ const state = {
   companionPubkey: '', companionName: '', connected: false, recent: [],
   map: null, verbose: false, motion: null, paused: false, wakeLock: null,
   soundEnabled: false, beeper: null,
+  // gpsErrorKind: the last watchPosition error (gps.js's gpsErrorKind()), or
+  // null. 'timeout' is deliberately NOT treated like the other two below
+  // (splashArgs, statusLine) — the watch keeps running after one and can
+  // still deliver a fix on its own, so it must not paint a permanent-looking
+  // error for what may resolve itself on the next update.
+  gpsErrorKind: null,
   // logLines: the debug-log ring buffer, newest first. Held here rather than read
   // back out of the DOM, so the shared log (buildLogHeader + these lines) does not
   // depend on how the #sheet-log sheet happens to render them.
@@ -828,6 +834,7 @@ async function renderHeardScreen() {
     status: statusLine({
       fix: currentFix(), pending: state.pendingCount, brokerState: uploadState(),
       lastPublishAt: state.lastUploadAt, rate: state.rxTimes.length, now,
+      gpsErrorKind: state.gpsErrorKind,
     }),
     recent: recentRows(state.recent, now),
     counts,
@@ -1215,10 +1222,16 @@ async function connectAll() {
     noteRegionInert();
 
     state.gps.start((fix) => {
+      state.gpsErrorKind = null; // a fix arrived — any earlier error is stale
       if (state.map) state.map.setPosition(fix);
       state.motion = updateMotion(state.motion, fix, Date.now());
       setPaused(state.motion.paused);
       refreshSplash(); // the splash gate's own hasFix condition
+    }, (kind) => {
+      state.gpsErrorKind = kind;
+      dbg('GPS: ' + kind, kind === 'timeout' ? undefined : 'no');
+      refreshSplash(); // 'denied'/'unavailable' can move the gate to gps-error
+      renderHeardScreen(); // status line says something truer than "no fix"
     });
 
     setStep('broker', 'active');
@@ -1401,17 +1414,19 @@ function initSplashContent() {
 
 // splashArgs is the one place splashState's input is assembled, so the gate
 // and the dismiss banner cannot disagree about what "connected"/"hasFix" mean.
-// gpsError stays false: Gps (src/gps.js) does not surface a watch error to
-// its caller, only the last-known fix, so this app's gate never reaches
-// 'gps-error' in practice — the state itself stays fully testable (see
-// test/splash.test.mjs) even though nothing here can trigger it.
+// gpsError is true for 'denied' and 'unavailable' — dead ends the user (or
+// device) has to do something about. NOT for 'timeout': watchPosition keeps
+// watching after one and can still deliver a fix by itself, so the gate must
+// not flip to the (retry-only) gps-error state over something that can
+// resolve on its own on the next update.
 function splashArgs(overrides) {
   return {
     // bleLinkUp(), not state.connected: the gate only cares whether the
     // radio itself is up, not whether SELF_INFO/the broker have finished —
     // those can still be in flight while GPS is already worth waiting for.
     hasFix: !!state.gps.latest(), connected: bleLinkUp(),
-    bleError: state.splashBleError, gpsError: false,
+    bleError: state.splashBleError,
+    gpsError: state.gpsErrorKind === 'denied' || state.gpsErrorKind === 'unavailable',
     dismissed: state.splashDismissed, ...overrides,
   };
 }

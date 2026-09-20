@@ -125,14 +125,15 @@ test('the splash backdrop passes taps through, and its card takes them back', ()
 // With the taps passing through, each of splashState's inputs has a real source
 // again: connected is bleLinkUp() after connectAll's transport.connect(),
 // bleError is connectAll's catch, and hasFix is the gps.start callback
-// connectAll installs. gpsError has no source — src/gps.js swallows
-// watchPosition's error callback and app.js's splashArgs pins it false — so
-// three of the four are reachable in the field and the fourth stays a tested
-// state with no trigger.
-test('the three states the app can actually produce are all distinct', () => {
+// connectAll installs. gpsError now has a source too — src/gps.js's
+// watchPosition error callback (gpsErrorKind()) reaching app.js's
+// splashArgs — for the 'denied'/'unavailable' kinds; 'timeout' deliberately
+// does not set it (see test/gps.test.mjs and test/heardview.test.mjs).
+test('the four states the app can actually produce are all distinct', () => {
   const base = { hasFix: false, dismissed: false, gpsError: false };
   assert.strictEqual(splashState({ ...base, connected: false, bleError: false }), 'intro');
   assert.strictEqual(splashState({ ...base, connected: true, bleError: false }), 'waiting-gps');
   assert.strictEqual(splashState({ ...base, connected: false, bleError: true }), 'ble-error');
+  assert.strictEqual(splashState({ ...base, connected: true, bleError: false, gpsError: true }), 'gps-error');
   assert.strictEqual(splashState({ ...base, hasFix: true, connected: true, bleError: false }), 'hidden');
 });

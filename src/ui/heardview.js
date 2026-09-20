@@ -8,10 +8,16 @@ import { regionsRows } from '../regionsview.js';
 
 const UPLOAD_CLASS = { connected: 'on', reconnect: 'warn' };
 
-export function statusLine({ fix, pending = 0, brokerState, lastPublishAt, rate = 0, now }) {
+// gpsText's no-fix fallback: plain "no fix" unless gps.js's gpsErrorKind()
+// named a reason worth showing. 'timeout' is deliberately left out — the
+// watch keeps running after one and can still deliver a fix on its own, so
+// it reads the same as any other in-progress wait for a fix.
+const GPS_ERROR_TEXT = { denied: 'location blocked', unavailable: 'no GPS signal' };
+
+export function statusLine({ fix, pending = 0, brokerState, lastPublishAt, rate = 0, now, gpsErrorKind }) {
   const secs = Number.isFinite(lastPublishAt) ? Math.max(0, Math.round((now - lastPublishAt) / 1000)) : null;
   return {
-    gpsText: fix ? `GPS ${Math.round(fix.acc_m)} m` : 'no fix',
+    gpsText: fix ? `GPS ${Math.round(fix.acc_m)} m` : (GPS_ERROR_TEXT[gpsErrorKind] || 'no fix'),
     pendingText: `${pending} pending`,
     uploadText: secs === null ? 'upload' : `up ${secs}s`,
     uploadClass: brokerState ? (UPLOAD_CLASS[brokerState] || 'bad') : '',

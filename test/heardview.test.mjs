@@ -57,6 +57,27 @@ test('no fix is said plainly, and no publisher is a grey dot', () => {
   assert.strictEqual(m.uploadClass, '');
 });
 
+// gpsErrorKind (gps.js's gpsErrorKind()) says something truer than "no fix"
+// for the two watch errors that are actually dead ends. 'timeout' is left
+// out on purpose: the watch is still running and can resolve on its own, so
+// it must read exactly like any other in-progress wait for a fix.
+test('a denied or unavailable GPS names the reason instead of "no fix"', () => {
+  const denied = statusLine({ fix: null, pending: 0, brokerState: null, lastPublishAt: null, rate: 0, now: 1, gpsErrorKind: 'denied' });
+  assert.strictEqual(denied.gpsText, 'location blocked');
+  const unavailable = statusLine({ fix: null, pending: 0, brokerState: null, lastPublishAt: null, rate: 0, now: 1, gpsErrorKind: 'unavailable' });
+  assert.strictEqual(unavailable.gpsText, 'no GPS signal');
+});
+
+test('a GPS timeout still says "no fix": the watch is still running and may resolve on its own', () => {
+  const m = statusLine({ fix: null, pending: 0, brokerState: null, lastPublishAt: null, rate: 0, now: 1, gpsErrorKind: 'timeout' });
+  assert.strictEqual(m.gpsText, 'no fix');
+});
+
+test('a fix wins over a stale gpsErrorKind: the text only ever describes the current state', () => {
+  const m = statusLine({ fix: { lat: 1, lon: 2, acc_m: 4 }, pending: 0, brokerState: null, lastPublishAt: null, rate: 0, now: 1, gpsErrorKind: 'denied' });
+  assert.strictEqual(m.gpsText, 'GPS 4 m');
+});
+
 test('reconnecting is amber and anything else is red', () => {
   assert.strictEqual(statusLine({ brokerState: 'reconnect', now: 0 }).uploadClass, 'warn');
   assert.strictEqual(statusLine({ brokerState: 'error', now: 0 }).uploadClass, 'bad');
