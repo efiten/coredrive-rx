@@ -174,6 +174,11 @@ body { background: var(--ch-bg); color: var(--ch-text);
    answer, not an absence — so it is amber, not muted grey. The separator sits
    on the pair, because a truncated answer is two lines of one answer. */
 .rg-row { border-bottom: 1px solid var(--ch-border); }
+/* The wrapper around the region text (or SCOPE_NOTHING_TEXT) and the optional
+   unscoped badge. The badge is a smaller, bordered/padded chip next to plain
+   text, which sit on different baselines without this; flex + centering keeps
+   them level regardless of which text variant is showing. */
+.rg-scope { display: flex; align-items: center; }
 .rg-regions { color: var(--ch-muted); }
 .rg-unscoped { margin-left: 6px; font-size: 10px; white-space: nowrap;
   border: 1px solid var(--ch-border); border-radius: 4px; padding: 0 4px;

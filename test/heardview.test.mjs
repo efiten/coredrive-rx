@@ -399,9 +399,31 @@ test('renderHeard: with no answers at all the whole fold is hidden', () => {
   });
 });
 
+// collectClasses walks a fakeElement tree and returns the set of every class
+// token any node in it carries — the renderer's own output, not a
+// hand-written guess at what it might emit.
+function collectClasses(el, out = new Set()) {
+  if (!el) return out;
+  if (el.className) for (const c of el.className.split(' ').filter(Boolean)) out.add(c);
+  for (const child of el.children || []) collectClasses(child, out);
+  return out;
+}
+
 test('every class the declared-scopes card emits exists in app.css', () => {
-  const css = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
-  for (const cls of ['rg-row', 'rg-regions', 'rg-unscoped', 'rg-nothing', 'rg-truncated']) {
-    assert.ok(css.includes(`.${cls} {`), `CSS must define .${cls}`);
-  }
+  withFakeDocument(() => {
+    const els = scopeEls();
+    // One answer per branch scopeRows/renderHeard can take, so every class the
+    // card can emit actually gets emitted: a plain region list, the '*'
+    // wildcard (rg-unscoped), an empty list (rg-nothing), and a truncated reply.
+    renderScopes(els, [
+      { target: 'aa', name: 'Rpt1', regions: ['be', 'be-vlg'], truncated: false },
+      { target: 'bb', regions: ['be', '*'], truncated: false },
+      { target: 'cc', regions: [], truncated: false },
+      { target: 'dd', regions: ['be'], truncated: true },
+    ]);
+    const classes = collectClasses(els.regionsList);
+    assert.ok(classes.size > 0, 'the render above must actually emit classes');
+    const css = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
+    for (const cls of classes) assert.ok(css.includes(`.${cls} {`), `CSS must define .${cls}`);
+  });
 });
