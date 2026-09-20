@@ -225,3 +225,23 @@ test('setting the gate to the state it is already in changes nothing', () => {
   assert.deepStrictEqual(gate.setOpen(false), [], 'a second close must not replay');
   assert.deepStrictEqual(calls, []);
 });
+
+// map.js's setTheme/syncTheme route the basemap swap through this same gate
+// (createMap needs maplibre-gl + a browser, so that composition is exercised
+// live only by the smoke test — this proves the generic shape it relies on: a
+// job that reads a variable set immediately by the caller, not an argument
+// captured at queue time, so the gate's own de-duplication of a job name
+// (already covered above) is what makes "cycled twice while away" apply the
+// SECOND theme once, not the first, and not twice.
+test('a job that reads a variable set outside it applies whatever that variable last became', () => {
+  let curTheme = 'dark';
+  const applied = [];
+  const gate = createSyncGate({ theme: () => applied.push(curTheme) });
+  gate.setOpen(false);
+  curTheme = 'light'; gate.run('theme');
+  curTheme = 'dark'; gate.run('theme'); // cycled a second time while still away
+  assert.deepStrictEqual(applied, [], 'nothing painted while closed');
+  const replayed = gate.setOpen(true);
+  assert.deepStrictEqual(replayed, ['theme'], 'one job, not one per run() call');
+  assert.deepStrictEqual(applied, ['dark'], 'the theme in effect when Drive returns is the last one asked for');
+});

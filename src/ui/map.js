@@ -155,6 +155,7 @@ export async function createMap({ container, theme }) {
   let following = true;        // pan to keep the GPS fix centred (zoom preserved)
   let centered = false;        // first fix recentres+zooms once, then it's just panning
   let fix = null;               // last known GPS fix, {lat,lon}
+  let curTheme = theme;         // last theme asked for, applied or not (see setTheme/syncTheme)
 
   function bestMap() {
     const m = new Map();
@@ -180,9 +181,19 @@ export async function createMap({ container, theme }) {
     else if (following) map.panTo([fix.lon, fix.lat]);
   }
 
+  // syncTheme applies curTheme, whatever it is at the moment the gate lets this
+  // job run — not the theme requested when setTheme queued it. Cycling the
+  // theme twice while another tab is shown must repaint once, as the SECOND
+  // theme, not twice or as the first: setTheme always updates curTheme
+  // immediately, and the gate collapses any number of 'theme' runs made while
+  // closed into the one replay on reopen (see createSyncGate), which reads
+  // curTheme fresh.
+  function syncTheme() { map.setStyle(basemapUrl(curTheme)); }
+
   // Every repaint-causing job goes through the gate, which app.js closes while
-  // a tab other than Drive is shown (setActive below).
-  const gate = createSyncGate({ hexes: syncHexes, position: syncPosition, pan: panToFix });
+  // a tab other than Drive is shown (setActive below) — a whole basemap style
+  // and its tiles is exactly the kind of work that class covers.
+  const gate = createSyncGate({ hexes: syncHexes, position: syncPosition, pan: panToFix, theme: syncTheme });
 
   function addLayers() {
     if (!map.getSource('hexes')) map.addSource('hexes', { type: 'geojson', data: hexCollection(bestMap()) });
@@ -288,7 +299,10 @@ export async function createMap({ container, theme }) {
     // back, when exactly the deferred work is replayed.
     setActive(on) { return gate.setOpen(on); },
     isActive() { return gate.isOpen(); },
-    setTheme(nextTheme) { map.setStyle(basemapUrl(nextTheme)); },
+    // Routed through the gate like hexes/position/pan: while it's closed (any
+    // tab but Drive), the new style is remembered (curTheme) but not fetched;
+    // reopening applies whatever curTheme ended up as, once.
+    setTheme(nextTheme) { curTheme = nextTheme; gate.run('theme'); },
     resize() { try { map.resize(); } catch (e) {} },
   };
 }
