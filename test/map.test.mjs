@@ -3,7 +3,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
-import { basemapUrl, hexFeature, hexCollection, hexPopupText, createSyncGate } from '../src/ui/map.js';
+import {
+  basemapUrl, hexFeature, hexCollection, hexPopupText, createSyncGate,
+  fillColorExpr, POPUP_OPEN_EVENTS,
+} from '../src/ui/map.js';
 import { hexCellAt } from '../src/hexgrid.js';
 import { snrTier } from '../src/ui/reading.js';
 
@@ -51,13 +54,39 @@ test('the collection keeps one feature per cell', () => {
 // orange / red) without editing tokens.css.
 const APP_CSS = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
 const TOKENS_CSS = readFileSync(new URL('../src/styles/tokens.css', import.meta.url), 'utf8');
-const MAP_SRC = readFileSync(new URL('../src/ui/map.js', import.meta.url), 'utf8');
 
 // alias(name) -> the --ch-* token an --rx-sig-* alias forwards to.
 function alias(name) {
   const m = APP_CSS.match(new RegExp('--rx-sig-' + name + ':\\s*var\\((--ch-[a-z0-9-]+)\\)'));
   assert.ok(m, `app.css must alias --rx-sig-${name}`);
   return m[1];
+}
+
+// fillBg(tier) -> the CSS variable .fill-<tier>'s background reads, parsed out
+// of the rule body rather than matched as one exact literal line — a harmless
+// reformat (added whitespace, reordered declarations) must not fail this.
+function fillBg(tier) {
+  const at = APP_CSS.indexOf(`.fill-${tier} {`);
+  assert.notStrictEqual(at, -1, `app.css must define .fill-${tier}`);
+  const body = APP_CSS.slice(at, APP_CSS.indexOf('}', at));
+  const m = body.match(/background:\s*var\((--[a-z0-9-]+)\)/);
+  assert.ok(m, `.fill-${tier} must paint from a var()`);
+  return m[1];
+}
+
+// withFakeStyle fakes the getComputedStyle(document.documentElement) pair
+// src/ui/map.js's cssVar() reads, so fillColorExpr() can be called and its
+// output inspected without a browser. `values` maps a CSS custom property
+// name to the string cssVar() should return for it.
+function withFakeStyle(values, fn) {
+  const priorDoc = globalThis.document;
+  const priorGCS = globalThis.getComputedStyle;
+  globalThis.document = { documentElement: {} };
+  globalThis.getComputedStyle = () => ({ getPropertyValue: (name) => values[name] ?? '' });
+  try { return fn(); } finally {
+    globalThis.document = priorDoc;
+    globalThis.getComputedStyle = priorGCS;
+  }
 }
 
 test('the strongest tier is not painted in the failure colour', () => {
@@ -85,15 +114,27 @@ test('the ramp runs strong-to-weak the way v1.18.2 painted it', () => {
   assert.strictEqual(snrTier(-10.25), 'cool');
 });
 
-test('the map fill and the meter read the same variables', () => {
-  // The fill expression reads the aliases; no --ch-sig-* token is read directly
-  // any more (the name still appears in this file's comments, explaining why).
-  assert.ok(MAP_SRC.includes('cssVar(`--rx-sig-${t}`)'));
-  assert.ok(!MAP_SRC.includes('cssVar(`--ch-sig'));
-  assert.ok(!MAP_SRC.includes("cssVar('--ch-sig"));
+test('the fill expression reads the --rx-sig-* aliases, not --ch-sig-* directly', () => {
+  // Every --ch-sig-* is given a deliberately wrong value here: if fillColorExpr
+  // ever read one of those directly instead of its --rx-sig-* alias, this
+  // value would leak into the expression and the deepStrictEqual below would
+  // catch it.
+  const expr = withFakeStyle({
+    '--rx-sig-hot': 'HOT', '--rx-sig-warm': 'WARM', '--rx-sig-mid': 'MID',
+    '--rx-sig-cool': 'COOL', '--rx-sig-cold': 'COLD', '--rx-sig-none': 'NONE',
+    '--ch-sig-hot': 'WRONG', '--ch-sig-warm': 'WRONG', '--ch-sig-mid': 'WRONG',
+    '--ch-sig-cool': 'WRONG', '--ch-sig-cold': 'WRONG', '--ch-sig-none': 'WRONG',
+  }, () => fillColorExpr());
+  assert.deepStrictEqual(expr, [
+    'match', ['get', 'tier'],
+    'hot', 'HOT', 'warm', 'WARM', 'mid', 'MID', 'cool', 'COOL', 'cold', 'COLD', 'none', 'NONE',
+    'NONE', // fallback for an unexpected tier
+  ]);
+});
+
+test('the map fill and the meter paint the same tier from the same variable', () => {
   for (const tier of ['hot', 'warm', 'mid', 'cool', 'none']) {
-    assert.ok(APP_CSS.includes(`.fill-${tier} { background: var(--rx-sig-${tier}); }`),
-      `.fill-${tier} must paint from --rx-sig-${tier}`);
+    assert.strictEqual(fillBg(tier), `--rx-sig-${tier}`, `.fill-${tier} must paint from --rx-sig-${tier}`);
   }
 });
 
@@ -113,9 +154,14 @@ test('the readout names the count, and the best SNR only when there is one', () 
 });
 
 test('a tap opens the readout, not only a mouse', () => {
-  // mousemove/mouseleave are a desktop pair no touch device fires, which left
-  // the numbers unreachable on the phone this app is driven on.
-  assert.match(MAP_SRC, /map\.on\('click', 'hex-fill'/);
+  // mousemove is a desktop-only event no touch device fires, which left the
+  // numbers unreachable on the phone this app is driven on. createMap's live
+  // map.on() wiring itself needs a browser (maplibre-gl + WebGL) and is
+  // exercised by the smoke test only; POPUP_OPEN_EVENTS is the pure data it
+  // wires from, so this checks the fact without needing a map instance.
+  const click = POPUP_OPEN_EVENTS.find((e) => e.type === 'click');
+  assert.ok(click, 'click must open the popup');
+  assert.strictEqual(click.tapped, true);
 });
 
 // --- The sync gate ----------------------------------------------------------

@@ -5,8 +5,11 @@
 // test file was edited" stays checkable with `git diff --stat origin/master`.
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { buildManifest, themeColorFromHtml } from '../scripts/manifest.mjs';
+import { removeBetaServiceWorker } from '../scripts/beta-no-sw.mjs';
 
 const INDEX_HTML = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const VITE_CONFIG = readFileSync(new URL('../vite.config.js', import.meta.url), 'utf8');
@@ -54,7 +57,32 @@ test('index.html leaves the manifest link to the build', () => {
 // "no sw.js in /beta" was a rule enforced by nothing: `vite build --mode beta`
 // copied public/sw.js into dist/ and deploy.sh removed only dist/config.json, so
 // the file had to be deleted from the server by hand. The build removes it now.
-test('the beta build deletes the service worker it must never ship', () => {
-  assert.match(VITE_CONFIG, /name: 'rx-beta-no-sw'/);
-  assert.match(VITE_CONFIG, /if \(beta\) rmSync\(join\(ROOT, 'dist', 'sw\.js'\), \{ force: true \}\)/);
+// Exercised directly against a temp directory (scripts/beta-no-sw.mjs), which is
+// the helper vite.config.js's rx-beta-no-sw plugin calls from closeBundle — so
+// this asserts the actual removal, not a string naming the plugin.
+function withTempDist(fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'rx-beta-no-sw-'));
+  try { return fn(dir); } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('a beta build deletes dist/sw.js', () => {
+  withTempDist((dir) => {
+    writeFileSync(join(dir, 'sw.js'), '// service worker');
+    removeBetaServiceWorker(dir, true);
+    assert.strictEqual(existsSync(join(dir, 'sw.js')), false);
+  });
+});
+
+test('a production build leaves dist/sw.js alone', () => {
+  withTempDist((dir) => {
+    writeFileSync(join(dir, 'sw.js'), '// service worker');
+    removeBetaServiceWorker(dir, false);
+    assert.strictEqual(existsSync(join(dir, 'sw.js')), true);
+  });
+});
+
+test('a beta build with no sw.js to remove does not throw', () => {
+  withTempDist((dir) => {
+    assert.doesNotThrow(() => removeBetaServiceWorker(dir, true));
+  });
 });

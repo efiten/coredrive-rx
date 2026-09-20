@@ -1,9 +1,10 @@
 import { defineConfig } from 'vite';
-import { readFileSync, rmSync } from 'fs';
+import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { readReleaseNotes } from './scripts/changelog-notes.mjs';
 import { buildManifest, themeColorFromHtml } from './scripts/manifest.mjs';
+import { removeBetaServiceWorker } from './scripts/beta-no-sw.mjs';
 
 // Inject the package.json version so the app can display which build is running.
 const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
@@ -93,7 +94,7 @@ export default defineConfig(({ mode }) => {
         name: 'rx-beta-no-sw',
         apply: 'build',
         closeBundle() {
-          if (beta) rmSync(join(ROOT, 'dist', 'sw.js'), { force: true });
+          removeBetaServiceWorker(join(ROOT, 'dist'), beta);
         },
       },
     ],

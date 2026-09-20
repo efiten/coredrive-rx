@@ -60,12 +60,28 @@ function cssVar(name) {
 // tiers are SNR bands from src/ui/reading.js, not the RSSI dBm bands tokens.css
 // documents. The fill and the hero meter must paint the same tier the same
 // colour, so both read from the same variables.
-function fillColorExpr() {
+// Exported (rather than kept module-private) so test/map.test.mjs can call it
+// with a faked getComputedStyle and assert on the expression it actually
+// builds — which CSS custom properties it reads — instead of matching this
+// function's own source text.
+export function fillColorExpr() {
   const expr = ['match', ['get', 'tier']];
   for (const t of TIERS) expr.push(t, cssVar(`--rx-sig-${t}`));
   expr.push(cssVar('--rx-sig-none')); // fallback for an unexpected tier
   return expr;
 }
+
+// The events that open the per-hex popup, and whether each counts as a tap
+// (sticky — only its own close button dismisses it) or a hover (dismissed by
+// mouseleave). mousemove/mouseleave are a desktop pair no touch device fires,
+// which left the numbers unreachable on the phone this app is driven on;
+// 'click' is what a tap does fire. Exported so test/map.test.mjs can assert
+// a tap is wired up without needing a live map instance (createMap requires
+// maplibre-gl and a browser — see the smoke test).
+export const POPUP_OPEN_EVENTS = [
+  { type: 'click', tapped: true },
+  { type: 'mousemove', tapped: false },
+];
 
 // hexPopupText: the per-cell readout, from that cell's accumulated stats. Pure,
 // so what a tap says is testable without a map.
@@ -205,15 +221,12 @@ export async function createMap({ container, theme }) {
   let popup = null;
   map.on('style.load', addLayers);
   map.on('dragstart', () => { following = false; });
-  // The readout for one cell. mousemove/mouseleave are a desktop pair that a
-  // touch device never fires, which left the per-hex numbers unreachable on the
-  // phone this app is driven on; 'click' is what a tap does fire, and it is the
-  // tap-to-open the deleted Leaflet map had through bindTooltip. The popup's own
-  // close button is what dismisses it on touch (there is no mouseleave).
-  // sticky: opened by a tap, so only its close button dismisses it. A touch
-  // device also emits compatibility mouse events, and without this the
-  // mouseleave below could take the readout away again on the way out of the
-  // tap. closeOnClick stays off: the layer's own click handler would race it.
+  // The readout for one cell (POPUP_OPEN_EVENTS above says which events open
+  // it, and why). sticky: opened by a tap, so only its close button dismisses
+  // it. A touch device also emits compatibility mouse events, and without
+  // this the mouseleave below could take the readout away again on the way
+  // out of the tap. closeOnClick stays off: the layer's own click handler
+  // would race it.
   let sticky = false;
   function showPopup(e, tapped) {
     const f = e.features && e.features[0];
@@ -223,8 +236,7 @@ export async function createMap({ container, theme }) {
     popup.setLngLat(e.lngLat).setText(text).addTo(map);
     sticky = tapped;
   }
-  map.on('click', 'hex-fill', (e) => showPopup(e, true));
-  map.on('mousemove', 'hex-fill', (e) => showPopup(e, false));
+  for (const { type, tapped } of POPUP_OPEN_EVENTS) map.on(type, 'hex-fill', (e) => showPopup(e, tapped));
   map.on('mouseleave', 'hex-fill', () => {
     if (sticky) return;
     if (popup) { popup.remove(); popup = null; }
