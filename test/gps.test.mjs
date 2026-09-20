@@ -7,7 +7,7 @@
 // navigator.geolocation (no real browser) — run: node --test
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { Gps, gpsErrorKind } from '../src/gps.js';
+import { Gps, gpsErrorKind, gpsErrorTransition } from '../src/gps.js';
 
 // fakeGeolocation: watchPosition fires onFix (if a fix is given) or onError
 // (if an error code is given), synchronously, and records what stop() does.
@@ -111,4 +111,29 @@ test('geolocation missing entirely throws, same as before', () => {
   withFakeNavigator(undefined, () => {
     assert.throws(() => new Gps().start(() => {}), /geolocation unavailable/);
   });
+});
+
+// --- gpsErrorTransition -------------------------------------------------
+// A repeating TIMEOUT does not end the watch, so without this a poor-reception
+// stretch (tunnel, parking garage, urban canyon) logs one line every ~15s
+// (Gps.start's own `timeout`) for as long as it lasts — the same shape as
+// src/monitor.js's linkTransition, and for the same field-log reason.
+test('the same kind repeating logs nothing: this is the timeout spam that stops', () => {
+  assert.strictEqual(gpsErrorTransition('timeout', 'timeout'), null);
+  assert.strictEqual(gpsErrorTransition('denied', 'denied'), null);
+});
+
+test('no error before or now logs nothing (the ordinary steady "waiting for a fix" state)', () => {
+  assert.strictEqual(gpsErrorTransition(null, null), null);
+});
+
+test('a new error, or a change of kind, is worth logging once', () => {
+  assert.strictEqual(gpsErrorTransition(null, 'denied'), 'start');
+  assert.strictEqual(gpsErrorTransition('timeout', 'denied'), 'start');
+  assert.strictEqual(gpsErrorTransition('denied', 'unavailable'), 'start');
+});
+
+test('a fix after one or more errors is worth logging once, so the log shows when it ended', () => {
+  assert.strictEqual(gpsErrorTransition('denied', null), 'clear');
+  assert.strictEqual(gpsErrorTransition('timeout', null), 'clear');
 });

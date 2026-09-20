@@ -23,7 +23,7 @@ import {
   discoverDecision, isOrganicHeard, snrToPct, decayPeak, pruneTimestamps, linkTransition,
 } from './monitor.js';
 import { shareLog } from './sharelog.js';
-import { Gps } from './gps.js';
+import { Gps, gpsErrorTransition } from './gps.js';
 import { Queue } from './queue.js';
 import { Publisher, KEEPALIVE_SECS } from './publisher.js';
 import { drainOnce, serialiseDrain } from './drain.js';
@@ -1162,6 +1162,7 @@ async function connectAll() {
   log('');
   setStep('companion', 'active');
   state.splashBleError = false; // a fresh attempt clears the splash gate's last failure
+  state.gpsErrorKind = null; // ditto: a stale 'denied' must not survive into a session whose new watchPosition has not reported anything yet
   try {
     state.transport = new WebBluetoothTransport();
     state.transport.onFrame(processFrame);
@@ -1222,14 +1223,23 @@ async function connectAll() {
     noteRegionInert();
 
     state.gps.start((fix) => {
+      // gpsErrorTransition, not an unconditional log: a plain "no fix yet"
+      // steady state (prevKind already null) must stay silent, same as every
+      // ordinary fix update always has.
+      const transition = gpsErrorTransition(state.gpsErrorKind, null);
       state.gpsErrorKind = null; // a fix arrived — any earlier error is stale
+      if (transition === 'clear') dbg('GPS: recovered — fix acquired', 'ok');
       if (state.map) state.map.setPosition(fix);
       state.motion = updateMotion(state.motion, fix, Date.now());
       setPaused(state.motion.paused);
       refreshSplash(); // the splash gate's own hasFix condition
     }, (kind) => {
+      // A repeating TIMEOUT does not end the watch, so this fires again every
+      // ~15s (this class's own timeout) for as long as reception is poor —
+      // gpsErrorTransition keeps the log to one line per kind, not one per cycle.
+      const transition = gpsErrorTransition(state.gpsErrorKind, kind);
       state.gpsErrorKind = kind;
-      dbg('GPS: ' + kind, kind === 'timeout' ? undefined : 'no');
+      if (transition === 'start') dbg('GPS: ' + kind, kind === 'timeout' ? undefined : 'no');
       refreshSplash(); // 'denied'/'unavailable' can move the gate to gps-error
       renderHeardScreen(); // status line says something truer than "no fix"
     });
@@ -1359,6 +1369,10 @@ async function disconnectAll(keepSteps) {
   // no longer attached. state.regions.supported is already reset before the
   // query in connectAll; this is the same rule for the number it came from.
   state.fwVer = null;
+  // state.gps.stop() below ends the watch this kind describes; a stale 'denied'
+  // or 'unavailable' must not keep the Heard status line and the splash gate
+  // reporting an error for a watch that no longer runs.
+  state.gpsErrorKind = null;
   renderPauseChip();
   clearInterval(state.tick); state.tick = null;
   stopRfSampler();
@@ -1382,6 +1396,8 @@ async function disconnectAll(keepSteps) {
   if (!keepSteps) { state.steps = { companion: 'pending', id: 'pending', broker: 'pending' }; log('disconnected.'); }
   renderConnectionControls();
   renderStatusScreen();
+  renderHeardScreen(); // gpsErrorKind just cleared above — the status line must not keep naming a watch that no longer runs
+  refreshSplash();
 }
 
 // --- Theme (src/ui/theme.js) ------------------------------------------------

@@ -17,6 +17,27 @@ export function gpsErrorKind(err) {
   }
 }
 
+// gpsErrorTransition decides what a repeating watchPosition outcome is worth
+// logging — the same shape as src/monitor.js's linkTransition, and for the
+// same reason it exists: a TIMEOUT does not end the watch, so a tunnel, a
+// parking garage or an urban canyon fires the error callback again every
+// ~15s (this class's own `timeout`) for as long as it lasts. Logged
+// unconditionally, that is one line per cycle for the length of the drive —
+// exactly linkTransition's "companion link back" field log, but for GPS —
+// which at the 200-line ring buffer pushes the RX/region/uplink lines a
+// shared debug log is exported to read right out of it.
+//
+// prevKind/kind are gpsErrorKind() strings or null (no error / a fix in
+// hand). 'start': a new error, or a change of kind, worth logging once.
+// 'clear': a fix arrived after one or more errors — worth logging once, so
+// the log still shows when the trouble ended, not just that it started.
+// null: steady — the same kind repeating, or no error before or now — say
+// nothing.
+export function gpsErrorTransition(prevKind, kind) {
+  if (prevKind === kind) return null;
+  return kind ? 'start' : 'clear';
+}
+
 export class Gps {
   constructor() { this._last = null; this._watchId = null; }
 
