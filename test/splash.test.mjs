@@ -122,6 +122,19 @@ test('the splash backdrop passes taps through, and its card takes them back', ()
   assert.match(rule('.splash-card'), /pointer-events:\s*auto/);
 });
 
+// .btn/.btn2 both set an explicit color/border/background, which beats the UA's
+// disabled greying — #discover-btn (disabled while the companion is not
+// connected) looked exactly like a live button with nothing to tell them apart.
+test('a disabled .btn or .btn2 looks disabled: dimmed and not clickable-looking', () => {
+  const css = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
+  const at = css.indexOf('.btn:disabled');
+  assert.notStrictEqual(at, -1, 'app.css must define a disabled rule for .btn/.btn2');
+  const rule = css.slice(at, css.indexOf('}', at));
+  assert.match(rule, /\.btn2:disabled/, 'the rule must cover .btn2 as well as .btn');
+  assert.match(rule, /opacity:\s*0(\.\d+)?/);
+  assert.match(rule, /cursor:\s*not-allowed/);
+});
+
 // With the taps passing through, each of splashState's inputs has a real source
 // again: connected is bleLinkUp() after connectAll's transport.connect(),
 // bleError is connectAll's catch, and hasFix is the gps.start callback
