@@ -93,7 +93,22 @@ export class Publisher {
 
   // reconnect forces a fresh connection attempt — used by "Push pending now" when the
   // client is disconnected, so the user isn't stuck with a dead link and a full queue.
-  reconnect() { try { if (this.client) this.client.reconnect(); } catch (e) {} }
+  //
+  // It declines (returns false) while a CONNECT is still unanswered. mqtt.js connect()
+  // replaces this.stream without closing the old one (client.js:257), so each forced
+  // attempt left the previous socket open. When such an orphan closed, its 'close' set
+  // client.connected = false over a live session and armed a reconnect that orphaned
+  // that one in turn. Field log 2026-09-19: five presses in four seconds during a slow
+  // connect, then "connected" / "offline" / "connection closed" in the same second,
+  // over and over. An attempt in flight is one with neither a session nor the
+  // reconnect timer that mqtt.js arms once the socket has closed (client.js:873); it
+  // ends by itself within connectTimeout.
+  reconnect() {
+    const c = this.client;
+    if (!c || (!c.connected && !c.reconnectTimer)) return false;
+    try { c.reconnect(); } catch (e) {}
+    return true;
+  }
 
   end() { try { if (this.client) this.client.end(true); } catch (e) {} this.client = null; }
 

@@ -29,8 +29,8 @@ test('publish rejects on a broker error', async () => {
 test('reconnect() asks the client to reconnect (manual recovery)', () => {
   const p = new Publisher({ url: 'x' });
   let called = false;
-  p.client = { reconnect() { called = true; } };
-  p.reconnect();
+  p.client = { connected: false, reconnectTimer: 1, reconnect() { called = true; } };
+  assert.strictEqual(p.reconnect(), true);
   assert.strictEqual(called, true);
 });
 
@@ -148,4 +148,60 @@ test('connect options keep the credentials, client id, keepalive and reconnect p
   assert.strictEqual(o.keepalive, KEEPALIVE_SECS);
   assert.strictEqual(o.reconnectPeriod, 4000);
   assert.strictEqual(o.clean, true);
+});
+
+// --- reconnect() against the real mqtt.js client ---
+//
+// mqtt.js connect() builds a new stream without closing the one it replaces. Calling
+// client.reconnect() while a CONNECT is still unanswered therefore leaves the earlier
+// socket open, and when that orphan later closes, its 'close' marks the whole client
+// disconnected even though the newest socket holds a live session. Field log
+// 2026-09-19: five "Push pending now" presses in four seconds during a slow connect,
+// then "connected" followed by "offline" and "connection closed" in the same second,
+// repeatedly. A fake stream stands in for the WebSocket so no network is touched.
+
+const CONNACK_OK = Buffer.from([0x20, 0x02, 0x00, 0x00]);
+const tick = () => new Promise((r) => setTimeout(r, 10));
+
+async function realClient() {
+  const { default: mqtt } = await import('mqtt');
+  const { Duplex } = await import('node:stream');
+  const streams = [];
+  const build = () => {
+    const s = new Duplex({ read() {}, write(_c, _e, cb) { cb(); } });
+    streams.push(s);
+    return s;
+  };
+  const client = new mqtt.MqttClient(build, { ...Publisher.connectOptions({ clientId: 'c' }), connectTimeout: 60000 });
+  client.on('error', () => {});
+  await tick();
+  return { client, streams };
+}
+
+test('reconnect() does not open a second socket while a connect is still unanswered', async (t) => {
+  const { client, streams } = await realClient();
+  t.after(() => { client.end(true); streams.forEach((s) => s.destroy()); });
+  const p = new Publisher({ url: 'x' });
+  p.client = client;
+  assert.strictEqual(p.reconnect(), false);
+  p.reconnect();
+  p.reconnect();
+  await tick();
+  assert.strictEqual(streams.length, 1);
+  streams[0].push(CONNACK_OK);
+  await tick();
+  assert.strictEqual(client.connected, true);
+});
+
+test('reconnect() still skips the wait between attempts once the socket has closed', async (t) => {
+  const { client, streams } = await realClient();
+  t.after(() => { client.end(true); streams.forEach((s) => s.destroy()); });
+  const p = new Publisher({ url: 'x' });
+  p.client = client;
+  streams[0].destroy();
+  await tick();
+  assert.strictEqual(p.reconnect(), true);
+  await tick();
+  assert.strictEqual(streams.length, 2);
+  assert.strictEqual(streams.filter((s) => !s.destroyed).length, 1);
 });
