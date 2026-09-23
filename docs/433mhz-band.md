@@ -39,6 +39,22 @@ they account for 76,421 of 1,741,446 observations over 7 days, about **4.4%**,
 and they are the entire remaining gap. Everything a mobile client contributes
 is currently unattributable to a band.
 
+**Correction (2026-09-23): that gap is not coredrive-rx, and this repo cannot
+close it.** `kiekr-android` is a different app. Its data is counted in
+`observations`, so it publishes on the observer path
+(`meshcore/<iata>/<id>/…`). coredrive-rx never reaches `observations`: it
+publishes only on `meshcore/client/{pk}/{packets,rf,regions}`, and
+`handleMessage` in `cmd/ingestor/main.go` returns from the `parts[1] == "client"`
+branch into `client_receptions` / `client_rf_samples` / `client_regions` before
+the observer path runs. The string "kiekr" does not occur in `corescope-rx/src`,
+`CoreScope/cmd` or `CoreScope/public`. The 4.4% closes only when
+`kiekr-android` puts `radio` in its own `/status`.
+
+What the steps below would give instead is band attribution for coredrive-rx's
+own client tables, which starts to matter once a companion drives on 433. On
+the reference deployment that data does not arrive at all today
+(`clientRxCoverage` is off, see below).
+
 ## The good news: the companion already tells you
 
 No firmware change is needed, and no new BLE command. The frequency is already
@@ -111,11 +127,16 @@ already has on the fixed side.
 |---|---|
 | 2026-09-23 | Investigated. Confirmed the frequency is already in `SELF_INFO` at byte 48 and that `STATS_RADIO` does not carry it. Measured the 4.4% gap. Nothing implemented in this repo. |
 | 2026-09-23 | CoreScope side, step 1 built (fork-local): band derived from `observers.radio`, shown as a pill on the observers list. `public/radio-band.js` + `tests/unit/test-radio-band.js`. Covers the 95.6% that fixed observers already report. No server change. |
+| 2026-09-23 | coredrive-rx side: corrected "Where coredrive-rx comes in". The 4.4% gap is `kiekr-android` on the observer path, not this app on the client topics. Nothing implemented in this repo. |
 
 ## What is NOT decided
 
-- Whether the mobile side does this at all. It is 4.4% of observations, and the
-  work touches this repo, the ingestor schema and the CoreScope UI.
+- Whether coredrive-rx does this at all. It does not affect the 4.4% (that is
+  `kiekr-android`); it only labels this app's own client-table rows. Doing it
+  fully touches this repo, the client-table schema in the ingestor and the
+  CoreScope UI.
+- Whether anyone asks the `kiekr-android` side to publish `radio`, which is
+  the only route to the 4.4%.
 - Whether the band becomes a per-observation column server-side. That is the
   change that would make band analysis correct over time, for fixed and mobile
   alike, and it has not been designed.
