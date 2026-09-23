@@ -1,7 +1,7 @@
 # 433 MHz band reporting — what CoreScope is doing, and what coredrive-rx needs
 
 Living document. CoreScope side updates it as work lands, so this repo can plan
-against it rather than guess. Last updated **2026-09-23**.
+against it rather than guess. Last updated **2026-09-23** (CoreScope step 1 is live).
 
 ## The problem
 
@@ -128,6 +128,7 @@ already has on the fixed side.
 | 2026-09-23 | Investigated. Confirmed the frequency is already in `SELF_INFO` at byte 48 and that `STATS_RADIO` does not carry it. Measured the 4.4% gap. Nothing implemented in this repo. |
 | 2026-09-23 | CoreScope side, step 1 built (fork-local): band derived from `observers.radio`, shown as a pill on the observers list. `public/radio-band.js` + `tests/unit/test-radio-band.js`. Covers the 95.6% that fixed observers already report. No server change. |
 | 2026-09-23 | coredrive-rx side: corrected "Where coredrive-rx comes in". The 4.4% gap is `kiekr-android` on the observer path, not this app on the client topics. Nothing implemented in this repo. |
+| 2026-09-23 | CoreScope side shipped to production as `v3.11.0-on8ar.6`: band pill on the observers list, 433 coloured. 42 observers, 40 badged, 1 on 433. The two without a badge are the `kiekr-android` clients — they publish no `radio`, and get no badge rather than a default band. |
 
 ## What is NOT decided
 
