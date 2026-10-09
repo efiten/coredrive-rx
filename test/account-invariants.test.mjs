@@ -43,7 +43,7 @@ async function accountWith({ requireLinked = false, loggedIn = false, linked = f
   const storage = memStorage(loggedIn ? {
     [TOKEN_KEY]: JSON.stringify({ origin: ORIGIN, token: 'tok-secret-123', displayName: 'Erwin Account', companions: linked ? [{ pubkey: PK, name: 'obs' }] : [] }),
   } : {});
-  const fetch = async () => res(200, { userManagement: { enabled: true }, ...(requireLinked ? { clientRxRequireLinkedCompanion: true } : {}) });
+  const fetch = async () => res(200, { userManagement: { enabled: true, companionLinking: true }, ...(requireLinked ? { clientRxRequireLinkedCompanion: true } : {}) });
   const account = createAccount({ baseUrl: ORIGIN, fetch, storage });
   await account.discover();
   return account;

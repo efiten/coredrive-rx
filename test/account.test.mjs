@@ -57,7 +57,7 @@ function make({ routes = {}, storage = memStorage(), ...rest } = {}) {
   return { account, server, storage, logs, changes: () => changes };
 }
 
-const ENABLED = { 'GET /api/config/client': () => res(200, { userManagement: { enabled: true } }) };
+const ENABLED = { 'GET /api/config/client': () => res(200, { userManagement: { enabled: true, companionLinking: true } }) };
 const session = (extra = {}) => ({
   [TOKEN_KEY]: JSON.stringify({ origin: ORIGIN, token: 'tok-secret', displayName: 'Erwin', companions: [], ...extra }),
 });
@@ -119,6 +119,14 @@ test('discovery: a missing userManagement block means off', async () => {
   assert.match(t.logs[0], /no userManagement/);
 });
 
+test('discovery: user management without companion linking (an older CoreScope) means off', async () => {
+  // Such a server answers POST /api/auth/device-token with its SPA page (HTTP 200,
+  // HTML), so a login could only ever fail.
+  const t = make({ routes: { 'GET /api/config/client': () => res(200, { userManagement: { enabled: true, channelProposals: true } }) } });
+  assert.strictEqual((await t.account.discover()).enabled, false);
+  assert.match(t.logs[0], /companion linking/);
+});
+
 test('discovery: enabled false means off', async () => {
   const t = make({ routes: { 'GET /api/config/client': () => res(200, { userManagement: { enabled: false } }) } });
   assert.strictEqual((await t.account.discover()).enabled, false);
@@ -153,7 +161,7 @@ test('discovery: a timeout means off', async () => {
 // --- the hold flag: clientRxRequireLinkedCompanion ---------------------------
 
 test('discovery reads clientRxRequireLinkedCompanion and remembers it for this origin', async () => {
-  const t = make({ routes: { 'GET /api/config/client': () => res(200, { userManagement: { enabled: true }, clientRxRequireLinkedCompanion: true }) } });
+  const t = make({ routes: { 'GET /api/config/client': () => res(200, { userManagement: { enabled: true, companionLinking: true }, clientRxRequireLinkedCompanion: true }) } });
   await t.account.discover();
   assert.strictEqual(t.account.requireLinked, true);
   assert.strictEqual(loadRequireLinked(t.storage, ORIGIN), true);
@@ -187,7 +195,7 @@ test('an answer without the field clears a remembered flag', async () => {
 });
 
 test('shouldHold only when the flag is on and the companion is not in the linked cache', async () => {
-  const flagOn = { 'GET /api/config/client': () => res(200, { userManagement: { enabled: true }, clientRxRequireLinkedCompanion: true }) };
+  const flagOn = { 'GET /api/config/client': () => res(200, { userManagement: { enabled: true, companionLinking: true }, clientRxRequireLinkedCompanion: true }) };
   const linked = make({ routes: flagOn, storage: memStorage(session({ companions: [{ pubkey: PK, name: 'obs' }] })) });
   await linked.account.discover();
   assert.strictEqual(linked.account.shouldHold(PK), false);
@@ -336,7 +344,7 @@ function signer(impl) {
 async function linkable({ companions = [], challenge, link, requireLinked = false } = {}) {
   let n = 0;
   const routes = {
-    'GET /api/config/client': () => res(200, { userManagement: { enabled: true }, ...(requireLinked ? { clientRxRequireLinkedCompanion: true } : {}) }),
+    'GET /api/config/client': () => res(200, { userManagement: { enabled: true, companionLinking: true }, ...(requireLinked ? { clientRxRequireLinkedCompanion: true } : {}) }),
     'GET /api/account/companions': () => res(200, companions),
     'POST /api/account/companions/challenge': challenge || (() => { n++; return res(200, { challenge: 'c' + n, expiresAt: 0 }); }),
     'POST /api/account/companions': link || ((req) => res(200, { pubkey: req.body.pubkey, name: req.body.name, linkedAt: 1, myNodes: 'added' })),
@@ -516,7 +524,7 @@ test('a fresh link holds the queue until the ingestor can have seen it, then lif
     setTimeout: (fn, ms) => { timers.push({ fn, at: clock + ms }); return timers.length; },
     clearTimeout: () => {},
     routes: {
-      'GET /api/config/client': () => res(200, { userManagement: { enabled: true }, clientRxRequireLinkedCompanion: true }),
+      'GET /api/config/client': () => res(200, { userManagement: { enabled: true, companionLinking: true }, clientRxRequireLinkedCompanion: true }),
       'GET /api/account/companions': () => res(200, []),
       'POST /api/account/companions/challenge': () => res(200, { challenge: 'c1' }),
       'POST /api/account/companions': (req) => res(200, { pubkey: req.body.pubkey, name: 'obs', myNodes: 'added' }),
@@ -540,7 +548,7 @@ test('a companion already on the server list is not held for the settle time', a
   const t = make({
     storage: memStorage(session()),
     routes: {
-      'GET /api/config/client': () => res(200, { userManagement: { enabled: true }, clientRxRequireLinkedCompanion: true }),
+      'GET /api/config/client': () => res(200, { userManagement: { enabled: true, companionLinking: true }, clientRxRequireLinkedCompanion: true }),
       'GET /api/account/companions': () => res(200, [{ pubkey: PK, name: 'obs' }]),
     },
   });
@@ -608,7 +616,7 @@ test('a discovery without an answer is retried with a growing delay, and a succe
   let up = false;
   const t = make({
     setTimeout: box.setTimeout, clearTimeout: box.clearTimeout, onRetry: (w) => retries.push(w),
-    routes: { 'GET /api/config/client': () => { if (!up) throw new TypeError('Failed to fetch'); return res(200, { userManagement: { enabled: true } }); } },
+    routes: { 'GET /api/config/client': () => { if (!up) throw new TypeError('Failed to fetch'); return res(200, { userManagement: { enabled: true, companionLinking: true } }); } },
   });
   // discover's own 5 s timeout timer is also in the box; only the retry timers count.
   await t.account.discover();

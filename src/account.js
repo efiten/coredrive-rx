@@ -222,8 +222,8 @@ export function createAccount({
     if (h && typeof h.unref === 'function') h.unref(); // node: never keeps a process alive
   }
 
-  // discover fetches /api/config/client once. Only userManagement.enabled === true turns
-  // the feature on; every other outcome is off, with one log line saying why. Any parsed
+  // discover fetches /api/config/client once. Only userManagement.enabled === true with
+  // userManagement.companionLinking === true turns the feature on; every other outcome is off, with one log line saying why. Any parsed
   // answer is also a fresh reading of the hold flag; no answer keeps the last known one.
   async function discover() {
     let json = null;
@@ -244,6 +244,9 @@ export function createAccount({
       const um = json && json.userManagement;
       if (!um || typeof um !== 'object') reason = 'has no userManagement block (older CoreScope, or user management off)';
       else if (um.enabled !== true) reason = 'has userManagement.enabled off';
+      // A CoreScope with accounts but without companion linking answers the
+      // device-token POST with its SPA page: a login there could only fail.
+      else if (um.companionLinking !== true) reason = 'has user management but no companion linking (CoreScope older than companion linking)';
     }
     st.enabled = !reason;
     if (st.discovered) stopRetry('discover');
