@@ -27,7 +27,7 @@ import { Queue } from './queue.js';
 import { Publisher, KEEPALIVE_SECS } from './publisher.js';
 import { drainOnce, serialiseDrain, stampRecord } from './drain.js';
 import { loadConfig, getConfig, featureEnabled } from './config.js';
-import { createAccount, deviceNameFrom, transientError } from './account.js';
+import { createAccount, deviceNameFrom, transientError, signFailure } from './account.js';
 import { accountView } from './accountview.js';
 import { signWithCompanion } from './companionsign.js';
 import { buildRfLogRecord } from './capture.js';
@@ -118,6 +118,9 @@ const state = {
   // lastDrainHeld / holdLogged: the last drain pass was held for an unlinked companion,
   // and whether that transition has been logged.
   account: null, signing: false, lastDrainHeld: false, holdLogged: false,
+  // bleEpoch counts BLE status changes, so a sign exchange can tell that the link
+  // dropped and came back while it ran (src/account.js signFailure).
+  bleEpoch: 0,
 };
 
 const RECENT_MAX = 20;
@@ -693,17 +696,21 @@ function releaseRadio() {
   state.regions.busy = false;
 }
 
-// signOnCompanion is the `sign` account.link() calls. A link that is down, or drops
-// mid-exchange, is transient: account.js retries it on the next connect.
-async function signOnCompanion(bytes) {
+// signOnCompanion is the `sign` account.link() calls, for companion `pubkey`. A link
+// that is down, drops mid-exchange, or now belongs to another companion is transient:
+// account.js retries it later, and never has one companion sign another's challenge.
+async function signOnCompanion(bytes, pubkey) {
+  const isTarget = () => String(state.companionPubkey || '').toLowerCase() === pubkey;
   if (!bleLinkUp()) throw transientError('the companion link is down');
+  if (!isTarget()) throw transientError('another companion is connected now');
   await acquireRadio();
+  const epoch = state.bleEpoch;
   try {
     if (!bleLinkUp()) throw transientError('the companion link is down');
+    if (!isTarget()) throw transientError('another companion is connected now');
     return await signWithCompanion(state.transport, bytes);
   } catch (e) {
-    if (!bleLinkUp()) throw transientError('the companion link dropped while signing');
-    throw e;
+    throw signFailure(e, { linkUp: bleLinkUp(), linkChanged: state.bleEpoch !== epoch });
   } finally {
     releaseRadio();
   }
@@ -1198,6 +1205,7 @@ async function connectAll() {
     state.transport.onFrame(processFrame);
     state.transport.onFrame(onRegionsFrame); // no-op unless a region request is in flight
     state.transport.onStatus((s) => {
+      state.bleEpoch++;
       dbg('BLE: ' + s);
       if (state.connected) log(s === 'connected' ? 'capturing' : 'BLE ' + s + '…');
       if (s === 'connected') linkCurrentCompanion(); // a link that dropped mid-sign retries here

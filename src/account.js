@@ -44,6 +44,16 @@ export function transientError(message) {
   return e;
 }
 
+// signFailure classifies an error from the companion's sign exchange. When the BLE link
+// is down, or dropped and came back while signing (the transport reconnects in about
+// 1.5 s, a sign step times out after 4 s), the error says nothing about the firmware
+// or the companion: it becomes transient, so the link is retried instead of being
+// reported as "firmware cannot sign" or "failed" for the rest of the connection.
+export function signFailure(err, { linkUp, linkChanged }) {
+  if (!linkUp || linkChanged) return transientError('the companion link dropped while signing (' + errText(err) + ')');
+  return err;
+}
+
 // linkMessage is what the companion signs: the UTF-8 bytes of
 // "corescope-link:" + host + ":" + challenge, host being the host of corescopeUrl.
 export function linkMessage(host, challenge) {
@@ -354,7 +364,7 @@ export function createAccount({
         const signHost = typeof ch.json.host === 'string' && ch.json.host ? ch.json.host : host;
         let signature;
         try {
-          signature = await sign(linkMessage(signHost, challenge));
+          signature = await sign(linkMessage(signHost, challenge), pubkey);
         } catch (e) {
           if (e && e.name === 'SignUnsupportedError') {
             st.blocked.add(pubkey);
@@ -400,16 +410,24 @@ export function createAccount({
     }
   }
 
-  // link runs the auto-link flow for the connected companion. Single-flight: a caller
-  // arriving mid-attempt gets the running attempt's promise. `sign(bytes)` resolves the
-  // companion's 64-byte signature (src/app.js signOnCompanion). `force` is the Retry
-  // button: it lifts a definite failure for this pubkey. Resolves the status:
+  // link runs the auto-link flow for the connected companion. One attempt at a time:
+  // a caller for the SAME companion gets the running attempt's promise; a caller for
+  // another companion waits for it and then runs its own (the radio signs one
+  // challenge at a time, and an attempt must never be answered for another
+  // companion). `sign(bytes, pubkey)` resolves the 64-byte signature of the companion
+  // `pubkey` (src/app.js signOnCompanion). `force` is the Retry button: it lifts a
+  // definite failure for this pubkey. Resolves the status:
   // 'linked' | 'working' | 'waiting' | 'unsupported' | 'failed' | 'logged-out' | 'skipped'.
-  function link({ pubkey, name = '', sign, force = false }) {
-    if (st.inFlight) return st.inFlight;
-    st.inFlight = runLink(String(pubkey || '').toLowerCase(), String(name || ''), sign, force)
+  function link(args) {
+    const pk = String(args.pubkey || '').toLowerCase();
+    if (st.inFlight) {
+      if (st.inFlight.pubkey === pk) return st.inFlight.promise;
+      return st.inFlight.promise.catch(() => {}).then(() => link(args));
+    }
+    const promise = runLink(pk, String(args.name || ''), args.sign, !!args.force)
       .finally(() => { st.inFlight = null; });
-    return st.inFlight;
+    st.inFlight = { pubkey: pk, promise };
+    return promise;
   }
 
   // newConnection: a user connected a companion. Definite failures from the previous

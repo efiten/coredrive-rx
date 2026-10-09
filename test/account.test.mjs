@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   createAccount, TOKEN_KEY, REQUIRE_KEY, linkMessage, deviceNameFrom,
-  loadSession, loadRequireLinked, LINK_SETTLE_MS,
+  loadSession, loadRequireLinked, LINK_SETTLE_MS, signFailure,
 } from '../src/account.js';
 import { SignUnsupportedError } from '../src/companionsign.js';
 
@@ -547,4 +547,44 @@ test('a companion already on the server list is not held for the settle time', a
   await t.account.discover();
   assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'linked');
   assert.strictEqual(t.account.shouldHold(PK), false);
+});
+
+// A link attempt belongs to one companion. One for the next companion waits for the
+// running attempt and then runs its own; it never joins the other's promise.
+test('a link for another companion waits for the running one, then runs its own', async () => {
+  const t = await linkable();
+  const OTHER = 'cd'.repeat(32);
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const seen = [];
+  const s = async (bytes, pk) => { seen.push(pk); if (pk === PK) await gate; return SIG64; };
+  const a = t.account.link({ pubkey: PK, name: 'A', sign: s });
+  const b = t.account.link({ pubkey: OTHER, name: 'B', sign: s });
+  assert.notStrictEqual(a, b);
+  release();
+  assert.strictEqual(await a, 'linked');
+  assert.strictEqual(await b, 'linked');
+  assert.deepStrictEqual(seen, [PK, OTHER], 'each companion signs its own challenge, in turn');
+});
+
+test('sign is told which companion it signs for', async () => {
+  const t = await linkable();
+  const got = [];
+  await t.account.link({ pubkey: PK.toUpperCase(), name: 'obs', sign: async (bytes, pk) => { got.push(pk); return SIG64; } });
+  assert.deepStrictEqual(got, [PK]);
+});
+
+// A BLE drop mid-sign followed by a fast auto-reconnect: the step then times out with
+// the link up again. That says nothing about the firmware or the companion.
+test('a sign error after the BLE link changed, or with it down, is transient', () => {
+  const unsupported = new SignUnsupportedError('no answer to CMD_SIGN_START');
+  const refused = new Error('the companion refused sign data (error 3)');
+  for (const e of [unsupported, refused]) {
+    assert.strictEqual(signFailure(e, { linkUp: true, linkChanged: false }), e, 'a stable link keeps the verdict');
+    for (const ctx of [{ linkUp: true, linkChanged: true }, { linkUp: false, linkChanged: false }]) {
+      const out = signFailure(e, ctx);
+      assert.strictEqual(out.transient, true, JSON.stringify(ctx));
+      assert.notStrictEqual(out.name, 'SignUnsupportedError');
+    }
+  }
 });
