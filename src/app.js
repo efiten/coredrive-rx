@@ -1537,7 +1537,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (state.account && !state.account.discovered) discoverAccount();
     else linkCurrentCompanion();
   });
-  if ('serviceWorker' in navigator) {
+  // A slot build (vite.config.js RX_SLOT) has no service worker: registered from a
+  // sub-path it would claim the root scope and serve this build at /.
+  const slot = typeof __RX_SLOT__ !== 'undefined' ? __RX_SLOT__ : '';
+  if ('serviceWorker' in navigator && !slot) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   }
 });

@@ -1,6 +1,8 @@
 // Offline-first capture buffer (IndexedDB). The field often has no cellular, so
 // receptions are buffered locally and published when connectivity returns.
-const DB_NAME = 'coredrive-rx';
+// A slot build (vite.config.js RX_SLOT) keeps its own queue on the shared origin.
+const SLOT = typeof __RX_SLOT__ !== 'undefined' ? __RX_SLOT__ : '';
+const DB_NAME = 'coredrive-rx' + (SLOT ? '-' + SLOT : '');
 const STORE = 'pending';
 
 function openDB() {
