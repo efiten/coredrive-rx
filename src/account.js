@@ -19,6 +19,12 @@ export const TOKEN_KEY = 'coredrive-rx.cs-token';
 export const REQUIRE_KEY = 'coredrive-rx.cs-require-linked';
 export const DISCOVER_TIMEOUT_MS = 5000;
 export const REQUEST_TIMEOUT_MS = 10000;
+// LINK_SETTLE_MS: how long a FRESH link keeps the queue held. With
+// requireLinkedCompanion, CoreScope's ingestor re-reads its linked-companion list on
+// a miss at most once per 5 s and drops what arrives in between, after the broker
+// has acked it. Waiting out that gap (plus a margin) means the first upload after
+// linking is not lost.
+export const LINK_SETTLE_MS = 6000;
 
 // NetworkError: no HTTP answer at all (offline, DNS, CORS block, timeout). Every HTTP
 // answer, error codes included, is NOT a NetworkError.
@@ -115,11 +121,14 @@ export function saveRequireLinked(storage, origin, value) {
 //   fetch         (url, opts) => Promise<Response>
 //   storage       { getItem, setItem, removeItem } (localStorage in the app)
 //   setTimeout / clearTimeout   optional, default the globals
+//   now           () => ms, optional, default Date.now
 //   log           (msg, level) optional
-//   onChange      () => void, optional; called whenever anything shown on the card changes
+//   onChange      () => void, optional; called whenever anything shown on the card
+//                 changes, and when a fresh link has settled (the queue may drain)
 export function createAccount({
   baseUrl, fetch: fetchFn, storage,
   setTimeout: setT = globalThis.setTimeout, clearTimeout: clearT = globalThis.clearTimeout,
+  now = () => Date.now(),
   log = () => {}, onChange = () => {},
 }) {
   const host = new URL(baseUrl).host;
@@ -132,6 +141,7 @@ export function createAccount({
     link: { ...IDLE },
     blocked: new Set(), // pubkeys with a definite link failure on this connection
     inFlight: null,     // the one link attempt allowed at a time
+    settling: new Map(), // pubkey → time a fresh link stops holding (LINK_SETTLE_MS)
   };
   const changed = () => { try { onChange(); } catch (e) { /* a render error must not break the flow */ } };
 
@@ -160,7 +170,18 @@ export function createAccount({
   // shouldHold: CoreScope drops data from unlinked companions, so do not send it. Off
   // (the default) means publishing never waits on the account.
   function shouldHold(pubkey) {
-    return st.requireLinked && !isLinked(pubkey);
+    if (!st.requireLinked) return false;
+    if (!isLinked(pubkey)) return true;
+    const until = st.settling.get(String(pubkey || '').toLowerCase());
+    return until !== undefined && now() < until;
+  }
+
+  // settle keeps a freshly linked companion held for LINK_SETTLE_MS, then tells the
+  // app (onChange) so a held queue drains.
+  function settle(pubkey) {
+    st.settling.set(pubkey, now() + LINK_SETTLE_MS);
+    const h = setT(() => { st.settling.delete(pubkey); changed(); }, LINK_SETTLE_MS);
+    if (h && typeof h.unref === 'function') h.unref(); // node: never keeps a process alive
   }
 
   // discover fetches /api/config/client once. Only userManagement.enabled === true turns
@@ -348,6 +369,7 @@ export function createAccount({
         if (res.status === 200) {
           if (!isLinked(pubkey)) st.session.companions.push({ pubkey, name: String((res.json && res.json.name) || name) });
           saveSession(storage, st.session);
+          settle(pubkey);
           // myNodes: 'added' | 'present' | 'full' | 'failed'. The link stands in every
           // case; 'full' and 'failed' only mean CoreScope did not add it to My nodes.
           const myNodes = res.json && res.json.myNodes;

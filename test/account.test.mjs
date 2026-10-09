@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   createAccount, TOKEN_KEY, REQUIRE_KEY, linkMessage, deviceNameFrom,
-  loadSession, loadRequireLinked,
+  loadSession, loadRequireLinked, LINK_SETTLE_MS,
 } from '../src/account.js';
 import { SignUnsupportedError } from '../src/companionsign.js';
 
@@ -377,7 +377,7 @@ test('the full flow: challenge, sign the host-bound message, post, cache — and
   assert.deepStrictEqual(post.body, { pubkey: PK, challenge: 'c1', signature: '07'.repeat(64), name: 'obs' });
   assert.strictEqual(post.headers.Authorization, 'Bearer tok-secret');
   assert.strictEqual(t.account.isLinked(PK), true);
-  assert.strictEqual(t.account.shouldHold(PK), false, 'linking releases the queue');
+  assert.strictEqual(t.account.shouldHold(PK), true, 'a fresh link holds a little longer (see the settle test)');
   assert.strictEqual(t.account.linkState.status, 'linked');
   assert.ok(JSON.parse(t.storage.getItem(TOKEN_KEY)).companions.some((c) => c.pubkey === PK), 'the cache survives a restart');
 });
@@ -502,4 +502,49 @@ test('nothing is attempted when logged out or when the feature is off', async ()
   const before = off.server.calls.length;
   assert.strictEqual(await off.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'skipped');
   assert.strictEqual(off.server.calls.length, before);
+});
+
+// CoreScope's ingestor re-reads its linked-companion list on a miss at most once per
+// 5 s and drops (after the broker acked it) whatever arrives in between. So a fresh
+// link keeps the queue held for LINK_SETTLE_MS before the first upload goes out.
+test('a fresh link holds the queue until the ingestor can have seen it, then lifts and re-renders', async () => {
+  let clock = 1000;
+  const timers = [];
+  const t = make({
+    storage: memStorage(session()),
+    now: () => clock,
+    setTimeout: (fn, ms) => { timers.push({ fn, at: clock + ms }); return timers.length; },
+    clearTimeout: () => {},
+    routes: {
+      'GET /api/config/client': () => res(200, { userManagement: { enabled: true }, clientRxRequireLinkedCompanion: true }),
+      'GET /api/account/companions': () => res(200, []),
+      'POST /api/account/companions/challenge': () => res(200, { challenge: 'c1' }),
+      'POST /api/account/companions': (req) => res(200, { pubkey: req.body.pubkey, name: 'obs', myNodes: 'added' }),
+    },
+  });
+  await t.account.discover();
+  assert.ok(LINK_SETTLE_MS > 5000, 'longer than the 5 s miss gap of the ingestor');
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'linked');
+  assert.strictEqual(t.account.isLinked(PK), true);
+  assert.strictEqual(t.account.shouldHold(PK), true, 'held right after the link');
+  const settle = timers.find((x) => x.at === clock + LINK_SETTLE_MS);
+  assert.ok(settle, 'a settle timer is armed');
+  clock += LINK_SETTLE_MS;
+  const before = t.changes();
+  settle.fn();
+  assert.strictEqual(t.account.shouldHold(PK), false, 'released once the gap has passed');
+  assert.ok(t.changes() > before, 'the app is told, so it can drain');
+});
+
+test('a companion already on the server list is not held for the settle time', async () => {
+  const t = make({
+    storage: memStorage(session()),
+    routes: {
+      'GET /api/config/client': () => res(200, { userManagement: { enabled: true }, clientRxRequireLinkedCompanion: true }),
+      'GET /api/account/companions': () => res(200, [{ pubkey: PK, name: 'obs' }]),
+    },
+  });
+  await t.account.discover();
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'linked');
+  assert.strictEqual(t.account.shouldHold(PK), false);
 });
