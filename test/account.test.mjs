@@ -7,6 +7,7 @@ import {
   createAccount, TOKEN_KEY, REQUIRE_KEY, linkMessage, deviceNameFrom,
   loadSession, loadRequireLinked,
 } from '../src/account.js';
+import { SignUnsupportedError } from '../src/companionsign.js';
 
 const ORIGIN = 'https://corescope.example';
 const PK = 'ab'.repeat(32);
@@ -315,4 +316,190 @@ test('every CoreScope request goes without cookies', async () => {
   t.account.logout();
   assert.ok(t.server.calls.length >= 4);
   for (const c of t.server.calls) assert.strictEqual(c.credentials, 'omit', c.method + ' ' + c.url);
+});
+
+// --- auto-link ---------------------------------------------------------------
+
+const SIG64 = new Uint8Array(64).fill(7);
+
+// signer records what it was asked to sign (as text) and answers via `impl`.
+function signer(impl) {
+  const s = async (bytes) => {
+    s.calls.push(new TextDecoder().decode(bytes));
+    return impl ? impl(bytes) : SIG64;
+  };
+  s.calls = [];
+  return s;
+}
+
+// linkable: logged in, feature on, a server that hands out challenges c1, c2, ...
+async function linkable({ companions = [], challenge, link, requireLinked = false } = {}) {
+  let n = 0;
+  const routes = {
+    'GET /api/config/client': () => res(200, { userManagement: { enabled: true }, ...(requireLinked ? { clientRxRequireLinkedCompanion: true } : {}) }),
+    'GET /api/account/companions': () => res(200, companions),
+    'POST /api/account/companions/challenge': challenge || (() => { n++; return res(200, { challenge: 'c' + n, expiresAt: 0 }); }),
+    'POST /api/account/companions': link || ((req) => res(200, { pubkey: req.body.pubkey, name: req.body.name, linkedAt: 1, myNodes: 'added' })),
+  };
+  const t = make({ routes, storage: memStorage(session()) });
+  await t.account.discover();
+  return t;
+}
+const count = (server, key) => server.calls.filter((c) => c.method + ' ' + new URL(c.url).pathname === key).length;
+
+test('a companion already in the cache is linked without a single request', async () => {
+  const t = make({ routes: ENABLED, storage: memStorage(session({ companions: [{ pubkey: PK, name: 'obs' }] })) });
+  await t.account.discover();
+  const before = t.server.calls.length;
+  const s = signer();
+  assert.strictEqual(await t.account.link({ pubkey: PK.toUpperCase(), name: 'obs', sign: s }), 'linked');
+  assert.strictEqual(t.server.calls.length, before);
+  assert.strictEqual(s.calls.length, 0);
+});
+
+test('a companion that is on the server list after a refresh is not signed again', async () => {
+  const t = await linkable({ companions: [{ pubkey: PK, name: 'obs', linkedAt: 1, lastSeenAt: 2 }] });
+  const s = signer();
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: s }), 'linked');
+  assert.strictEqual(count(t.server, 'POST /api/account/companions/challenge'), 0);
+  assert.strictEqual(s.calls.length, 0);
+});
+
+test('the full flow: challenge, sign the host-bound message, post, cache — and the hold lifts', async () => {
+  const t = await linkable({ requireLinked: true });
+  assert.strictEqual(t.account.shouldHold(PK), true);
+  const s = signer();
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: s }), 'linked');
+  assert.deepStrictEqual(s.calls, ['corescope-link:corescope.example:c1']);
+  const ch = t.server.calls.find((c) => c.url === ORIGIN + '/api/account/companions/challenge');
+  assert.deepStrictEqual(ch.body, { pubkey: PK });
+  const post = t.server.calls.find((c) => c.method === 'POST' && c.url === ORIGIN + '/api/account/companions');
+  assert.deepStrictEqual(post.body, { pubkey: PK, challenge: 'c1', signature: '07'.repeat(64), name: 'obs' });
+  assert.strictEqual(post.headers.Authorization, 'Bearer tok-secret');
+  assert.strictEqual(t.account.isLinked(PK), true);
+  assert.strictEqual(t.account.shouldHold(PK), false, 'linking releases the queue');
+  assert.strictEqual(t.account.linkState.status, 'linked');
+  assert.ok(JSON.parse(t.storage.getItem(TOKEN_KEY)).companions.some((c) => c.pubkey === PK), 'the cache survives a restart');
+});
+
+test('signs the host the challenge names, not the host the app reached CoreScope under', async () => {
+  const t = await linkable({ challenge: () => res(200, { challenge: 'c1', expiresAt: 0, host: 'scope.public.example' }) });
+  const s = signer();
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: s }), 'linked');
+  assert.deepStrictEqual(s.calls, ['corescope-link:scope.public.example:c1']);
+});
+
+test('410 (challenge expired or used) is retried once with a new challenge', async () => {
+  let posts = 0;
+  const t = await linkable({ link: (req) => (++posts === 1 ? res(410, { error: 'challenge expired' }) : res(200, { pubkey: req.body.pubkey, name: 'obs' })) });
+  const s = signer();
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: s }), 'linked');
+  assert.strictEqual(count(t.server, 'POST /api/account/companions/challenge'), 2);
+  assert.deepStrictEqual(s.calls, ['corescope-link:corescope.example:c1', 'corescope-link:corescope.example:c2']);
+});
+
+test('a second 410 is Failed, after exactly two challenges', async () => {
+  const t = await linkable({ link: () => res(410, { error: 'challenge expired' }) });
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'failed');
+  assert.strictEqual(count(t.server, 'POST /api/account/companions/challenge'), 2);
+});
+
+test('400 (bad signature) is Failed with a log line and is not retried until Retry', async () => {
+  const t = await linkable({ link: () => res(400, { error: 'bad signature' }) });
+  const s = signer();
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: s }), 'failed');
+  assert.match(t.account.linkState.reason, /signature/);
+  assert.ok(t.logs.some((l) => /linking .* failed/.test(l)));
+  const before = t.server.calls.length;
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: s }), 'failed', 'not retried within this connection');
+  assert.strictEqual(t.server.calls.length, before);
+  await t.account.link({ pubkey: PK, name: 'obs', sign: s, force: true });
+  assert.ok(t.server.calls.length > before, 'the Retry button tries again');
+});
+
+test('firmware that cannot sign is not asked again until the next connect', async () => {
+  const t = await linkable();
+  const s = signer(() => { throw new SignUnsupportedError('no CMD_SIGN_START'); });
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: s }), 'unsupported');
+  const before = t.server.calls.length;
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: s }), 'unsupported');
+  assert.strictEqual(t.server.calls.length, before);
+  t.account.newConnection();
+  assert.strictEqual(t.account.linkState.status, 'idle');
+  await t.account.link({ pubkey: PK, name: 'obs', sign: s });
+  assert.ok(t.server.calls.length > before, 'a new connection asks again');
+});
+
+test('a BLE drop while signing waits and retries on the next attempt', async () => {
+  const t = await linkable();
+  let drop = true;
+  const s = signer(() => {
+    if (drop) { drop = false; const e = new Error('the companion link dropped while signing'); e.transient = true; throw e; }
+    return SIG64;
+  });
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: s }), 'waiting');
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: s }), 'linked', 'not blocked: the next connect retries');
+});
+
+test('a network failure waits and retries on the next attempt', async () => {
+  let first = true;
+  const t = await linkable({ challenge: () => {
+    if (first) { first = false; throw new TypeError('Failed to fetch'); }
+    return res(200, { challenge: 'c9' });
+  } });
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'waiting');
+  assert.strictEqual(t.account.linkState.status, 'waiting');
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'linked');
+});
+
+test('only one link attempt runs at a time', async () => {
+  const t = await linkable();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const s = signer(async () => { await gate; return SIG64; });
+  const a = t.account.link({ pubkey: PK, name: 'obs', sign: s });
+  const b = t.account.link({ pubkey: PK, name: 'obs', sign: s });
+  assert.strictEqual(a, b);
+  release();
+  assert.strictEqual(await a, 'linked');
+  assert.strictEqual(s.calls.length, 1);
+});
+
+test('a 401 during linking logs out and stops', async () => {
+  const t = await linkable({ challenge: () => res(401, { error: 'revoked' }) });
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'logged-out');
+  assert.strictEqual(t.account.loggedIn, false);
+});
+
+test('myNodes "full" or "failed" is a note on a successful link, not a failure', async () => {
+  for (const myNodes of ['full', 'failed']) {
+    const t = await linkable({ link: (req) => res(200, { pubkey: req.body.pubkey, name: 'obs', linkedAt: '2026-10-08T10:00:00Z', myNodes }) });
+    assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'linked', myNodes);
+    assert.strictEqual(t.account.isLinked(PK), true);
+    assert.strictEqual(t.account.linkState.status, 'linked');
+    assert.match(t.account.linkState.reason, /not added to My nodes/);
+    assert.ok(t.logs.some((l) => /My nodes/.test(l)));
+  }
+  const ok = await linkable();
+  await ok.account.link({ pubkey: PK, name: 'obs', sign: signer() });
+  assert.strictEqual(ok.account.linkState.reason, '', '"added" carries no note');
+});
+
+test('429 (rate limited) waits for the next attempt instead of failing', async () => {
+  const t = await linkable({ challenge: () => res(429, { error: 'too many requests' }) });
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'waiting');
+  const u = await linkable({ link: () => res(429, { error: 'too many requests' }) });
+  assert.strictEqual(await u.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'waiting');
+});
+
+test('nothing is attempted when logged out or when the feature is off', async () => {
+  const out = make({ routes: ENABLED });
+  await out.account.discover();
+  assert.strictEqual(await out.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'skipped');
+
+  const off = make({ storage: memStorage(session()), routes: { 'GET /api/config/client': () => res(200, {}) } });
+  await off.account.discover();
+  const before = off.server.calls.length;
+  assert.strictEqual(await off.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'skipped');
+  assert.strictEqual(off.server.calls.length, before);
 });

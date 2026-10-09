@@ -13,6 +13,8 @@
 // The token never leaves this module except in the Authorization header: it is not
 // logged, not returned by any getter and not rendered.
 
+import { bytesToHex } from './meshpacket.js';
+
 export const TOKEN_KEY = 'coredrive-rx.cs-token';
 export const REQUIRE_KEY = 'coredrive-rx.cs-require-linked';
 export const DISCOVER_TIMEOUT_MS = 5000;
@@ -286,6 +288,116 @@ export function createAccount({
     endSession('by you');
   }
 
+  function setLink(pubkey, name, status, reason = '') {
+    st.link = { pubkey, name, status, reason };
+    changed();
+    return status;
+  }
+
+  // fail is a DEFINITE failure: shown with a Retry button, not repeated automatically
+  // within this connection.
+  function fail(pubkey, name, reason) {
+    st.blocked.add(pubkey);
+    log('account: linking ' + (name || pubkey.slice(0, 12) + '…') + ' failed — ' + reason, 'no');
+    return setLink(pubkey, name, 'failed', reason);
+  }
+
+  // waiting is a failure that says nothing about the companion (network, BLE drop):
+  // retried on the next connect or `online` event.
+  function wait(pubkey, name, reason) {
+    log('account: linking ' + (name || pubkey.slice(0, 12) + '…') + ' waits — ' + reason + '; retrying on the next connect or when the network returns', 'no');
+    return setLink(pubkey, name, 'waiting', reason);
+  }
+
+  async function runLink(pubkey, name, sign, force) {
+    if (!st.enabled || !st.session || !pubkey) return 'skipped';
+    if (force) st.blocked.delete(pubkey);
+    if (st.blocked.has(pubkey)) return st.link.status;
+    if (isLinked(pubkey)) return setLink(pubkey, name, 'linked');
+    setLink(pubkey, name, 'working');
+    try {
+      await refreshCompanions();
+      if (!st.session) return 'logged-out';
+      if (isLinked(pubkey)) return setLink(pubkey, name, 'linked');
+      for (let attempt = 1; ; attempt++) {
+        const ch = await call('POST', '/api/account/companions/challenge', { pubkey });
+        if (!st.session) return 'logged-out';
+        if (ch.status === 429) return wait(pubkey, name, 'CoreScope is rate limiting (HTTP 429)');
+        if (ch.status !== 200 || !ch.json || typeof ch.json.challenge !== 'string' || !ch.json.challenge) {
+          return fail(pubkey, name, 'no challenge: ' + (serverError(ch) || 'HTTP ' + ch.status));
+        }
+        const challenge = ch.json.challenge;
+        // Sign the host the server says it verifies against (the host of its
+        // userManagement.publicBaseUrl); fall back to corescopeUrl's host only
+        // if the answer has none.
+        const signHost = typeof ch.json.host === 'string' && ch.json.host ? ch.json.host : host;
+        let signature;
+        try {
+          signature = await sign(linkMessage(signHost, challenge));
+        } catch (e) {
+          if (e && e.name === 'SignUnsupportedError') {
+            st.blocked.add(pubkey);
+            log('account: ' + (name || pubkey.slice(0, 12) + '…') + ' cannot sign (' + errText(e) + ') — update its firmware to link it', 'no');
+            return setLink(pubkey, name, 'unsupported');
+          }
+          if (e && e.transient) return wait(pubkey, name, errText(e));
+          return fail(pubkey, name, 'signing failed: ' + errText(e));
+        }
+        const res = await call('POST', '/api/account/companions', { pubkey, challenge, signature: bytesToHex(signature), name });
+        if (!st.session) return 'logged-out';
+        if (res.status === 200) {
+          if (!isLinked(pubkey)) st.session.companions.push({ pubkey, name: String((res.json && res.json.name) || name) });
+          saveSession(storage, st.session);
+          // myNodes: 'added' | 'present' | 'full' | 'failed'. The link stands in every
+          // case; 'full' and 'failed' only mean CoreScope did not add it to My nodes.
+          const myNodes = res.json && res.json.myNodes;
+          const note = myNodes === 'full' ? 'not added to My nodes (that list is full)'
+            : myNodes === 'failed' ? 'not added to My nodes (CoreScope could not update it)'
+            : '';
+          log('account: linked ' + (name || pubkey.slice(0, 12) + '…') + ' to ' + (st.session.displayName || 'this account')
+            + (note ? ' — ' + note : ''), note ? 'st' : 'ok');
+          return setLink(pubkey, name, 'linked', note);
+        }
+        if (res.status === 429) return wait(pubkey, name, 'CoreScope is rate limiting (HTTP 429)');
+        if (res.status === 410 && attempt === 1) {
+          log('account: challenge expired or already used (410) — one retry with a new challenge', 'st');
+          continue;
+        }
+        if (res.status === 400) {
+          // The server verifies against the host of its userManagement.publicBaseUrl; a
+          // corescopeUrl on another host makes every signature "bad".
+          log('account: the signed message was bound to host ' + host + '; it must equal the host of CoreScope\'s userManagement.publicBaseUrl', 'no');
+          return fail(pubkey, name, 'CoreScope rejected the signature (' + (serverError(res) || 'HTTP 400') + ')');
+        }
+        if (res.status === 410) return fail(pubkey, name, 'the challenge expired twice (HTTP 410)');
+        return fail(pubkey, name, serverError(res) || 'HTTP ' + res.status);
+      }
+    } catch (e) {
+      if (e instanceof NetworkError) return wait(pubkey, name, 'CoreScope unreachable (' + errText(e) + ')');
+      return fail(pubkey, name, errText(e));
+    }
+  }
+
+  // link runs the auto-link flow for the connected companion. Single-flight: a caller
+  // arriving mid-attempt gets the running attempt's promise. `sign(bytes)` resolves the
+  // companion's 64-byte signature (src/app.js signOnCompanion). `force` is the Retry
+  // button: it lifts a definite failure for this pubkey. Resolves the status:
+  // 'linked' | 'working' | 'waiting' | 'unsupported' | 'failed' | 'logged-out' | 'skipped'.
+  function link({ pubkey, name = '', sign, force = false }) {
+    if (st.inFlight) return st.inFlight;
+    st.inFlight = runLink(String(pubkey || '').toLowerCase(), String(name || ''), sign, force)
+      .finally(() => { st.inFlight = null; });
+    return st.inFlight;
+  }
+
+  // newConnection: a user connected a companion. Definite failures from the previous
+  // connection no longer apply.
+  function newConnection() {
+    st.blocked.clear();
+    st.link = { ...IDLE };
+    changed();
+  }
+
   const api = {
     get enabled() { return st.enabled; },
     get discovered() { return st.discovered; },
@@ -300,6 +412,8 @@ export function createAccount({
     login,
     logout,
     refreshCompanions,
+    link,
+    newConnection,
   };
   return api;
 }
