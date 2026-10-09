@@ -27,6 +27,9 @@ import { Queue } from './queue.js';
 import { Publisher, KEEPALIVE_SECS } from './publisher.js';
 import { drainOnce, serialiseDrain } from './drain.js';
 import { loadConfig, getConfig, featureEnabled } from './config.js';
+import { createAccount, deviceNameFrom, transientError } from './account.js';
+import { accountView } from './accountview.js';
+import { signWithCompanion } from './companionsign.js';
 import { buildRfLogRecord } from './capture.js';
 import { heardKeyAfterVerify } from './advertsig.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
@@ -108,6 +111,13 @@ const state = {
   // could actually be identified. Last result wins, so a prefix that failed on a
   // transient network error and resolved later ends up counted as resolved.
   pathResolve: new Map(),
+  // CoreScope account (src/account.js); null until config names a CoreScope origin.
+  // signing: the companion is signing a link challenge. The discover sweep and the RF
+  // sampler stand down meanwhile, and region discovery is held off through
+  // regions.busy, because RESP_CODE_OK/ERR carry no correlator (src/companionsign.js).
+  // lastDrainHeld / holdLogged: the last drain pass was held for an unlinked companion,
+  // and whether that transition has been logged.
+  account: null, signing: false, lastDrainHeld: false, holdLogged: false,
 };
 
 const RECENT_MAX = 20;
@@ -588,12 +598,147 @@ async function retryConfig() {
   dbg('config.json loaded on retry — uploading and feature flags are live now', 'ok');
   applyConfigToSettings();
   noteRegionInert();
+  initAccount();
   if (state.connected) {
     try { await startPublisher(); } catch (e) { dbg('broker connect after config retry failed: ' + e.message, 'no'); }
     startRfSampler(); // returns immediately if the flag is off; was skipped when config was missing at connect
   }
   renderUplinkChip();
   return true;
+}
+
+// --- CoreScope account (src/account.js does the work; this is wiring) ---------
+
+// initAccount builds the account once config names a CoreScope origin, then runs
+// discovery. Safe to call repeatedly: startup and a late config retry both call it.
+async function initAccount() {
+  const cfg = getConfig();
+  if (state.account || !cfg || !cfg.corescopeUrl) { renderAccount(); return; }
+  state.account = createAccount({
+    baseUrl: cfg.corescopeUrl,
+    fetch: (url, opts) => fetch(url, opts), // window.fetch called unbound throws "Illegal invocation"
+    storage: localStorage,
+    log: dbg,
+    onChange: renderAccount,
+  });
+  renderAccount();
+  await discoverAccount();
+}
+
+// discoverAccount runs discovery, refreshes the linked cache when logged in, and tries
+// to link the connected companion. Once per start, plus once per `online` event while
+// no discovery has got an answer yet — never in a loop.
+async function discoverAccount() {
+  const a = state.account;
+  if (!a) return;
+  await a.discover();
+  if (a.enabled && a.loggedIn) {
+    try { await a.refreshCompanions(); } catch (e) { dbg('account: companions list not refreshed (' + e.message + ')', 'no'); }
+  }
+  renderAccount();
+  linkCurrentCompanion();
+}
+
+// renderAccount writes accountView's model into the card. Called on every account
+// change and from the per-second status strip (for "N waiting"). It never rebuilds the
+// login inputs, so typing is never interrupted.
+function renderAccount() {
+  const a = state.account;
+  const card = els('accountCard');
+  if (!a) { card.style.display = 'none'; return; }
+  const pk = state.connected ? state.companionPubkey : '';
+  const v = accountView({
+    enabled: a.enabled, loggedIn: a.loggedIn, displayName: a.displayName, companions: a.companions,
+    connectedPubkey: pk, link: a.linkState, holding: !!pk && a.shouldHold(pk), pending: state.pendingCount,
+  });
+  card.style.display = v.visible ? 'block' : 'none';
+  if (!v.visible) return;
+  els('acctOut').style.display = v.mode === 'out' ? '' : 'none';
+  els('acctIn').style.display = v.mode === 'in' ? '' : 'none';
+  els('acctWho').textContent = v.who;
+  els('acctCompanions').innerHTML = v.rows.length
+    ? v.rows.map((r) => '<div class="rr"><span class="rname">' + esc(r.label) + '</span><span class="rc">' + esc(r.short) + '</span></div>').join('')
+    : (v.mode === 'in' ? '<div class="muted">No linked companions yet</div>' : '');
+  els('acctLink').textContent = v.linkText;
+  els('btnLinkRetry').style.display = v.showRetry ? '' : 'none';
+  els('acctHold').textContent = v.holdText;
+  els('acctHold').style.display = v.holdText ? '' : 'none';
+}
+
+// The longest a region round can hold the radio is one with a contact-path override
+// (OVERRIDE_HOLD_MS plus two writes); wait a little longer than that before giving up.
+const RADIO_WAIT_MS = 30000;
+
+// acquireRadio gives the sign exchange the companion to itself: it waits for a running
+// region round to finish, then holds regions.busy (so regionTick starts no new round)
+// and sets state.signing (so the discover sweep and the RF sampler stand down).
+async function acquireRadio() {
+  const deadline = Date.now() + RADIO_WAIT_MS;
+  while (state.regions.busy) {
+    if (Date.now() > deadline) throw transientError('the radio stayed busy with region discovery');
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  state.regions.busy = true;
+  state.signing = true;
+}
+
+function releaseRadio() {
+  state.signing = false;
+  state.regions.busy = false;
+}
+
+// signOnCompanion is the `sign` account.link() calls. A link that is down, or drops
+// mid-exchange, is transient: account.js retries it on the next connect.
+async function signOnCompanion(bytes) {
+  if (!bleLinkUp()) throw transientError('the companion link is down');
+  await acquireRadio();
+  try {
+    if (!bleLinkUp()) throw transientError('the companion link is down');
+    return await signWithCompanion(state.transport, bytes);
+  } catch (e) {
+    if (!bleLinkUp()) throw transientError('the companion link dropped while signing');
+    throw e;
+  } finally {
+    releaseRadio();
+  }
+}
+
+// linkCurrentCompanion asks account.js to link the connected companion. account.js
+// decides whether anything needs doing (cached, blocked, single-flight); a successful
+// link kicks a drain so a held queue goes out immediately.
+function linkCurrentCompanion(force = false) {
+  const a = state.account;
+  if (!a || !a.enabled || !a.loggedIn || !state.connected || !state.companionPubkey) return;
+  a.link({ pubkey: state.companionPubkey, name: state.companionName, sign: signOnCompanion, force })
+    .then((status) => { if (status === 'linked') drain().then(refreshCounters).catch(() => {}); })
+    .catch((e) => dbg('account: link attempt failed unexpectedly: ' + e.message, 'no'));
+}
+
+async function onLogin() {
+  const a = state.account;
+  if (!a) return;
+  const b = els('btnLogin');
+  b.disabled = true;
+  els('acctMsg').textContent = '';
+  try {
+    const r = await a.login(els('acctEmail').value, els('acctPassword').value, deviceNameFrom(navigator.userAgent));
+    if (r.ok) {
+      els('acctPassword').value = ''; // not kept anywhere, not even in the field
+      linkCurrentCompanion();
+    } else {
+      els('acctMsg').textContent = r.message;
+    }
+  } finally {
+    b.disabled = false;
+    renderAccount();
+  }
+}
+
+function onLogout() {
+  if (!state.account) return;
+  state.account.logout();
+  els('acctMsg').textContent = '';
+  renderAccount();
 }
 
 // bleLinkUp asks the transport, which asks the browser. Not a flag of ours: the link
@@ -621,7 +766,9 @@ function monitorTick() {
   const linkUp = bleLinkUp();
   noteLinkState(linkUp);
   const dec = discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused, linkUp);
-  if (dec.fire) { fireDiscover(now); renderDiscoverStatus(discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused, linkUp)); }
+  // Not while signing: the sweep answers RESP_CODE_OK, which the sign exchange cannot
+  // tell from its own. The sweep fires on the first tick after signing ends.
+  if (dec.fire && !state.signing) { fireDiscover(now); renderDiscoverStatus(discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused, linkUp)); }
   else renderDiscoverStatus(dec);
   if (!linkUp) return; // nothing below this can reach the radio
   // The only region-discovery work left on the clock: free a timed-out ask, so the
@@ -666,6 +813,7 @@ async function renderStatusStrip() {
   els('sGps').textContent = fix ? '✓ ' + Math.round(fix.acc_m) + 'm' : '… no fix';
   state.pendingCount = await state.queue.count(); // also stamped into the exported log header
   els('sPending').textContent = state.pendingCount + ' pending';
+  renderAccount(); // the card's "N waiting" follows the same count
   els('sRate').textContent = state.rxTimes.length + ' pkt/min';
   const dot = els('uDot');
   const color = !state.publisher ? '#9aa4b2'
@@ -961,7 +1109,21 @@ const drain = serialiseDrain(async () => {
     name: state.companionName,
     failures: state.pubFailures,
     log: dbg,
+    // Only when CoreScope requires linked companions (src/account.js shouldHold).
+    // Off — the default — publishing never looks at the account.
+    hold: () => !!state.account && state.account.shouldHold(state.companionPubkey),
   });
+  // A pass stopped by the broker link says nothing about the hold either way.
+  if (r.stopped !== 'link') {
+    state.lastDrainHeld = r.stopped === 'held';
+    if (state.lastDrainHeld !== state.holdLogged) {
+      state.holdLogged = state.lastDrainHeld;
+      dbg(state.lastDrainHeld
+        ? 'uploads held — this CoreScope only accepts data from companions linked to an account; the queue keeps everything until this one is linked'
+        : 'uploads released — this companion is linked', state.lastDrainHeld ? 'no' : 'ok');
+      renderAccount();
+    }
+  }
   if (r.committed) {
     state.lastUploadAt = Date.now();
     dbg('published ' + r.committed + ' record(s)' + (r.stopped === 'link' ? ' before the link dropped — rest kept' : ''), 'ok');
@@ -999,7 +1161,7 @@ async function pushNow() {
     const pending = await state.queue.count();
     const uplink = currentUplink();
     const published = uplink === 'ok' ? await drain() : 0;
-    const outcome = pushOutcome({ uplink, pending, published });
+    const outcome = pushOutcome({ uplink, pending, published, held: state.lastDrainHeld });
     dbg(outcome.message, outcome.level);
     if (outcome.reloadConfig) {
       if (await retryConfig()) await drain(); // config arrived — flush immediately
@@ -1032,6 +1194,7 @@ async function connectAll() {
     state.transport.onStatus((s) => {
       dbg('BLE: ' + s);
       if (state.connected) log(s === 'connected' ? 'capturing' : 'BLE ' + s + '…');
+      if (s === 'connected') linkCurrentCompanion(); // a link that dropped mid-sign retries here
     });
     await state.transport.connect();
     s1.textContent = '① Companion connected ✓';
@@ -1045,6 +1208,7 @@ async function connectAll() {
     s2.className = '';
     els('companionInfo').textContent = (info.name ? info.name + ' · ' : '') + state.companionPubkey.slice(0, 20) + '…';
     dbg('SELF_INFO → ' + (info.name || '(unnamed)') + ' ' + state.companionPubkey);
+    if (state.account) state.account.newConnection(); // a new connect may try again what the last one gave up on
     await maybeReplayPendingRestore(); // fix up any contact left zero-hop by a crash/BLE-drop last session, before anything else touches it
 
     // Ensure the companion adverts with 2-byte path hashes — 1-byte mode produces
@@ -1118,6 +1282,9 @@ async function connectAll() {
     renderUplinkChip();
     log('capturing as ' + (info.name || state.companionPubkey.slice(0, 12)));
     switchView('home'); // connected → jump to the live monitor
+    // Last, so the sign exchange starts after setup's own commands (device query,
+    // path-hash mode) have been answered.
+    linkCurrentCompanion();
 
   } catch (e) {
     step('✗ ' + e.message, 'err');
@@ -1177,7 +1344,7 @@ function startRfSampler() {
     if (!state.transport || !state.companionPubkey) return;
     // A sample taken over a dead link is three writes that throw and one
     // "rf sample incomplete — discarded" line. Reschedule and wait for the link.
-    if (!bleLinkUp()) {
+    if (!bleLinkUp() || state.signing) {
       if (state.rfGen !== myGen) return;
       state.rfTimer = setTimeout(tick, nextSampleDelay(state.motion ? state.motion.paused : false));
       return;
@@ -1247,6 +1414,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   try {
     await loadConfig();
     applyConfigToSettings();
+    initAccount(); // not awaited: discovery has its own 5 s timeout and must not delay startup
   } catch (e) {
     // Loud on THREE surfaces. This failure previously wrote one line to els('status'),
     // which connectAll then cleared with log('') — so the most consequential startup
@@ -1282,6 +1450,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (state.soundEnabled) state.beeper.ensure(); // unlock + confirm audio in this gesture
   });
   els('btnPush').addEventListener('click', pushNow);
+  els('btnLogin').addEventListener('click', onLogin);
+  els('acctPassword').addEventListener('keydown', (e) => { if (e.key === 'Enter') onLogin(); });
+  els('btnLogout').addEventListener('click', onLogout);
+  els('btnLinkRetry').addEventListener('click', () => linkCurrentCompanion(true));
   els('btnShareLog').addEventListener('click', async () => {
     const lines = Array.from(els('log').childNodes).map((n) => n.textContent);
     // Built HERE, at share time, so it can never roll out of the ring buffer the way
@@ -1340,6 +1512,10 @@ window.addEventListener('DOMContentLoaded', async () => {
   // — with no config there is no publisher to drain into.
   window.addEventListener('online', () => {
     retryConfig().finally(() => { drain().then(refreshCounters).catch(() => {}); });
+    // A start without network never got an answer from CoreScope: ask once more now.
+    // Otherwise only a link that was waiting on the network needs another go.
+    if (state.account && !state.account.discovered) discoverAccount();
+    else linkCurrentCompanion();
   });
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});

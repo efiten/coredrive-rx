@@ -13,8 +13,16 @@ const CACHE = 'coredrive-rx-v53';
 // out-of-date config" is not.
 const NEVER_CACHED = ['/config.json'];
 
+// CoreScope's account and config endpoints (src/account.js) are live state, and the
+// account ones carry a user's data under a bearer token: never cached, never served
+// stale, on any origin. /api/nodes/resolve (names) keeps its offline fallback.
+const NEVER_CACHED_PREFIXES = ['/api/config/', '/api/auth/', '/api/account/'];
+
 function neverCached(url) {
-  try { return NEVER_CACHED.includes(new URL(url).pathname); } catch { return false; }
+  try {
+    const p = new URL(url).pathname;
+    return NEVER_CACHED.includes(p) || NEVER_CACHED_PREFIXES.some((x) => p.startsWith(x));
+  } catch { return false; }
 }
 
 self.addEventListener('install', () => self.skipWaiting());

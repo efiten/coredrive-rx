@@ -31,6 +31,7 @@
     .row button { flex: 1; }
     label.inline { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; font-size: 13px; color: #e6e6e6; }
     label.inline input { width: auto; }
+    input.txt { width: 100%; box-sizing: border-box; padding: 10px; font-size: 15px; background: #0a0c10; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 6px; }
     #log { background: #0a0c10; border: 1px solid #2a2f3a; border-radius: 6px; padding: 8px; font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow: auto; margin-top: 8px; }
     #log .lg-ok { color: #9fe6b8; } /* captured / published (the data product) */
     #log .lg-no { color: #ff8b7a; } /* held back / failed */
@@ -119,6 +120,27 @@
       <label>CoreScope</label>
       <div class="muted" id="brokerStatus">— not connected —</div>
       <button id="btnPush" class="btn2" style="margin-top:8px">Push pending now</button>
+    </div>
+    <!-- CoreScope account (src/account.js). Hidden unless the CoreScope this app
+         uploads to has user management on, or this companion's uploads are held. -->
+    <div class="card" id="accountCard" style="display:none">
+      <label>CoreScope account</label>
+      <div id="acctOut">
+        <label for="acctEmail">Email</label>
+        <input id="acctEmail" class="txt" type="email" autocomplete="username" autocapitalize="off" spellcheck="false">
+        <label for="acctPassword">Password</label>
+        <input id="acctPassword" class="txt" type="password" autocomplete="current-password">
+        <button id="btnLogin" class="btn2" style="margin-top:8px">Log in</button>
+      </div>
+      <div id="acctIn" style="display:none">
+        <div class="muted" id="acctWho"></div>
+        <div id="acctCompanions" class="recent" style="margin-top:6px"></div>
+        <button id="btnLogout" class="btn2" style="margin-top:8px">Log out</button>
+      </div>
+      <div class="muted" id="acctLink"></div>
+      <button id="btnLinkRetry" class="btn2" style="display:none;margin-top:8px">Retry</button>
+      <div class="muted" id="acctHold" style="display:none;color:#e6a23c"></div>
+      <div class="muted" id="acctMsg" style="color:#ff8b7a"></div>
     </div>
     <div class="card">
       <label>Companion</label>
