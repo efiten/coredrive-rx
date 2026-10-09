@@ -168,7 +168,7 @@ export function createAccount({
     let json = null;
     let reason = '';
     try {
-      const r = await withTimeout((signal) => fetchFn(baseUrl + '/api/config/client', { signal, cache: 'no-store' }), DISCOVER_TIMEOUT_MS);
+      const r = await withTimeout((signal) => fetchFn(baseUrl + '/api/config/client', { signal, cache: 'no-store', credentials: 'omit' }), DISCOVER_TIMEOUT_MS);
       if (r.status !== 200) reason = 'answered HTTP ' + r.status;
       else {
         try { json = await r.json(); } catch (e) { reason = 'answered something that is not JSON'; }
@@ -196,6 +196,96 @@ export function createAccount({
     return { enabled: st.enabled, requireLinked: st.requireLinked, reason };
   }
 
+  // serverError returns CoreScope's own {"error": "..."} message, or ''.
+  function serverError(res) {
+    return res && res.json && typeof res.json.error === 'string' ? res.json.error : '';
+  }
+
+  // endSession forgets the token and the cache. Used for logout and for any 401.
+  function endSession(why) {
+    st.session = null;
+    clearSession(storage);
+    st.link = { ...IDLE };
+    log('account: logged out — ' + why, why === 'by you' ? 'st' : 'no');
+    changed();
+  }
+
+  // call makes one API request. No answer at all throws NetworkError; every HTTP
+  // answer resolves { status, json, headers }. A 401 on a call that carried the token
+  // ends the session here, once, for every caller. Headers are built synchronously, so
+  // a caller that clears the session right after calling still sends the old token.
+  async function call(method, path, body, { auth = true } = {}) {
+    const headers = {};
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    const sent = auth ? st.session : null;
+    if (sent) headers.Authorization = 'Bearer ' + sent.token;
+    let r;
+    try {
+      r = await withTimeout((signal) => fetchFn(baseUrl + path, {
+        // Never cookies: CoreScope judges a request that carries its session
+        // cookie on that cookie alone, and the bearer header would not count.
+        method, headers, signal, cache: 'no-store', credentials: 'omit',
+        body: body === undefined ? undefined : JSON.stringify(body),
+      }), REQUEST_TIMEOUT_MS);
+    } catch (e) {
+      throw e instanceof NetworkError ? e : new NetworkError(errText(e));
+    }
+    let json = null;
+    try { json = await r.json(); } catch (e) { json = null; }
+    if (r.status === 401 && sent && st.session === sent) endSession('CoreScope answered 401 (token expired or revoked)');
+    return { status: r.status, json, headers: r.headers };
+  }
+
+  // refreshCompanions replaces the linked cache with the server's list. Throws
+  // NetworkError when CoreScope cannot be reached; the cache is then left as it was.
+  async function refreshCompanions() {
+    if (!st.session) return [];
+    const res = await call('GET', '/api/account/companions');
+    if (!st.session) return [];
+    if (res.status !== 200 || !Array.isArray(res.json)) return st.session.companions.map((c) => ({ ...c }));
+    st.session.companions = normCompanions(res.json);
+    saveSession(storage, st.session);
+    changed();
+    return st.session.companions.map((c) => ({ ...c }));
+  }
+
+  // login exchanges email + password for a device token. The password is sent once and
+  // never stored. Resolves { ok, message }; never throws.
+  async function login(email, password, deviceName) {
+    let res;
+    try {
+      res = await call('POST', '/api/auth/device-token', {
+        email: String(email || '').trim(),
+        password: String(password || ''),
+        deviceName: String(deviceName || ''),
+      }, { auth: false });
+    } catch (e) {
+      return { ok: false, message: 'CoreScope is unreachable (' + errText(e) + ')' };
+    }
+    if (res.status === 200 && res.json && typeof res.json.token === 'string' && res.json.token) {
+      const user = res.json.user || {};
+      st.session = { origin: baseUrl, token: res.json.token, displayName: String(user.displayName || ''), companions: [] };
+      saveSession(storage, st.session);
+      log('account: logged in as ' + (st.session.displayName || '(no display name)'), 'ok');
+      changed();
+      try { await refreshCompanions(); } catch (e) { log('account: companions list not loaded yet (' + errText(e) + ')', 'no'); }
+      return { ok: true, message: '' };
+    }
+    if (res.status === 429) {
+      const after = res.headers && typeof res.headers.get === 'function' ? Number(res.headers.get('Retry-After')) : NaN;
+      return { ok: false, message: Number.isFinite(after) && after > 0 ? 'Try again in ' + after + ' s.' : 'Too many attempts. Try again later.' };
+    }
+    return { ok: false, message: serverError(res) || 'Login failed (HTTP ' + res.status + ')' };
+  }
+
+  // logout revokes the token on the server without waiting for the answer, then
+  // forgets it locally.
+  function logout() {
+    if (!st.session) return;
+    call('POST', '/api/auth/logout').catch(() => { /* revoked server-side or not, it is gone here */ });
+    endSession('by you');
+  }
+
   const api = {
     get enabled() { return st.enabled; },
     get discovered() { return st.discovered; },
@@ -207,6 +297,9 @@ export function createAccount({
     discover,
     isLinked,
     shouldHold,
+    login,
+    logout,
+    refreshCompanions,
   };
   return api;
 }

@@ -36,7 +36,7 @@ function fakeServer(routes) {
   const calls = [];
   const fetch = async (url, opts = {}) => {
     const method = opts.method || 'GET';
-    const req = { url, method, headers: opts.headers || {}, body: opts.body ? JSON.parse(opts.body) : undefined };
+    const req = { url, method, headers: opts.headers || {}, credentials: opts.credentials, body: opts.body ? JSON.parse(opts.body) : undefined };
     calls.push(req);
     const h = routes[method + ' ' + new URL(url).pathname];
     if (!h) return res(404, { error: 'not found' });
@@ -200,4 +200,119 @@ test('shouldHold only when the flag is on and the companion is not in the linked
   const flagOff = make({ routes: ENABLED });
   await flagOff.account.discover();
   assert.strictEqual(flagOff.account.shouldHold(PK), false, 'flag off never holds, logged in or not');
+});
+
+// --- login, logout, 401 ------------------------------------------------------
+
+test('login posts email, password and deviceName without a bearer, then keeps only the token', async () => {
+  const t = make({ routes: {
+    ...ENABLED,
+    'POST /api/auth/device-token': () => res(200, { token: 'tok-new', expiresAt: '2027-01-06T12:00:00Z', user: { id: 3, displayName: 'Erwin' } }),
+    'GET /api/account/companions': () => res(200, [{ pubkey: PK.toUpperCase(), name: 'obs', linkedAt: 1, lastSeenAt: 2 }]),
+  } });
+  await t.account.discover();
+  const r = await t.account.login(' e@x.be ', 'pw-123', 'Android · Chrome');
+  assert.deepStrictEqual(r, { ok: true, message: '' });
+  const post = t.server.calls.find((c) => c.method === 'POST');
+  assert.strictEqual(post.url, ORIGIN + '/api/auth/device-token');
+  assert.deepStrictEqual(post.body, { email: 'e@x.be', password: 'pw-123', deviceName: 'Android · Chrome' });
+  assert.strictEqual(post.headers.Authorization, undefined);
+  assert.strictEqual(t.account.loggedIn, true);
+  assert.strictEqual(t.account.displayName, 'Erwin');
+  const stored = t.storage.getItem(TOKEN_KEY);
+  assert.ok(!stored.includes('pw-123'), 'the password is never stored');
+  assert.strictEqual(JSON.parse(stored).origin, ORIGIN);
+  assert.deepStrictEqual(t.account.companions, [{ pubkey: PK, name: 'obs' }]);
+  const get = t.server.calls.find((c) => c.method === 'GET' && c.url === ORIGIN + '/api/account/companions');
+  assert.strictEqual(get.headers.Authorization, 'Bearer tok-new');
+});
+
+test('a wrong password shows the server\'s own 401 message and stays logged out', async () => {
+  const t = make({ routes: { ...ENABLED, 'POST /api/auth/device-token': () => res(401, { error: 'invalid email or password' }) } });
+  await t.account.discover();
+  const r = await t.account.login('e@x.be', 'nope', 'x');
+  assert.deepStrictEqual(r, { ok: false, message: 'invalid email or password' });
+  assert.strictEqual(t.account.loggedIn, false);
+  assert.strictEqual(t.storage.getItem(TOKEN_KEY), null);
+});
+
+test('a rate-limited login says how long to wait', async () => {
+  const t = make({ routes: { ...ENABLED, 'POST /api/auth/device-token': () => res(429, { error: 'too many attempts, try again later' }, { 'Retry-After': '12' }) } });
+  await t.account.discover();
+  assert.deepStrictEqual(await t.account.login('e@x.be', 'pw', 'x'), { ok: false, message: 'Try again in 12 s.' });
+});
+
+test('a rate-limited login whose Retry-After CORS hides still says to wait', async () => {
+  const t = make({ routes: { ...ENABLED, 'POST /api/auth/device-token': () => res(429, { error: 'too many attempts, try again later' }) } });
+  await t.account.discover();
+  const r = await t.account.login('e@x.be', 'pw', 'x');
+  assert.strictEqual(r.ok, false);
+  assert.match(r.message, /Try again later/);
+});
+
+test('an unreachable CoreScope fails the login without throwing', async () => {
+  const t = make({ routes: { ...ENABLED, 'POST /api/auth/device-token': () => { throw new TypeError('Failed to fetch'); } } });
+  await t.account.discover();
+  const r = await t.account.login('e@x.be', 'pw', 'x');
+  assert.strictEqual(r.ok, false);
+  assert.match(r.message, /unreachable/);
+});
+
+test('logout revokes on the server without waiting, and forgets the token at once', () => {
+  const calls = [];
+  const storage = memStorage(session());
+  const account = createAccount({
+    baseUrl: ORIGIN, storage,
+    fetch: (url, opts) => { calls.push({ url, opts }); return new Promise(() => {}); },
+    setTimeout: () => 0, clearTimeout: () => {},
+  });
+  account.logout();
+  assert.strictEqual(account.loggedIn, false);
+  assert.strictEqual(storage.getItem(TOKEN_KEY), null);
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0].url, ORIGIN + '/api/auth/logout');
+  assert.strictEqual(calls[0].opts.method, 'POST');
+  assert.strictEqual(calls[0].opts.headers.Authorization, 'Bearer tok-secret');
+});
+
+test('a 401 on any account call clears the token and shows logged out', async () => {
+  const t = make({ storage: memStorage(session()), routes: { ...ENABLED, 'GET /api/account/companions': () => res(401, { error: 'session expired' }) } });
+  await t.account.discover();
+  const before = t.changes();
+  assert.deepStrictEqual(await t.account.refreshCompanions(), []);
+  assert.strictEqual(t.account.loggedIn, false);
+  assert.strictEqual(t.storage.getItem(TOKEN_KEY), null);
+  assert.ok(t.changes() > before, 'the card is told to re-render');
+  assert.ok(t.logs.some((l) => /logged out/.test(l)));
+});
+
+test('the token never reaches the log', async () => {
+  const t = make({ routes: {
+    ...ENABLED,
+    'POST /api/auth/device-token': () => res(200, { token: 'tok-very-secret', user: { displayName: 'Erwin' } }),
+    'GET /api/account/companions': () => res(200, []),
+  } });
+  await t.account.discover();
+  await t.account.login('e@x.be', 'pw', 'x');
+  await t.account.refreshCompanions();
+  t.account.logout();
+  assert.ok(t.logs.length > 0);
+  assert.ok(t.logs.every((l) => !l.includes('tok-very-secret')));
+});
+
+// CoreScope judges a request with its session cookie on the cookie alone (the bearer
+// header then does not count), so RX never sends cookies: on the same origin as a
+// logged-in CoreScope tab the browser would otherwise attach cs_session.
+test('every CoreScope request goes without cookies', async () => {
+  const t = make({ routes: {
+    ...ENABLED,
+    'POST /api/auth/device-token': () => res(200, { token: 'tok-new', user: { displayName: 'Erwin' } }),
+    'GET /api/account/companions': () => res(200, []),
+  } });
+  await t.account.discover();
+  await t.account.login('e@x.be', 'pw', 'x');
+  await t.account.refreshCompanions();
+  t.account.logout();
+  assert.ok(t.server.calls.length >= 4);
+  for (const c of t.server.calls) assert.strictEqual(c.credentials, 'omit', c.method + ' ' + c.url);
 });
