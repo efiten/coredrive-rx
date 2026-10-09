@@ -25,7 +25,7 @@ import { shareLog } from './sharelog.js';
 import { Gps } from './gps.js';
 import { Queue } from './queue.js';
 import { Publisher, KEEPALIVE_SECS } from './publisher.js';
-import { drainOnce, serialiseDrain } from './drain.js';
+import { drainOnce, serialiseDrain, stampRecord } from './drain.js';
 import { loadConfig, getConfig, featureEnabled } from './config.js';
 import { createAccount, deviceNameFrom, transientError } from './account.js';
 import { accountView } from './accountview.js';
@@ -473,11 +473,11 @@ function onRegionsFrame(dv) {
   markAnswered(r.answered, r.queue, hit.target);
   releaseHold(r.replyWaiters, hit.target); // no-op unless this repeater's contact is held overridden
   noteRegionsAnswer(hit.target, hit.regions, hit.truncated);
-  state.queue.add({
+  state.queue.add(queued({
     kind: 'regions', at: new Date().toISOString(), target: hit.target,
     regions: hit.regions, truncated: hit.truncated, repeater_clock: hit.repeaterClock,
     rx_pubkey: state.companionPubkey,
-  }).catch((e) => dbg('regions queue failed: ' + e.message, 'no'));
+  })).catch((e) => dbg('regions queue failed: ' + e.message, 'no'));
   dbg('regions ← ' + hit.target.slice(0, 12) + '… declares: ' + (hit.regions.join(',') || '(none)')
     + ' — asked on snr ' + hit.snr + ' / rssi ' + hit.rssi
     + ' (' + r.replies + ' of ' + r.asks + ' asks answered)', 'ok');
@@ -605,6 +605,12 @@ async function retryConfig() {
   }
   renderUplinkChip();
   return true;
+}
+
+// queued stamps a record with the companion connected now (src/drain.js stampRecord),
+// so a backlog is always published under the companion that captured it.
+function queued(rec) {
+  return stampRecord(rec, state.companionPubkey, state.companionName);
 }
 
 // --- CoreScope account (src/account.js does the work; this is wiring) ---------
@@ -981,7 +987,7 @@ async function processFrame(dv) {
     });
     if (!rfRec) return;
     state.rfLogged++;
-    await state.queue.add(rfRec);
+    await state.queue.add(queued(rfRec));
     renderCounters();
     return;
   }
@@ -1071,7 +1077,7 @@ async function processFrame(dv) {
   state.hexCells.add(hexCellAt(fix.lat, fix.lon, HEX_COUNT_RES));
   renderCounters();
   const rec = { rx_at: new Date().toISOString(), raw: rawHex, snr: f.snr, rssi: f.rssi, lat: fix.lat, lon: fix.lon, acc_m: fix.acc_m };
-  await state.queue.add(rec);
+  await state.queue.add(queued(rec));
   if (state.soundEnabled && state.beeper) state.beeper.beep(); // audio cue per mapped node (#7)
   if (state.localMap) state.localMap.addPoint(fix.lat, fix.lon, f.snr); // live hex on the map
   refreshCounters();
@@ -1111,7 +1117,7 @@ const drain = serialiseDrain(async () => {
     log: dbg,
     // Only when CoreScope requires linked companions (src/account.js shouldHold).
     // Off — the default — publishing never looks at the account.
-    hold: () => !!state.account && state.account.shouldHold(state.companionPubkey),
+    hold: (pk) => !!state.account && state.account.shouldHold(pk),
   });
   // A pass stopped by the broker link says nothing about the hold either way.
   if (r.stopped !== 'link') {
@@ -1356,7 +1362,7 @@ function startRfSampler() {
       const packets = await ask(STATS_PACKETS);
       const sample = mergeSample(core, radio, packets, fix, new Date().toISOString(), state.motion ? state.motion.paused : false);
       if (sample) {
-        await state.queue.add(sample);
+        await state.queue.add(queued(sample));
         state.lastRfSample = sample; // Settings diagnostics line
         renderRfSampler();
         dbg('rf sample noise=' + sample.noise_floor + 'dBm rx_air=' + sample.rx_air_secs + 's', 'st');
