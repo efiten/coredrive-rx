@@ -629,6 +629,12 @@ async function initAccount() {
     storage: localStorage,
     log: dbg,
     onChange: renderAccount,
+    // A discovery without an answer, or a link left waiting, is asked again after a
+    // growing delay (src/account.js RETRY_DELAYS_MS).
+    onRetry: (what) => {
+      if (what === 'discover') discoverAccount().catch((e) => dbg('account: rediscovery failed: ' + e.message, 'no'));
+      else linkCurrentCompanion();
+    },
   });
   renderAccount();
   await discoverAccount();

@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   createAccount, TOKEN_KEY, REQUIRE_KEY, linkMessage, deviceNameFrom,
-  loadSession, loadRequireLinked, LINK_SETTLE_MS, signFailure,
+  loadSession, loadRequireLinked, LINK_SETTLE_MS, signFailure, RETRY_DELAYS_MS,
 } from '../src/account.js';
 import { SignUnsupportedError } from '../src/companionsign.js';
 
@@ -587,4 +587,68 @@ test('a sign error after the BLE link changed, or with it down, is transient', (
       assert.notStrictEqual(out.name, 'SignUnsupportedError');
     }
   }
+});
+
+// Without a retry, a CoreScope that was briefly unreachable (a restart, a slow mobile
+// request, a 429) left a held queue held for the whole session: only an 'online'
+// event or a reconnect asked again, and navigator.onLine rarely changes.
+function timerBox() {
+  const timers = [];
+  return {
+    timers,
+    setTimeout: (fn, ms) => { const h = { ms, cleared: false }; h.fn = () => { h.cleared = true; fn(); }; timers.push(h); return h; },
+    clearTimeout: (h) => { if (h) h.cleared = true; },
+    live: () => timers.filter((x) => !x.cleared && x.ms >= RETRY_DELAYS_MS[0]),
+  };
+}
+
+test('a discovery without an answer is retried with a growing delay, and a success stops it', async () => {
+  const box = timerBox();
+  const retries = [];
+  let up = false;
+  const t = make({
+    setTimeout: box.setTimeout, clearTimeout: box.clearTimeout, onRetry: (w) => retries.push(w),
+    routes: { 'GET /api/config/client': () => { if (!up) throw new TypeError('Failed to fetch'); return res(200, { userManagement: { enabled: true } }); } },
+  });
+  // discover's own 5 s timeout timer is also in the box; only the retry timers count.
+  await t.account.discover();
+  assert.deepStrictEqual(box.live().map((x) => x.ms), [RETRY_DELAYS_MS[0]]);
+  box.live()[0].fn();
+  assert.deepStrictEqual(retries, ['discover']);
+  await t.account.discover();
+  assert.deepStrictEqual(box.live().map((x) => x.ms), [RETRY_DELAYS_MS[1]], 'one pending retry, the next delay');
+  up = true;
+  await t.account.discover();
+  assert.deepStrictEqual(box.live(), [], 'an answer cancels the retry');
+});
+
+test('a link left waiting is retried later, and stops once linked', async () => {
+  const box = timerBox();
+  const retries = [];
+  let fail = true;
+  const t = make({
+    storage: memStorage(session()),
+    setTimeout: box.setTimeout, clearTimeout: box.clearTimeout, onRetry: (w) => retries.push(w),
+    routes: {
+      ...ENABLED,
+      'GET /api/account/companions': () => res(200, []),
+      'POST /api/account/companions/challenge': () => (fail ? res(429, { error: 'slow down' }) : res(200, { challenge: 'c1' })),
+      'POST /api/account/companions': (req) => res(200, { pubkey: req.body.pubkey, name: 'obs', myNodes: 'added' }),
+    },
+  });
+  await t.account.discover();
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'waiting');
+  const pending = box.live();
+  assert.deepStrictEqual(pending.map((x) => x.ms), [RETRY_DELAYS_MS[0]]);
+  pending[0].fn();
+  assert.deepStrictEqual(retries, ['link']);
+  fail = false;
+  assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'linked');
+  assert.deepStrictEqual(box.live().filter((x) => x.ms !== LINK_SETTLE_MS), [], 'no retry left after the link');
+});
+
+test('the retry delay grows and then stays at its maximum', () => {
+  assert.ok(RETRY_DELAYS_MS.length >= 3);
+  for (let i = 1; i < RETRY_DELAYS_MS.length; i++) assert.ok(RETRY_DELAYS_MS[i] > RETRY_DELAYS_MS[i - 1]);
+  assert.ok(RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1] <= 10 * 60 * 1000);
 });

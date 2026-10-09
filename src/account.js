@@ -25,6 +25,11 @@ export const REQUEST_TIMEOUT_MS = 10000;
 // has acked it. Waiting out that gap (plus a margin) means the first upload after
 // linking is not lost.
 export const LINK_SETTLE_MS = 6000;
+// RETRY_DELAYS_MS: when discovery got no answer, or a link attempt is left 'waiting'
+// (network, 429, BLE drop), it is asked again after these delays, the last one
+// repeating. Without it only an 'online' event or a reconnect asked again, and a held
+// queue could stay held for the whole session.
+export const RETRY_DELAYS_MS = [30000, 60000, 120000, 300000, 600000];
 
 // NetworkError: no HTTP answer at all (offline, DNS, CORS block, timeout). Every HTTP
 // answer, error codes included, is NOT a NetworkError.
@@ -132,6 +137,8 @@ export function saveRequireLinked(storage, origin, value) {
 //   storage       { getItem, setItem, removeItem } (localStorage in the app)
 //   setTimeout / clearTimeout   optional, default the globals
 //   now           () => ms, optional, default Date.now
+//   onRetry       (what) => void, optional; what is 'discover' or 'link'. Called when a
+//                 retry is due (RETRY_DELAYS_MS); the app re-runs discovery or the link.
 //   log           (msg, level) optional
 //   onChange      () => void, optional; called whenever anything shown on the card
 //                 changes, and when a fresh link has settled (the queue may drain)
@@ -139,7 +146,7 @@ export function createAccount({
   baseUrl, fetch: fetchFn, storage,
   setTimeout: setT = globalThis.setTimeout, clearTimeout: clearT = globalThis.clearTimeout,
   now = () => Date.now(),
-  log = () => {}, onChange = () => {},
+  log = () => {}, onChange = () => {}, onRetry = () => {},
 }) {
   const host = new URL(baseUrl).host;
   const IDLE = Object.freeze({ pubkey: '', name: '', status: 'idle', reason: '' });
@@ -152,7 +159,28 @@ export function createAccount({
     blocked: new Set(), // pubkeys with a definite link failure on this connection
     inFlight: null,     // the one link attempt allowed at a time
     settling: new Map(), // pubkey → time a fresh link stops holding (LINK_SETTLE_MS)
+    retry: { discover: { timer: null, n: 0 }, link: { timer: null, n: 0 } },
   };
+
+  // scheduleRetry arms ONE retry of `what` after the next delay in RETRY_DELAYS_MS;
+  // stopRetry cancels it and starts the delays over.
+  function scheduleRetry(what) {
+    const r = st.retry[what];
+    if (r.timer) return;
+    const ms = RETRY_DELAYS_MS[Math.min(r.n, RETRY_DELAYS_MS.length - 1)];
+    r.n++;
+    r.timer = setT(() => {
+      r.timer = null;
+      try { onRetry(what); } catch (e) { /* the app logs its own failures */ }
+    }, ms);
+    if (r.timer && typeof r.timer.unref === 'function') r.timer.unref();
+  }
+  function stopRetry(what) {
+    const r = st.retry[what];
+    if (r.timer) clearT(r.timer);
+    r.timer = null;
+    r.n = 0;
+  }
   const changed = () => { try { onChange(); } catch (e) { /* a render error must not break the flow */ } };
 
   // withTimeout runs start(signal) and rejects with NetworkError after `ms`, aborting
@@ -218,6 +246,8 @@ export function createAccount({
       else if (um.enabled !== true) reason = 'has userManagement.enabled off';
     }
     st.enabled = !reason;
+    if (st.discovered) stopRetry('discover');
+    else scheduleRetry('discover');
     if (st.enabled) {
       log('account: ' + baseUrl + ' has user management — CoreScope login available'
         + (st.requireLinked ? '; it only accepts data from linked companions' : ''), 'ok');
@@ -425,6 +455,11 @@ export function createAccount({
       return st.inFlight.promise.catch(() => {}).then(() => link(args));
     }
     const promise = runLink(pk, String(args.name || ''), args.sign, !!args.force)
+      .then((status) => {
+        if (status === 'waiting') scheduleRetry('link');
+        else stopRetry('link');
+        return status;
+      })
       .finally(() => { st.inFlight = null; });
     st.inFlight = { pubkey: pk, promise };
     return promise;
