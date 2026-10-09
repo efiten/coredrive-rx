@@ -47,7 +47,8 @@ phone GPS (gps.js) ────────────────────�
   capture rate), the last reception's SNR on a peak-hold meter, and the recently-heard list.
 - **🗺️ Map** — live per-cell coverage for this session.
 - **⚙️ Settings** — the **Connect/Disconnect** button (with connection progress), CoreScope broker
-  status + a **Push pending now** button, companion info, and diagnostics (verbose toggle, debug log,
+  status + a **Push pending now** button, the **CoreScope account** card (only when CoreScope has
+  user management on, see section 7), companion info, and diagnostics (verbose toggle, debug log,
   share/mail the log). The app opens here until a companion is connected, then jumps to Home.
 
 ## Self-hosting (for a CoreScope sysop)
@@ -110,6 +111,7 @@ Put a `config.json` in the served directory (next to `index.html`). Start from t
   "mqttUsername": "coredrive-rx",
   "mqttPassword": "<your publish-only EMQX account password>",
   "resolveUrl": "https://corescope.yourdomain/api/nodes/resolve",
+  "corescopeUrl": "https://corescope.yourdomain",
   "fullRfLog": true,
   "rfSampler": true,
   "regionDiscovery": true,
@@ -194,6 +196,25 @@ The app calls CoreScope's `GET /api/nodes/resolve?prefix=…` cross-origin. Set 
 
 Leave `resolveUrl` empty to disable name resolution entirely.
 
+### 7. CoreScope accounts and companion linking (optional)
+When your CoreScope has user management on (`userManagement.enabled`, with companion linking,
+sub-project F), Settings shows a **CoreScope account** card. A user logs in with their CoreScope
+email and password; the app stores only a device token (it appears under **Devices** on their
+CoreScope account page and can be revoked there). Every companion they connect while logged in is
+linked to their account: the companion signs a server challenge with its own key, so only someone
+holding the companion can link it. Linked companions show under the user's **My nodes**, and the
+coverage they collect is attributed to that user. The MQTT topics and payload do not change.
+
+- `corescopeUrl` (optional) is CoreScope's origin. Without it the app uses the origin of
+  `resolveUrl`; set it when `resolveUrl` goes through a proxy. It does not have to match
+  CoreScope's `publicBaseUrl`: CoreScope tells the app which host to sign.
+- When this app runs on another origin than CoreScope, add this app's origin to CoreScope's
+  `corsAllowedOrigins`. Without it the card stays hidden and the debug log says why.
+- If CoreScope has `clientRxCoverage.requireLinkedCompanion` on, it drops data from unlinked
+  companions. The app then holds an unlinked companion's queue (nothing is lost) and sends it once
+  the companion is linked. Upgrade every client to v1.19.0 or later before turning that on.
+
+```
 ## Develop
 
 ```bash
