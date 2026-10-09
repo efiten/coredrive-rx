@@ -41,7 +41,6 @@ test('logged in names the user and marks the connected companion with ●', () =
 test('each link state has its own line; only Failed offers Retry', () => {
   const line = (status, reason = '') => accountView({ ...base, link: { pubkey: PK, name: 'Car', status, reason } });
   assert.strictEqual(line('linked').linkText, '✓ Car linked');
-  assert.strictEqual(line('linked', 'not added to My nodes (that list is full)').linkText, '✓ Car linked — not added to My nodes (that list is full)');
   assert.strictEqual(line('working').linkText, 'Linking Car…');
   assert.strictEqual(line('waiting').linkText, 'Linking Car… (waiting for the network)');
   assert.strictEqual(line('unsupported').linkText, "This companion's firmware cannot sign; update it to link.");

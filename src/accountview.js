@@ -31,7 +31,7 @@ export function accountView({ enabled, loggedIn, displayName, companions, connec
   let linkText = '';
   let showRetry = false;
   if (loggedIn && current) {
-    if (current.status === 'linked') linkText = '✓ ' + name + ' linked' + (current.reason ? ' — ' + current.reason : '');
+    if (current.status === 'linked') linkText = '✓ ' + name + ' linked';
     else if (current.status === 'working') linkText = 'Linking ' + name + '…';
     else if (current.status === 'waiting') linkText = 'Linking ' + name + '… (waiting for the network)';
     else if (current.status === 'unsupported') linkText = "This companion's firmware cannot sign; update it to link.";

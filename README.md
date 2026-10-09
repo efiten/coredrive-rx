@@ -202,8 +202,8 @@ sub-project F), Settings shows a **CoreScope account** card. A user logs in with
 email and password; the app stores only a device token (it appears under **Devices** on their
 CoreScope account page and can be revoked there). Every companion they connect while logged in is
 linked to their account: the companion signs a server challenge with its own key, so only someone
-holding the companion can link it. Linked companions show under the user's **My nodes**, and the
-coverage they collect is attributed to that user. The MQTT topics and payload do not change.
+holding the companion can link it. Linked companions show under **Companions** on the user's
+CoreScope account page, and the coverage they collect is attributed to that user. The MQTT topics and payload do not change.
 
 - `corescopeUrl` (optional) is CoreScope's origin. Without it the app uses the origin of
   `resolveUrl`; set it when `resolveUrl` goes through a proxy. It does not have to match
