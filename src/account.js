@@ -413,15 +413,8 @@ export function createAccount({
           if (!isLinked(pubkey)) st.session.companions.push({ pubkey, name: String((res.json && res.json.name) || name) });
           saveSession(storage, st.session);
           settle(pubkey);
-          // myNodes: 'added' | 'present' | 'full' | 'failed'. The link stands in every
-          // case; 'full' and 'failed' only mean CoreScope did not add it to My nodes.
-          const myNodes = res.json && res.json.myNodes;
-          const note = myNodes === 'full' ? 'not added to My nodes (that list is full)'
-            : myNodes === 'failed' ? 'not added to My nodes (CoreScope could not update it)'
-            : '';
-          log('account: linked ' + (name || pubkey.slice(0, 12) + '…') + ' to ' + (st.session.displayName || 'this account')
-            + (note ? ' — ' + note : ''), note ? 'st' : 'ok');
-          return setLink(pubkey, name, 'linked', note);
+          log('account: linked ' + (name || pubkey.slice(0, 12) + '…') + ' to ' + (st.session.displayName || 'this account'), 'ok');
+          return setLink(pubkey, name, 'linked');
         }
         if (res.status === 429) return wait(pubkey, name, 'CoreScope is rate limiting (HTTP 429)');
         if (res.status === 410 && attempt === 1) {

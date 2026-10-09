@@ -347,7 +347,7 @@ async function linkable({ companions = [], challenge, link, requireLinked = fals
     'GET /api/config/client': () => res(200, { userManagement: { enabled: true, companionLinking: true }, ...(requireLinked ? { clientRxRequireLinkedCompanion: true } : {}) }),
     'GET /api/account/companions': () => res(200, companions),
     'POST /api/account/companions/challenge': challenge || (() => { n++; return res(200, { challenge: 'c' + n, expiresAt: 0 }); }),
-    'POST /api/account/companions': link || ((req) => res(200, { pubkey: req.body.pubkey, name: req.body.name, linkedAt: 1, myNodes: 'added' })),
+    'POST /api/account/companions': link || ((req) => res(200, { pubkey: req.body.pubkey, name: req.body.name, linkedAt: 1 })),
   };
   const t = make({ routes, storage: memStorage(session()) });
   await t.account.discover();
@@ -479,18 +479,16 @@ test('a 401 during linking logs out and stops', async () => {
   assert.strictEqual(t.account.loggedIn, false);
 });
 
-test('myNodes "full" or "failed" is a note on a successful link, not a failure', async () => {
-  for (const myNodes of ['full', 'failed']) {
-    const t = await linkable({ link: (req) => res(200, { pubkey: req.body.pubkey, name: 'obs', linkedAt: '2026-10-08T10:00:00Z', myNodes }) });
-    assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'linked', myNodes);
-    assert.strictEqual(t.account.isLinked(PK), true);
-    assert.strictEqual(t.account.linkState.status, 'linked');
-    assert.match(t.account.linkState.reason, /not added to My nodes/);
-    assert.ok(t.logs.some((l) => /My nodes/.test(l)));
+// CoreScope no longer adds a linked companion to My nodes (a companion is not a node
+// to monitor), and the link answer has no myNodes field. One from an earlier build of
+// the server is ignored: the card never talks about My nodes.
+test('a link answer is linked with no note, also when it still carries myNodes', async () => {
+  for (const extra of [{}, { myNodes: 'full' }, { myNodes: 'failed' }]) {
+    const t = await linkable({ link: (req) => res(200, { pubkey: req.body.pubkey, name: 'obs', linkedAt: '2026-10-08T10:00:00Z', ...extra }) });
+    assert.strictEqual(await t.account.link({ pubkey: PK, name: 'obs', sign: signer() }), 'linked');
+    assert.strictEqual(t.account.linkState.reason, '', JSON.stringify(extra));
+    assert.ok(t.logs.every((l) => !/My nodes/.test(l)));
   }
-  const ok = await linkable();
-  await ok.account.link({ pubkey: PK, name: 'obs', sign: signer() });
-  assert.strictEqual(ok.account.linkState.reason, '', '"added" carries no note');
 });
 
 test('429 (rate limited) waits for the next attempt instead of failing', async () => {
@@ -527,7 +525,7 @@ test('a fresh link holds the queue until the ingestor can have seen it, then lif
       'GET /api/config/client': () => res(200, { userManagement: { enabled: true, companionLinking: true }, clientRxRequireLinkedCompanion: true }),
       'GET /api/account/companions': () => res(200, []),
       'POST /api/account/companions/challenge': () => res(200, { challenge: 'c1' }),
-      'POST /api/account/companions': (req) => res(200, { pubkey: req.body.pubkey, name: 'obs', myNodes: 'added' }),
+      'POST /api/account/companions': (req) => res(200, { pubkey: req.body.pubkey, name: 'obs' }),
     },
   });
   await t.account.discover();
@@ -641,7 +639,7 @@ test('a link left waiting is retried later, and stops once linked', async () => 
       ...ENABLED,
       'GET /api/account/companions': () => res(200, []),
       'POST /api/account/companions/challenge': () => (fail ? res(429, { error: 'slow down' }) : res(200, { challenge: 'c1' })),
-      'POST /api/account/companions': (req) => res(200, { pubkey: req.body.pubkey, name: 'obs', myNodes: 'added' }),
+      'POST /api/account/companions': (req) => res(200, { pubkey: req.body.pubkey, name: 'obs' }),
     },
   });
   await t.account.discover();
