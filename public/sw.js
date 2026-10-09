@@ -1,7 +1,7 @@
 // Minimal service worker: makes the app installable and lets the shell load
 // offline. Network-first (always fresh online), cache fallback (offline).
 // Only the static app assets go through fetch; MQTT runs over WSS (not cached).
-const CACHE = 'coredrive-rx-v53';
+const CACHE = 'coredrive-rx-v54';
 
 // config.json is deliberately NEVER cached, in either direction. It is
 // per-deployment runtime config, and a stale copy is worse than none: flags added
@@ -13,8 +13,16 @@ const CACHE = 'coredrive-rx-v53';
 // out-of-date config" is not.
 const NEVER_CACHED = ['/config.json'];
 
+// CoreScope's account and config endpoints (src/account.js) are live state, and the
+// account ones carry a user's data under a bearer token: never cached, never served
+// stale, on any origin. /api/nodes/resolve (names) keeps its offline fallback.
+const NEVER_CACHED_PREFIXES = ['/api/config/', '/api/auth/', '/api/account/'];
+
 function neverCached(url) {
-  try { return NEVER_CACHED.includes(new URL(url).pathname); } catch { return false; }
+  try {
+    const p = new URL(url).pathname;
+    return NEVER_CACHED.includes(p) || NEVER_CACHED_PREFIXES.some((x) => p.startsWith(x));
+  } catch { return false; }
 }
 
 self.addEventListener('install', () => self.skipWaiting());

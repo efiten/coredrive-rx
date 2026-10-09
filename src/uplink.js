@@ -68,7 +68,10 @@ export function uplinkWarning(state, connected = true) {
 // uplink sitting on hundreds of buffered records, and its recovery branch was
 // skipped in exactly the case that needed it (no publisher at all).
 //   { uplink, pending, published } → { message, level, reconnect, reloadConfig }
-export function pushOutcome({ uplink, pending, published }) {
+// held: the last drain pass was held because CoreScope only accepts data from linked
+// companions and this one is not linked (src/drain.js). Without it, a held queue read
+// as "the broker accepted nothing", which sends a diagnosis to the wrong place.
+export function pushOutcome({ uplink, pending, published, held = false }) {
   const recs = (n) => n + ' record(s)';
   if (uplink === 'no-config') {
     return { message: 'config.json was never loaded — ' + recs(pending) + ' buffered; needs internet to fetch settings, retrying…', level: 'no', reconnect: false, reloadConfig: true };
@@ -78,6 +81,9 @@ export function pushOutcome({ uplink, pending, published }) {
   }
   if (uplink === 'down') {
     return { message: 'CoreScope not connected — ' + recs(pending) + ' buffered; forcing reconnect…', level: 'no', reconnect: true, reloadConfig: false };
+  }
+  if (held && pending > 0) {
+    return { message: recs(pending) + ' held — this CoreScope only accepts data from companions linked to an account; log in under Settings → CoreScope account', level: 'no', reconnect: false, reloadConfig: false };
   }
   if (published > 0) {
     return { message: 'pushed ' + recs(published), level: 'ok', reconnect: false, reloadConfig: false };

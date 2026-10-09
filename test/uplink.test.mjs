@@ -283,3 +283,17 @@ test('buildLogHeader omits the ask rows when nothing passed them', () => {
   });
   assert.doesNotMatch(h, /asks/);
 });
+
+test('a push held for an unlinked companion says so instead of blaming the broker', () => {
+  const r = pushOutcome({ uplink: 'ok', pending: 7, published: 0, held: true });
+  assert.match(r.message, /7 record/);
+  assert.match(r.message, /linked/);
+  assert.doesNotMatch(r.message, /broker accepted nothing/);
+  assert.strictEqual(r.level, 'no');
+  assert.strictEqual(r.reconnect, false);
+  assert.strictEqual(r.reloadConfig, false);
+});
+
+test('held with an empty queue is still "the queue is empty"', () => {
+  assert.match(pushOutcome({ uplink: 'ok', pending: 0, published: 0, held: true }).message, /queue is empty/);
+});

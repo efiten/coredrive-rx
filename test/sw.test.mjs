@@ -106,3 +106,16 @@ test('a successful asset fetch is cached for offline use', async () => {
   assert.strictEqual(res, fresh);
   assert.deepStrictEqual(cache.store['https://x/assets/index-abc.js'], { kind: 'fresh-copy' });
 });
+
+test('CoreScope account and config endpoints bypass the worker on any origin', async () => {
+  const { listeners } = loadSw();
+  for (const u of [
+    'https://cs.example/api/config/client',
+    'https://cs.example/api/account/companions',
+    'https://x/api/auth/me',
+  ]) {
+    assert.strictEqual(await fire(listeners, makeReq(u, { mode: 'cors' })), PASSTHROUGH, u);
+  }
+  // Names still go through the worker (offline fallback unchanged).
+  assert.notStrictEqual(await fire(listeners, makeReq('https://cs.example/api/nodes/resolve?prefix=ab', { mode: 'cors' })), PASSTHROUGH);
+});
