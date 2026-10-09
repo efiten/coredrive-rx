@@ -58,6 +58,21 @@ function positiveSeconds(value, fallback) {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+// originOf returns scheme://host[:port] of an http(s) URL, or '' for anything else.
+// An origin never carries a path or a trailing slash, so `origin + '/api/…'` is always
+// well-formed. Used for corescopeUrl, which the account feature (src/account.js)
+// binds its token to.
+export function originOf(value) {
+  const s = String(value ?? '').trim();
+  if (!s) return '';
+  try {
+    const u = new URL(s);
+    return u.protocol === 'https:' || u.protocol === 'http:' ? u.origin : '';
+  } catch (e) {
+    return '';
+  }
+}
+
 export function normalizeConfig(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config.json: expected a JSON object');
   const c = {
@@ -65,6 +80,11 @@ export function normalizeConfig(raw) {
     mqttUsername: String(raw.mqttUsername || '').trim(),
     mqttPassword: raw.mqttPassword == null ? '' : String(raw.mqttPassword),
     resolveUrl: String(raw.resolveUrl || '').trim(),
+    // CoreScope's own origin, for login and companion linking (src/account.js).
+    // Optional: absent or unusable falls back to the origin of resolveUrl, and both
+    // empty turns the account feature off. Normalized here so nothing downstream ever
+    // builds a URL out of a path or a trailing slash.
+    corescopeUrl: originOf(raw.corescopeUrl) || originOf(raw.resolveUrl),
     // Absent → FEATURE_DEFAULTS; present → coerced. See FEATURE_DEFAULTS above for
     // why the two logging flags and the transmitting one differ.
     fullRfLog: featureEnabled(raw, 'fullRfLog'),
