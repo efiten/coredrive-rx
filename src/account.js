@@ -1,0 +1,212 @@
+// CoreScope account for CoreDrive RX: discovery (the gate), device-token login, the
+// linked-companions cache, companion auto-linking and the "hold until linked" flag.
+//
+// No DOM here. src/app.js wires it and src/accountview.js turns its state into the
+// Settings card. fetch, storage, timers and the log are injected so node --test can
+// drive every path. The HTTP contract is CoreScope's
+// docs/specs/2026-10-08-companion-linking-design.md (user management, sub-project F).
+//
+// Everything is keyed on ONE origin, config.corescopeUrl (src/config.js). A token or a
+// remembered flag stored for any other origin is ignored, because corescopeUrl can
+// change and a token means nothing to another server.
+//
+// The token never leaves this module except in the Authorization header: it is not
+// logged, not returned by any getter and not rendered.
+
+export const TOKEN_KEY = 'coredrive-rx.cs-token';
+export const REQUIRE_KEY = 'coredrive-rx.cs-require-linked';
+export const DISCOVER_TIMEOUT_MS = 5000;
+export const REQUEST_TIMEOUT_MS = 10000;
+
+// NetworkError: no HTTP answer at all (offline, DNS, CORS block, timeout). Every HTTP
+// answer, error codes included, is NOT a NetworkError.
+export class NetworkError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'NetworkError';
+  }
+}
+
+// transientError marks a failure that says nothing about the companion or the account,
+// such as the BLE link dropping mid-sign. The link flow parks it as 'waiting' and tries
+// again on the next connect or `online` event instead of reporting "Linking failed".
+export function transientError(message) {
+  const e = new Error(message);
+  e.transient = true;
+  return e;
+}
+
+// linkMessage is what the companion signs: the UTF-8 bytes of
+// "corescope-link:" + host + ":" + challenge, host being the host of corescopeUrl.
+export function linkMessage(host, challenge) {
+  return new TextEncoder().encode('corescope-link:' + host + ':' + challenge);
+}
+
+// deviceNameFrom turns a user agent into the short label CoreScope shows under Devices,
+// e.g. "Android · Chrome". Order matters: Edge and Samsung Internet also say "Chrome",
+// Android also says "Linux", and iOS also says "Mac OS X".
+export function deviceNameFrom(ua) {
+  const s = String(ua || '');
+  const platform = /Android/i.test(s) ? 'Android'
+    : /iPhone|iPad|iPod/i.test(s) ? 'iOS'
+    : /Windows/i.test(s) ? 'Windows'
+    : /Macintosh|Mac OS X/i.test(s) ? 'macOS'
+    : /Linux/i.test(s) ? 'Linux'
+    : 'Unknown';
+  const browser = /Bluefy/i.test(s) ? 'Bluefy'
+    : /Edg\//.test(s) ? 'Edge'
+    : /SamsungBrowser/i.test(s) ? 'Samsung Internet'
+    : /Chrome\/|CriOS/.test(s) ? 'Chrome'
+    : /Firefox\/|FxiOS/.test(s) ? 'Firefox'
+    : /Safari\//.test(s) ? 'Safari'
+    : 'Browser';
+  return platform + ' · ' + browser;
+}
+
+function errText(e) { return e && e.message ? e.message : String(e); }
+
+function readJSON(storage, key) {
+  try {
+    const s = storage.getItem(key);
+    return s ? JSON.parse(s) : null;
+  } catch (e) {
+    return null;
+  }
+}
+function writeJSON(storage, key, value) { try { storage.setItem(key, JSON.stringify(value)); } catch (e) { /* storage full or blocked: in-memory state still holds */ } }
+function removeKey(storage, key) { try { storage.removeItem(key); } catch (e) { /* nothing to do */ } }
+
+function normCompanions(list) {
+  return (Array.isArray(list) ? list : [])
+    .filter((c) => c && typeof c.pubkey === 'string' && c.pubkey)
+    .map((c) => ({ pubkey: c.pubkey.toLowerCase(), name: String(c.name || '') }));
+}
+
+// loadSession returns { origin, token, displayName, companions } stored for `origin`,
+// or null. A session stored for another origin is dropped on sight.
+export function loadSession(storage, origin) {
+  const rec = readJSON(storage, TOKEN_KEY);
+  if (!rec) return null; // nothing stored, or unreadable: logged out
+  if (rec.origin !== origin || typeof rec.token !== 'string' || !rec.token) {
+    removeKey(storage, TOKEN_KEY);
+    return null;
+  }
+  return { origin, token: rec.token, displayName: String(rec.displayName || ''), companions: normCompanions(rec.companions) };
+}
+export function saveSession(storage, s) { writeJSON(storage, TOKEN_KEY, s); }
+export function clearSession(storage) { removeKey(storage, TOKEN_KEY); }
+
+// loadRequireLinked: the hold flag as THIS origin last answered it; false when it never
+// answered ("a deployment that was never reached means not required").
+export function loadRequireLinked(storage, origin) {
+  const rec = readJSON(storage, REQUIRE_KEY);
+  return !!(rec && rec.origin === origin && rec.value === true);
+}
+export function saveRequireLinked(storage, origin, value) {
+  writeJSON(storage, REQUIRE_KEY, { origin, value: value === true });
+}
+
+// createAccount builds the account for one CoreScope origin.
+//
+// deps:
+//   baseUrl       the CoreScope origin (config.corescopeUrl), non-empty
+//   fetch         (url, opts) => Promise<Response>
+//   storage       { getItem, setItem, removeItem } (localStorage in the app)
+//   setTimeout / clearTimeout   optional, default the globals
+//   log           (msg, level) optional
+//   onChange      () => void, optional; called whenever anything shown on the card changes
+export function createAccount({
+  baseUrl, fetch: fetchFn, storage,
+  setTimeout: setT = globalThis.setTimeout, clearTimeout: clearT = globalThis.clearTimeout,
+  log = () => {}, onChange = () => {},
+}) {
+  const host = new URL(baseUrl).host;
+  const IDLE = Object.freeze({ pubkey: '', name: '', status: 'idle', reason: '' });
+  const st = {
+    enabled: false,
+    discovered: false,
+    requireLinked: loadRequireLinked(storage, baseUrl),
+    session: loadSession(storage, baseUrl),
+    link: { ...IDLE },
+    blocked: new Set(), // pubkeys with a definite link failure on this connection
+    inFlight: null,     // the one link attempt allowed at a time
+  };
+  const changed = () => { try { onChange(); } catch (e) { /* a render error must not break the flow */ } };
+
+  // withTimeout runs start(signal) and rejects with NetworkError after `ms`, aborting
+  // the request. start is called synchronously, so a fire-and-forget caller (logout)
+  // has issued its request by the time it returns.
+  function withTimeout(start, ms) {
+    const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setT(() => {
+        if (ctl) ctl.abort();
+        reject(new NetworkError('timed out after ' + ms / 1000 + ' s'));
+      }, ms);
+    });
+    let started;
+    try { started = Promise.resolve(start(ctl ? ctl.signal : undefined)); } catch (e) { started = Promise.reject(e); }
+    return Promise.race([started, timeout]).finally(() => clearT(timer));
+  }
+
+  function isLinked(pubkey) {
+    const pk = String(pubkey || '').toLowerCase();
+    return !!pk && !!st.session && st.session.companions.some((c) => c.pubkey === pk);
+  }
+
+  // shouldHold: CoreScope drops data from unlinked companions, so do not send it. Off
+  // (the default) means publishing never waits on the account.
+  function shouldHold(pubkey) {
+    return st.requireLinked && !isLinked(pubkey);
+  }
+
+  // discover fetches /api/config/client once. Only userManagement.enabled === true turns
+  // the feature on; every other outcome is off, with one log line saying why. Any parsed
+  // answer is also a fresh reading of the hold flag; no answer keeps the last known one.
+  async function discover() {
+    let json = null;
+    let reason = '';
+    try {
+      const r = await withTimeout((signal) => fetchFn(baseUrl + '/api/config/client', { signal, cache: 'no-store' }), DISCOVER_TIMEOUT_MS);
+      if (r.status !== 200) reason = 'answered HTTP ' + r.status;
+      else {
+        try { json = await r.json(); } catch (e) { reason = 'answered something that is not JSON'; }
+      }
+    } catch (e) {
+      reason = 'is unreachable (' + errText(e) + '); if CoreScope runs on another origin than this app, its corsAllowedOrigins must list this origin';
+    }
+    st.discovered = !reason;
+    if (!reason) {
+      st.requireLinked = !!json && json.clientRxRequireLinkedCompanion === true;
+      saveRequireLinked(storage, baseUrl, st.requireLinked);
+      const um = json && json.userManagement;
+      if (!um || typeof um !== 'object') reason = 'has no userManagement block (older CoreScope, or user management off)';
+      else if (um.enabled !== true) reason = 'has userManagement.enabled off';
+    }
+    st.enabled = !reason;
+    if (st.enabled) {
+      log('account: ' + baseUrl + ' has user management — CoreScope login available'
+        + (st.requireLinked ? '; it only accepts data from linked companions' : ''), 'ok');
+    } else {
+      log('account: off — ' + baseUrl + ' ' + reason
+        + (st.requireLinked ? '; uploads from unlinked companions stay held (last known setting)' : ''), 'st');
+    }
+    changed();
+    return { enabled: st.enabled, requireLinked: st.requireLinked, reason };
+  }
+
+  const api = {
+    get enabled() { return st.enabled; },
+    get discovered() { return st.discovered; },
+    get requireLinked() { return st.requireLinked; },
+    get loggedIn() { return !!st.session; },
+    get displayName() { return st.session ? st.session.displayName : ''; },
+    get companions() { return st.session ? st.session.companions.map((c) => ({ ...c })) : []; },
+    get linkState() { return { ...st.link }; },
+    discover,
+    isLinked,
+    shouldHold,
+  };
+  return api;
+}
