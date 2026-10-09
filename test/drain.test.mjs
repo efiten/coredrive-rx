@@ -199,3 +199,45 @@ test('serialiseDrain releases the slot after a rejection, and propagates it', as
   assert.strictEqual(await drain(), 'ok', 'the slot must be free again');
   assert.strictEqual(starts, 2);
 });
+
+// --- hold until linked (src/account.js shouldHold) ---------------------------
+
+test('a held pass publishes nothing and leaves the queue exactly as it was', async () => {
+  const q = fakeQueue(4);
+  let reads = 0;
+  const takeAll = q.takeAll.bind(q);
+  q.takeAll = async () => { reads++; return takeAll(); };
+  const p = fakePublisher({});
+  const r = await drainOnce({ ...base(q, p), hold: () => true });
+  assert.deepStrictEqual(r, { published: 0, committed: 0, skipped: 0, stopped: 'held' });
+  assert.strictEqual(p.calls, 0);
+  assert.strictEqual(reads, 0, 'the queue is not even read');
+  assert.deepStrictEqual(q.removals, []);
+  assert.deepStrictEqual(q.remaining(), [1, 2, 3, 4]);
+});
+
+test('without a hold function the pass is exactly as before', async () => {
+  const q = fakeQueue(3);
+  const r = await drainOnce(base(q, fakePublisher({})));
+  assert.strictEqual(r.published, 3);
+  assert.strictEqual(r.stopped, 'done');
+});
+
+test('a hold that lifts releases the whole queue on the next pass', async () => {
+  const q = fakeQueue(5);
+  const p = fakePublisher({});
+  let held = true;
+  const hold = () => held;
+  assert.strictEqual((await drainOnce({ ...base(q, p), hold })).stopped, 'held');
+  held = false;
+  const r = await drainOnce({ ...base(q, p), hold });
+  assert.strictEqual(r.published, 5);
+  assert.deepStrictEqual(q.remaining(), []);
+});
+
+test('a broker link that is down still reports "link", not "held"', async () => {
+  const q = fakeQueue(2);
+  const p = fakePublisher({});
+  p.up = false;
+  assert.strictEqual((await drainOnce({ ...base(q, p), hold: () => true })).stopped, 'link');
+});

@@ -32,13 +32,21 @@ export const POISON_AFTER = 3;  // consecutive failures before a record is stepp
 //   failures  Map<id, count> of consecutive publish failures, owned by the caller so it
 //             survives across drains (a poison record must be recognised over time)
 //   log       (msg, level) optional
+//   hold      () => boolean, optional. True while CoreScope accepts RX data only from
+//             linked companions and this one is not linked (src/account.js shouldHold).
+//             CoreScope would drop that data AFTER the broker acknowledged it, so the
+//             pass publishes nothing and leaves the queue untouched; capture goes on.
+//             Absent or false — the default — and publishing is exactly as before.
 //
 // Returns { published, committed, skipped, stopped } where `stopped` says why the
-// pass ended: 'done' | 'link' | 'error'.
-export async function drainOnce({ queue, publisher, pubkey, name, failures, log }) {
+// pass ended: 'done' | 'link' | 'error' | 'held'.
+export async function drainOnce({ queue, publisher, pubkey, name, failures, log, hold }) {
   const note = log || (() => {});
   if (!(publisher && publisher.connected() && pubkey)) {
     return { published: 0, committed: 0, skipped: 0, stopped: 'link' };
+  }
+  if (hold && hold()) {
+    return { published: 0, committed: 0, skipped: 0, stopped: 'held' };
   }
 
   const rows = await queue.takeAll();
