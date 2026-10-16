@@ -13,7 +13,7 @@
   "_nodeNames": "For a repeater CoreScope has no name for, asks the repeater itself (ANON_REQ_TYPE_OWNER) and publishes the name on /names. Makes discover replies carry the full pubkey (+24 bytes each).",
   "nodeNames": true,
   "verifyAdverts": false,
-  "_uplinkPing": "Off unless set. Sends a small message on uplinkChannel and listens for a repeater re-broadcasting it, so CoreScope can map where this companion is heard. Every ping is a flood the region carries; pacing below. uplinkScope is a region name (e.g. \"be\"); empty uses the companion's own default scope. Needs a free channel slot on the companion.",
+  "_uplinkPing": "Off unless set. Sends a small message on uplinkChannel and listens for a repeater re-broadcasting it, so CoreScope can map where this companion is heard. Every ping is a flood the region carries; pacing below. uplinkScope is a region or a preference list (e.g. \"de,nl,be\"): each ping takes the region most repeaters heard around you forward, un-scoped when they only forward *, the companion's default scope when nothing is known; empty always uses the companion's default. Regions come from uplinkRegionsUrl (default: corescopeUrl + /api/nodes/declared-regions). Needs a free channel slot on the companion.",
   "uplinkPing": false,
   "uplinkChannel": "#coredrive",
   "uplinkScope": "",

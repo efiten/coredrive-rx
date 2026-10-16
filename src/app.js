@@ -42,6 +42,10 @@ import {
 import { pingDecision, pruneCells, skipCell } from './uplinksched.js';
 import { channelKey, channelHash, PAYLOAD_TYPE_GRP_TXT } from './grptxt.js';
 import {
+  parseScopeList, chooseScope, mergeRegionTable, pruneHeard, buildUnscopedFrame, buildGetDefaultScope,
+  parseDefaultScope, RESP_CODE_DEFAULT_FLOOD_SCOPE, DEFAULT_SCOPE_MIN_FW, UNSCOPED_MIN_FW,
+} from './autoscope.js';
+import {
   enqueue, dueToSend, takeNext, registerOutstanding, matchOutstanding, pruneOutstanding,
   markAsked, newSignalRange, noteSignal, holdUntilReply, releaseHold,
 } from './regionsched.js';
@@ -126,12 +130,16 @@ const state = {
   // Uplink ping (src/uplinkping.js). Set up once per connection, when config turns it on.
   //   maxChannels  channel slots the companion has (DEVICE_INFO)
   //   idx/key/hashByte  the ping channel's slot and crypto, once ready
-  //   scopeKey     region key the ping is sent under, or null for the companion default
+  //   prefs        config.uplinkScope as a preference list (src/autoscope.js)
+  //   companionDefault  the companion's own default scope, '' none, null unknown
+  //   heard        key -> last time heard directly, for the scope choice
+  //   serverRegions / regionsAt  CoreScope's declared regions and when they were fetched
   //   window       the ping whose echoes are being collected, or null
   //   cells        skip cells pinged recently, persisted across sessions
   ping: {
     maxChannels: null, setupTried: false, ready: false, running: false, status: '',
-    idx: null, key: null, hashByte: null, scopeKey: null, scopeName: '',
+    idx: null, key: null, hashByte: null, prefs: [], companionDefault: null,
+    heard: new Map(), serverRegions: [], regionsAt: 0, regionsFetching: false, scopeKeys: new Map(),
     window: null, last: null, sentTimes: [], cells: loadPingCells(),
     sent: 0, echoed: 0, failed: 0,
   },
@@ -649,8 +657,8 @@ async function setupPingChannel() {
   p.ready = false;
   const off = (why) => { p.status = 'off — ' + why; dbg('ping: ' + p.status, 'no'); };
   if (!p.maxChannels) { off('companion did not report its channel slots'); return; }
-  const scopeName = scopeKeyName(cfg.uplinkScope);
-  if (scopeName && (state.fwVer == null || state.fwVer < SCOPE_MIN_FW)) { off('a ping scope needs firmware v' + SCOPE_MIN_FW + '+'); return; }
+  const prefs = parseScopeList(cfg.uplinkScope);
+  if (prefs.length && (state.fwVer == null || state.fwVer < SCOPE_MIN_FW)) { off('a ping scope needs firmware v' + SCOPE_MIN_FW + '+'); return; }
   try {
     await acquireRadio();
   } catch (e) {
@@ -677,12 +685,15 @@ async function setupPingChannel() {
     p.idx = slot.idx;
     p.key = key;
     p.hashByte = await channelHash(key);
-    // A region key is derived the same way as a hashtag channel key: SHA-256 of the
-    // '#'-prefixed name, first 16 bytes (helpers/TransportKeyStore.cpp).
-    p.scopeName = scopeName;
-    p.scopeKey = scopeName ? await channelKey(scopeName) : null;
+    p.prefs = prefs;
+    p.companionDefault = null;
+    if (state.fwVer >= DEFAULT_SCOPE_MIN_FW) {
+      p.companionDefault = parseDefaultScope(await companionReply(buildGetDefaultScope(), [RESP_CODE_DEFAULT_FLOOD_SCOPE, RESP_CODE_ERR]));
+    }
     p.ready = true;
-    p.status = 'on — ' + cfg.uplinkChannel + ' in slot ' + slot.idx + ', scope ' + (scopeName || 'companion default');
+    const def = p.companionDefault == null ? 'unknown' : p.companionDefault || 'none';
+    p.status = 'on — ' + cfg.uplinkChannel + ' in slot ' + slot.idx + ', scope '
+      + (prefs.length ? 'auto from ' + prefs.join(',') : 'companion default') + ' (companion default ' + def + ')';
     dbg('ping: ' + p.status, 'st');
   } catch (e) {
     off(e.message);
@@ -699,9 +710,56 @@ function pingTick(now) {
   els('btnPingNow').style.display = featureEnabled(cfg, 'uplinkPing') && p.ready ? '' : 'none';
   if (!featureEnabled(cfg, 'uplinkPing')) return;
   if (!p.setupTried) { setupPingChannel(); return; }
+  if (p.ready && p.prefs.length) refreshServerRegions(now);
   if (!p.ready || p.running || p.window || state.signing || state.regions.busy || state.paused) return;
   const d = pingDecision({ now, fix: currentFix(), last: p.last, sentTimes: p.sentTimes, recentCells: p.cells, cfg });
   if (d.send) sendPing(now, d.cell);
+}
+
+// refreshServerRegions fetches CoreScope's declared regions once per
+// SERVER_REGIONS_MS. A failure keeps the last list and retries after a minute: the
+// scope choice then runs on that plus this session's own answers, and without
+// either it falls back to the companion default.
+const SERVER_REGIONS_MS = 30 * 60000;
+function refreshServerRegions(now) {
+  const p = state.ping;
+  const url = getConfig().uplinkRegionsUrl;
+  if (!url || p.regionsFetching || now - p.regionsAt < SERVER_REGIONS_MS) return;
+  p.regionsFetching = true;
+  fetch(url, { cache: 'no-store' })
+    .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then((j) => {
+      p.serverRegions = Array.isArray(j && j.nodes) ? j.nodes : [];
+      p.regionsAt = now;
+      dbg('ping: declared regions of ' + p.serverRegions.length + ' repeaters from CoreScope', 'st');
+    })
+    .catch((e) => { p.regionsAt = now - SERVER_REGIONS_MS + 60000; dbg('ping: declared regions fetch failed (' + e.message + '), retry in 1 min', 'no'); })
+    .finally(() => { p.regionsFetching = false; });
+}
+
+// pingScope decides how the next ping goes out (src/autoscope.js). An un-scoped
+// choice needs the explicit firmware variant unless the companion has no default
+// scope, in which case sending without an override is already un-scoped.
+async function pingScope(now) {
+  const p = state.ping;
+  if (!p.prefs.length) return { mode: 'default', scope: p.companionDefault || '', reason: 'no uplinkScope configured' };
+  const c = chooseScope({
+    prefs: p.prefs, companionDefault: p.companionDefault,
+    heardKeys: [...pruneHeard(p.heard, now).keys()],
+    table: mergeRegionTable(p.serverRegions, state.regions.answers),
+  });
+  if (c.mode === 'unscoped' && p.companionDefault === '') return { ...c, mode: 'default' };
+  if (c.mode === 'unscoped' && !(state.fwVer >= UNSCOPED_MIN_FW)) {
+    return { mode: 'default', scope: p.companionDefault || '', reason: c.reason + '; unscoped needs firmware v' + UNSCOPED_MIN_FW + '+' };
+  }
+  if (c.mode === 'scope') {
+    // A region key is derived the same way as a hashtag channel key: SHA-256 of the
+    // '#'-prefixed name, first 16 bytes (helpers/TransportKeyStore.cpp).
+    const name = scopeKeyName(c.scope);
+    if (!p.scopeKeys.has(name)) p.scopeKeys.set(name, await channelKey(name));
+    c.key = p.scopeKeys.get(name);
+  }
+  return c;
 }
 
 async function sendPing(now, cell) {
@@ -718,10 +776,13 @@ async function sendPing(now, cell) {
   }
   let sent = false;
   let scoped = false;
+  let choice;
   try {
-    if (p.scopeKey) {
-      scoped = replyOk(await companionReply(buildScopeFrame(p.scopeKey), [RESP_CODE_OK, RESP_CODE_ERR]));
-      if (!scoped) { p.failed++; dbg('ping: scope ' + p.scopeName + ' not set — ping not sent', 'no'); return; }
+    choice = await pingScope(now);
+    if (choice.mode !== 'default') {
+      const frame = choice.mode === 'scope' ? buildScopeFrame(choice.key) : buildUnscopedFrame();
+      scoped = replyOk(await companionReply(frame, [RESP_CODE_OK, RESP_CODE_ERR]));
+      if (!scoped) { p.failed++; dbg('ping: scope ' + (choice.scope || 'unscoped') + ' not set — ping not sent', 'no'); return; }
     }
     sent = replyOk(await companionReply(buildChannelMessage(p.idx, Math.floor(Date.now() / 1000), pingText(tag)), [RESP_CODE_OK, RESP_CODE_ERR]));
   } finally {
@@ -739,8 +800,10 @@ async function sendPing(now, cell) {
   p.last = { at: now, lat: fix.lat, lon: fix.lon };
   p.cells = pruneCells({ ...p.cells, [cell]: now }, now, cfg.uplinkSkipDays);
   savePingCells(p.cells);
-  p.window = { tag, at: new Date(now).toISOString(), fix, echoes: [], hash: null, channel: cfg.uplinkChannel, scope: p.scopeName };
-  dbg('ping → ' + cfg.uplinkChannel + ' "' + pingText(tag) + '"' + (p.scopeName ? ' scope ' + p.scopeName : '')
+  const scope = choice.scope ? scopeKeyName(choice.scope) : '';
+  p.window = { tag, at: new Date(now).toISOString(), fix, echoes: [], hash: null, channel: cfg.uplinkChannel, scope };
+  dbg('ping → ' + cfg.uplinkChannel + ' "' + pingText(tag) + '" ' + (scope ? 'scope ' + scope : 'unscoped')
+    + (choice.mode === 'default' ? ' (companion default)' : '') + ' — ' + choice.reason
     + ' (' + p.sentTimes.length + ' this hour)', 'tx');
   setTimeout(closePingWindow, PING_ECHO_WINDOW_MS);
 }
@@ -1373,6 +1436,7 @@ async function processFrame(dv) {
   }
 
   noteHeard(hk.heardKey, hk.heardKeyLen, f.snr, f.rssi, hk.src); // show in the list even without a GPS fix
+  if (hk.src === 'advert' || hk.src === 'discover' || hk.src === 'rxlog') state.ping.heard.set(hk.heardKey.toLowerCase(), Date.now());
   state.rxTotal++;
   state.rxTimes.push(Date.now());
   addNodeKey(state.nodeKeys, hk.heardKey);
@@ -1713,7 +1777,8 @@ async function disconnectAll(keepProgress) {
   // gone, and a tag from this session must never match one from the next.
   state.regions.outstanding.clear();
   state.names.outstanding.clear();
-  Object.assign(state.ping, { setupTried: false, ready: false, running: false, window: null, maxChannels: null, status: '' });
+  Object.assign(state.ping, { setupTried: false, ready: false, running: false, window: null, maxChannels: null, status: '', companionDefault: null });
+  state.ping.heard.clear();
   state.regions.queue.length = 0;
   // A contact left zero-hop here is exactly what the localStorage crash-safety record
   // covers — leave it in place (do NOT restore over a transport that's gone, and do NOT
