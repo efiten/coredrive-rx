@@ -13,7 +13,7 @@ import {
 // failures made the case for reading silence as "on": a config cached before these
 // keys existed reported the features off while the served file said on, and that is
 // indistinguishable from the features being broken. An explicit `false` still wins.
-export const FEATURE_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: true, nodeNames: true, verifyAdverts: false };
+export const FEATURE_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: true, nodeNames: true, verifyAdverts: false, uplinkPing: false };
 
 // NO_CONFIG_DEFAULTS applies when NO config loaded at all. The two logging features
 // stay on: data never collected is gone for good, while data collected and discarded
@@ -26,7 +26,7 @@ export const FEATURE_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscov
 // requester and type, so one client asking once a minute already claims most of that
 // budget. Collecting on an assumption spends our own bandwidth; transmitting on one
 // spends a stranger's airtime.
-export const NO_CONFIG_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: false, nodeNames: false, verifyAdverts: false };
+export const NO_CONFIG_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: false, nodeNames: false, verifyAdverts: false, uplinkPing: false };
 
 // nodeNames transmits too (an ANON_REQ_TYPE_OWNER ask, and full-pubkey discover
 // replies), so it follows regionDiscovery in both tables for the same reason.
@@ -121,6 +121,16 @@ export function normalizeConfig(raw) {
     //                        one this encounter already spent an ask on, to buy one
     //                        extra ask. Set from one field case, so it is a knob.
     regionBonusSnrDb: positiveSeconds(raw.regionBonusSnrDb, DEFAULT_BONUS_SNR_DB),
+    // Uplink ping (src/uplinkping.js): off unless config turns it on, because every
+    // ping is a flood the whole region carries. uplinkScope is a region name ("be");
+    // empty leaves the companion's own default scope in charge.
+    uplinkPing: featureEnabled(raw, 'uplinkPing'),
+    uplinkChannel: String(raw.uplinkChannel || '#coredrive').trim(),
+    uplinkScope: String(raw.uplinkScope || '').trim(),
+    uplinkIntervalSec: positiveSeconds(raw.uplinkIntervalSec, 60),
+    uplinkMinMoveM: positiveSeconds(raw.uplinkMinMoveM, 250),
+    uplinkMaxPerHour: positiveSeconds(raw.uplinkMaxPerHour, 50),
+    uplinkSkipDays: positiveSeconds(raw.uplinkSkipDays, 7),
   };
   if (!c.mqttUrl) throw new Error('config.json: "mqttUrl" is required');
   return c;

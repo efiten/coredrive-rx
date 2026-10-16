@@ -41,7 +41,7 @@ export function requestDeviceInfo(transport, timeoutMs = 6000) {
       const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
       if (b[0] !== RESP_DEVICE_INFO) return;
       cleanup();
-      resolve({ fwVer: b[1], pathHashMode: b.length > 81 ? b[81] : null });
+      resolve({ fwVer: b[1], maxChannels: b.length > 3 ? b[3] : null, pathHashMode: b.length > 81 ? b[81] : null });
     };
     const timer = setTimeout(() => { cleanup(); reject(new Error('DEVICE_INFO timeout')); }, timeoutMs);
     function cleanup() { clearTimeout(timer); transport.offFrame(onFrame); }

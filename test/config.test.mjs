@@ -255,3 +255,18 @@ test('nodeNames transmits, so it follows regionDiscovery: on in an existing conf
   assert.equal(normalizeConfig({ ...base, nodeNames: false }).nodeNames, false);
   assert.equal(featureEnabled(null, 'nodeNames'), false);
 });
+
+test('uplinkPing floods the region, so it is off unless config turns it on, with paced defaults', () => {
+  const base = { mqttUrl: 'wss://b/ws' };
+  const c = normalizeConfig(base);
+  assert.equal(c.uplinkPing, false);
+  assert.equal(featureEnabled(null, 'uplinkPing'), false);
+  assert.equal(c.uplinkChannel, '#coredrive');
+  assert.equal(c.uplinkScope, '');
+  assert.deepEqual([c.uplinkIntervalSec, c.uplinkMinMoveM, c.uplinkMaxPerHour, c.uplinkSkipDays], [60, 250, 50, 7]);
+  const on = normalizeConfig({ ...base, uplinkPing: true, uplinkScope: ' be ', uplinkIntervalSec: 90, uplinkChannel: '#test' });
+  assert.equal(on.uplinkPing, true);
+  assert.equal(on.uplinkScope, 'be');
+  assert.equal(on.uplinkIntervalSec, 90);
+  assert.equal(on.uplinkChannel, '#test');
+});

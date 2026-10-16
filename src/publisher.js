@@ -3,7 +3,8 @@
 // client topics meshcore/client/{PUBLIC_KEY}/packets (receptions),
 // meshcore/client/{PUBLIC_KEY}/rf (RF environment samples),
 // meshcore/client/{PUBLIC_KEY}/regions (region-discovery answers) and
-// meshcore/client/{PUBLIC_KEY}/names (names repeaters gave for themselves).
+// meshcore/client/{PUBLIC_KEY}/names (names repeaters gave for themselves) and
+// meshcore/client/{PUBLIC_KEY}/uplink (uplink pings: was this companion heard).
 import mqtt from 'mqtt';
 
 // KEEPALIVE is set EXPLICITLY rather than inherited. mqtt.js defaults to 60 s and arms
@@ -197,10 +198,30 @@ export class Publisher {
     return p;
   }
 
+  // buildUplinkPayload: one uplink ping. tag is the text sent on the channel, so
+  // CoreScope can find the transmission when it decrypts the channel; pkt_hash is the
+  // packet hash taken from our first echo (absent when no repeater was heard
+  // re-broadcasting it). echoes lists each re-broadcast we heard.
+  static buildUplinkPayload(rxPubkey, rec, name) {
+    const p = {
+      origin_id: rxPubkey,
+      origin: name || undefined,
+      timestamp: rec.at,
+      type: 'UPLINK_PING',
+      tag: rec.tag,
+      channel: rec.channel,
+      scope: rec.scope || undefined,
+      pkt_hash: rec.pkt_hash || undefined,
+      echoes: rec.echoes,
+    };
+    if (rec.lat != null && rec.lon != null) p.gps = { lat: rec.lat, lon: rec.lon, acc_m: rec.acc_m };
+    return p;
+  }
+
   // topicFor / payloadFor dispatch on rec.kind. A record with NO kind is a
   // reception queued before this feature existed — it must keep working.
   static topicFor(rxPubkey, rec) {
-    const suffix = rec.kind === 'rf' ? '/rf' : rec.kind === 'regions' ? '/regions' : rec.kind === 'names' ? '/names' : '/packets';
+    const suffix = rec.kind === 'rf' ? '/rf' : rec.kind === 'regions' ? '/regions' : rec.kind === 'names' ? '/names' : rec.kind === 'uplink' ? '/uplink' : '/packets';
     return 'meshcore/client/' + rxPubkey + suffix;
   }
 
@@ -208,6 +229,7 @@ export class Publisher {
     if (rec.kind === 'rf') return Publisher.buildRfPayload(rxPubkey, rec, name);
     if (rec.kind === 'regions') return Publisher.buildRegionsPayload(rxPubkey, rec, name);
     if (rec.kind === 'names') return Publisher.buildNamesPayload(rxPubkey, rec, name);
+    if (rec.kind === 'uplink') return Publisher.buildUplinkPayload(rxPubkey, rec, name);
     return Publisher.buildPayload(rxPubkey, rec, name);
   }
 

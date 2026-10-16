@@ -218,3 +218,19 @@ test('kind names goes to /names with the NODE_NAME shape, gps only with a fix', 
   const noFix = Publisher.payloadFor('aa11', { ...rec, lat: undefined, lon: undefined, acc_m: undefined }, 'node');
   assert.equal('gps' in noFix, false);
 });
+
+test('kind uplink goes to /uplink with the UPLINK_PING shape; hash and scope only when known', () => {
+  const rec = { kind: 'uplink', at: '2026-10-16T13:00:00.000Z', tag: '0a1b2c3d', channel: '#coredrive', scope: '#be',
+    pkt_hash: '12c82f82df4cc29c', echoes: [{ first_hop: 'c0cd', last_hop: 'c0cd', hops: 1, snr: -4, rssi: -101 }],
+    lat: 50.99, lon: 5.38, acc_m: 5 };
+  assert.equal(Publisher.topicFor('aa11', rec), 'meshcore/client/aa11/uplink');
+  assert.deepEqual(Publisher.payloadFor('aa11', rec, 'node'), {
+    origin_id: 'aa11', origin: 'node', timestamp: rec.at, type: 'UPLINK_PING', tag: '0a1b2c3d',
+    channel: '#coredrive', scope: '#be', pkt_hash: '12c82f82df4cc29c', echoes: rec.echoes,
+    gps: { lat: 50.99, lon: 5.38, acc_m: 5 },
+  });
+  const quiet = Publisher.payloadFor('aa11', { ...rec, scope: '', pkt_hash: null, echoes: [] }, 'node');
+  assert.equal(quiet.pkt_hash, undefined);
+  assert.equal(quiet.scope, undefined);
+  assert.deepEqual(quiet.echoes, []);
+});
