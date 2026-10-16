@@ -122,8 +122,11 @@ export function normalizeConfig(raw) {
     //                        extra ask. Set from one field case, so it is a knob.
     regionBonusSnrDb: positiveSeconds(raw.regionBonusSnrDb, DEFAULT_BONUS_SNR_DB),
     // Uplink ping (src/uplinkping.js): off unless config turns it on, because every
-    // ping is a flood the whole region carries. uplinkScope is a region name ("be");
-    // empty leaves the companion's own default scope in charge.
+    // ping is a flood the whole region carries. uplinkScope is a region or a
+    // preference list ("de,nl,be"): each ping takes the one the repeaters heard around
+    // the companion forward (src/autoscope.js). Empty leaves the companion's own
+    // default scope in charge. uplinkRegionsUrl is where the declared regions come
+    // from, by default CoreScope's /api/nodes/declared-regions.
     uplinkPing: featureEnabled(raw, 'uplinkPing'),
     uplinkChannel: String(raw.uplinkChannel || '#coredrive').trim(),
     uplinkScope: String(raw.uplinkScope || '').trim(),
@@ -132,6 +135,8 @@ export function normalizeConfig(raw) {
     uplinkMaxPerHour: positiveSeconds(raw.uplinkMaxPerHour, 50),
     uplinkSkipDays: positiveSeconds(raw.uplinkSkipDays, 7),
   };
+  c.uplinkRegionsUrl = String(raw.uplinkRegionsUrl || '').trim()
+    || (c.corescopeUrl ? c.corescopeUrl + '/api/nodes/declared-regions' : '');
   if (!c.mqttUrl) throw new Error('config.json: "mqttUrl" is required');
   return c;
 }

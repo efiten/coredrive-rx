@@ -269,4 +269,7 @@ test('uplinkPing floods the region, so it is off unless config turns it on, with
   assert.equal(on.uplinkScope, 'be');
   assert.equal(on.uplinkIntervalSec, 90);
   assert.equal(on.uplinkChannel, '#test');
+  assert.equal(c.uplinkRegionsUrl, '', 'no CoreScope, no declared regions');
+  assert.equal(normalizeConfig({ ...base, corescopeUrl: 'https://cs.example/x' }).uplinkRegionsUrl, 'https://cs.example/api/nodes/declared-regions');
+  assert.equal(normalizeConfig({ ...base, corescopeUrl: 'https://cs.example', uplinkRegionsUrl: 'https://o/r' }).uplinkRegionsUrl, 'https://o/r');
 });
