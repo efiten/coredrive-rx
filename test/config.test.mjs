@@ -17,6 +17,12 @@ test('normalizeConfig trims fields and defaults resolveUrl to empty', () => {
   assert.strictEqual(c.mqttUrl, 'wss://b:8084/ws');
   assert.strictEqual(c.mqttUsername, 'u');
   assert.strictEqual(c.resolveUrl, '');
+  assert.strictEqual(c.searchUrl, '');
+});
+
+test('normalizeConfig keeps searchUrl when provided', () => {
+  const c = normalizeConfig({ mqttUrl: 'wss://b/ws', searchUrl: ' https://x/api/nodes/search ' });
+  assert.strictEqual(c.searchUrl, 'https://x/api/nodes/search');
 });
 
 test('normalizeConfig keeps resolveUrl when provided', () => {

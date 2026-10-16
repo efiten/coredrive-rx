@@ -80,6 +80,10 @@ export function normalizeConfig(raw) {
     mqttUsername: String(raw.mqttUsername || '').trim(),
     mqttPassword: raw.mqttPassword == null ? '' : String(raw.mqttPassword),
     resolveUrl: String(raw.resolveUrl || '').trim(),
+    // CoreScope's node search (/api/nodes/search), used by src/names.js to pick the one
+    // forwarder among the nodes an ambiguous path hash matches. Optional: empty leaves
+    // an ambiguous path hash unresolved, as before.
+    searchUrl: String(raw.searchUrl || '').trim(),
     // CoreScope's own origin, for login and companion linking (src/account.js).
     // Optional: absent or unusable falls back to the origin of resolveUrl, and both
     // empty turns the account feature off. Normalized here so nothing downstream ever

@@ -3,6 +3,8 @@
   "mqttUsername": "coredrive-rx",
   "mqttPassword": "<publish-only EMQX account password>",
   "resolveUrl": "https://corescope.example/api/nodes/resolve",
+  "_searchUrl": "Optional. Lets an ambiguous path hash resolve to its one repeater/room when the other matches are companions or sensors.",
+  "searchUrl": "https://corescope.example/api/nodes/search",
   "_corescopeUrl": "Optional. CoreScope's origin, for login and companion linking. Defaults to the origin of resolveUrl.",
   "corescopeUrl": "https://corescope.example",
   "fullRfLog": true,
