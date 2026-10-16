@@ -126,7 +126,7 @@ function signalRange(r) {
 export function buildLogHeader(info) {
   const {
     version, nowISO, config, fwVer, regionsSupported,
-    companionName, companionPubkey, uplink, pending, lineCount, lineCap, pathResolve, asks, names,
+    companionName, companionPubkey, uplink, pending, lineCount, lineCap, pathResolve, asks, names, ping,
   } = info;
   const row = (k, v) => k.padEnd(10) + ' ' + v;
   const onOff = (b) => (b ? 'on' : 'off');
@@ -143,7 +143,8 @@ export function buildLogHeader(info) {
   lines.push(config
     ? row('config', 'loaded — fullRfLog=' + onOff(config.fullRfLog) + ' rfSampler=' + onOff(config.rfSampler) + ' regionDiscovery=' + onOff(config.regionDiscovery)
         + ' nodeNames=' + onOff(featureEnabled(config, 'nodeNames'))
-        + ' verifyAdverts=' + onOff(featureEnabled(config, 'verifyAdverts')))
+        + ' verifyAdverts=' + onOff(featureEnabled(config, 'verifyAdverts'))
+        + ' uplinkPing=' + onOff(featureEnabled(config, 'uplinkPing')))
     : row('config', 'NOT LOADED — nothing can be published; collecting on defaults '
         + 'fullRfLog=' + onOff(featureEnabled(null, 'fullRfLog'))
         + ' rfSampler=' + onOff(featureEnabled(null, 'rfSampler'))
@@ -189,6 +190,11 @@ export function buildLogHeader(info) {
 
   // Node names: how many repeaters CoreScope had no name for, and how many of those
   // gave theirs. Omitted while there were none, for the same reason as path keys.
+  // Uplink pings: how many went out and how many a repeater was heard re-broadcasting.
+  if (ping && (ping.sent > 0 || ping.status)) {
+    lines.push(row('ping', (ping.status ? ping.status + ' — ' : '') + ping.sent + ' sent, ' + ping.echoed + ' echoed by a repeater, '
+      + ping.failed + ' failed to send'));
+  }
   if (names && names.wanted > 0) {
     lines.push(row('names', names.named + ' of ' + names.wanted + ' repeaters without a CoreScope name answered — '
       + names.asks + ' asks sent, ' + names.replies + ' answered, ' + names.dropped + ' timed out, '

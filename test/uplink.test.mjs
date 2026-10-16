@@ -305,3 +305,10 @@ test('the header reports node-name asks, and only once a repeater lacked a name'
   assert.doesNotMatch(buildLogHeader(BASE), /^names/m);
   assert.match(buildLogHeader({ ...BASE, config: { nodeNames: false } }), /nodeNames=off/);
 });
+
+test('the header reports uplink pings once the feature has a status or sent one', () => {
+  const h = buildLogHeader({ ...BASE, ping: { status: 'on — #coredrive in slot 3, scope #be', sent: 4, echoed: 3, failed: 0 } });
+  assert.match(h, /ping\s+on — #coredrive in slot 3, scope #be — 4 sent, 3 echoed by a repeater, 0 failed to send/);
+  assert.doesNotMatch(buildLogHeader({ ...BASE, ping: { status: '', sent: 0, echoed: 0, failed: 0 } }), /^ping/m);
+  assert.match(buildLogHeader({ ...BASE, config: { uplinkPing: true } }), /uplinkPing=on/);
+});

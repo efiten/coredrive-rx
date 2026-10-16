@@ -36,6 +36,12 @@ import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE
 import { buildRegionsRequest, buildOwnerRequest, parseRegionsResponse, parseOwnerResponse, parseSentAck } from './regionreq.js';
 import { nextAskKind, settledSet, settle } from './asknext.js';
 import {
+  makeTag, pingText, buildChannelMessage, buildScopeFrame, scopeKeyName, buildGetChannel, buildSetChannel,
+  parseChannelInfo, pickSlot, matchEcho, RESP_CODE_CHANNEL_INFO, SCOPE_MIN_FW,
+} from './uplinkping.js';
+import { pingDecision, pruneCells } from './uplinksched.js';
+import { channelKey, channelHash, PAYLOAD_TYPE_GRP_TXT } from './grptxt.js';
+import {
   enqueue, dueToSend, takeNext, registerOutstanding, matchOutstanding, pruneOutstanding,
   markAsked, newSignalRange, noteSignal, holdUntilReply, releaseHold,
 } from './regionsched.js';
@@ -116,6 +122,18 @@ const state = {
   names: {
     checked: new Set(), wanted: new Set(), named: new Map(), outstanding: new Map(),
     asks: 0, replies: 0, flooded: 0, dropped: 0,
+  },
+  // Uplink ping (src/uplinkping.js). Set up once per connection, when config turns it on.
+  //   maxChannels  channel slots the companion has (DEVICE_INFO)
+  //   idx/key/hashByte  the ping channel's slot and crypto, once ready
+  //   scopeKey     region key the ping is sent under, or null for the companion default
+  //   window       the ping whose echoes are being collected, or null
+  //   cells        skip cells pinged recently, persisted across sessions
+  ping: {
+    maxChannels: null, setupTried: false, ready: false, running: false, status: '',
+    idx: null, key: null, hashByte: null, scopeKey: null, scopeName: '',
+    window: null, last: null, sentTimes: [], cells: loadPingCells(),
+    sent: 0, echoed: 0, failed: 0,
   },
   // pathResolve: path-hash prefix -> whether it ever resolved to a full pubkey.
   // A Map, not two counters, because resolvePubkey is called on EVERY reception from
@@ -583,6 +601,175 @@ function onOwnerReply(owner) {
     + ' (' + n.replies + ' of ' + n.asks + ' asks answered)', 'ok');
 }
 
+// --- Uplink ping (outbound: does the mesh hear US?) ---
+// One channel message with a random tag, then a window in which a repeater's
+// re-broadcast of it is collected as an echo. The position travels over MQTT only.
+// src/uplinksched.js decides when; this is the BLE round, the window and the record.
+const PING_ECHO_WINDOW_MS = 10000;
+const PING_REPLY_TIMEOUT_MS = 4000;
+// loadPingCells runs while `state` is being built, before any const below this point
+// exists, so the storage key is a literal inside a hoisted function.
+function pingCellsKey() { return 'coredrive-uplink-cells'; }
+
+function loadPingCells() {
+  try { return JSON.parse(localStorage.getItem(pingCellsKey())) || {}; } catch (e) { return {}; }
+}
+
+function savePingCells(cells) {
+  try { localStorage.setItem(pingCellsKey(), JSON.stringify(cells)); } catch (e) { /* per-device convenience only */ }
+}
+
+// companionReply sends one frame and resolves with the first reply whose code is in
+// `codes`, or null on timeout or a failed write. RESP_CODE_OK/ERR carry no correlator,
+// so callers hold the radio (acquireRadio) for the whole exchange.
+function companionReply(frame, codes, timeoutMs = PING_REPLY_TIMEOUT_MS) {
+  if (!state.transport) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const onFrame = (dv) => {
+      const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+      if (!codes.includes(b[0])) return;
+      cleanup();
+      resolve(b);
+    };
+    const timer = setTimeout(() => { cleanup(); resolve(null); }, timeoutMs);
+    function cleanup() { clearTimeout(timer); if (state.transport) state.transport.offFrame(onFrame); }
+    state.transport.onFrame(onFrame);
+    state.transport.send(frame).catch(() => { cleanup(); resolve(null); });
+  });
+}
+
+const replyOk = (r) => !!r && r[0] === RESP_CODE_OK;
+
+// setupPingChannel finds or creates the ping channel's slot on the companion. A slot
+// holding another channel is never touched; with no free slot, pinging stays off.
+async function setupPingChannel() {
+  const p = state.ping;
+  const cfg = getConfig();
+  p.setupTried = true;
+  p.ready = false;
+  const off = (why) => { p.status = 'off — ' + why; dbg('ping: ' + p.status, 'no'); };
+  if (!p.maxChannels) { off('companion did not report its channel slots'); return; }
+  const scopeName = scopeKeyName(cfg.uplinkScope);
+  if (scopeName && (state.fwVer == null || state.fwVer < SCOPE_MIN_FW)) { off('a ping scope needs firmware v' + SCOPE_MIN_FW + '+'); return; }
+  try {
+    await acquireRadio();
+  } catch (e) {
+    p.setupTried = false; // try again on a later tick
+    return;
+  }
+  try {
+    const key = await channelKey(cfg.uplinkChannel);
+    const channels = [];
+    for (let i = 0; i < p.maxChannels; i++) {
+      const c = parseChannelInfo(await companionReply(buildGetChannel(i), [RESP_CODE_CHANNEL_INFO, RESP_CODE_ERR]));
+      if (!c) break;
+      channels.push(c);
+      if (pickSlot([c], cfg.uplinkChannel, key)?.write === false) break; // ours found
+    }
+    const slot = pickSlot(channels, cfg.uplinkChannel, key);
+    if (!slot) { off('no free channel slot of ' + channels.length + ' read'); return; }
+    if (slot.write) {
+      if (!replyOk(await companionReply(buildSetChannel(slot.idx, cfg.uplinkChannel, key), [RESP_CODE_OK, RESP_CODE_ERR]))) {
+        off('could not write channel slot ' + slot.idx); return;
+      }
+      dbg('ping: added ' + cfg.uplinkChannel + ' to the companion in channel slot ' + slot.idx, 'st');
+    }
+    p.idx = slot.idx;
+    p.key = key;
+    p.hashByte = await channelHash(key);
+    // A region key is derived the same way as a hashtag channel key: SHA-256 of the
+    // '#'-prefixed name, first 16 bytes (helpers/TransportKeyStore.cpp).
+    p.scopeName = scopeName;
+    p.scopeKey = scopeName ? await channelKey(scopeName) : null;
+    p.ready = true;
+    p.status = 'on — ' + cfg.uplinkChannel + ' in slot ' + slot.idx + ', scope ' + (scopeName || 'companion default');
+    dbg('ping: ' + p.status, 'st');
+  } catch (e) {
+    off(e.message);
+  } finally {
+    releaseRadio();
+  }
+}
+
+// pingTick runs every second: sets the channel up once, then lets uplinksched.js
+// decide whether a ping goes out now. Never while the radio is in use or parked.
+function pingTick(now) {
+  const p = state.ping;
+  const cfg = getConfig();
+  if (!featureEnabled(cfg, 'uplinkPing')) return;
+  if (!p.setupTried) { setupPingChannel(); return; }
+  if (!p.ready || p.running || p.window || state.signing || state.regions.busy || state.paused) return;
+  const d = pingDecision({ now, fix: currentFix(), last: p.last, sentTimes: p.sentTimes, recentCells: p.cells, cfg });
+  if (d.send) sendPing(now, d.cell);
+}
+
+async function sendPing(now, cell) {
+  const p = state.ping;
+  const cfg = getConfig();
+  const fix = currentFix();
+  const tag = makeTag();
+  p.running = true;
+  try {
+    await acquireRadio();
+  } catch (e) {
+    p.running = false;
+    return;
+  }
+  let sent = false;
+  let scoped = false;
+  try {
+    if (p.scopeKey) {
+      scoped = replyOk(await companionReply(buildScopeFrame(p.scopeKey), [RESP_CODE_OK, RESP_CODE_ERR]));
+      if (!scoped) { p.failed++; dbg('ping: scope ' + p.scopeName + ' not set — ping not sent', 'no'); return; }
+    }
+    sent = replyOk(await companionReply(buildChannelMessage(p.idx, Math.floor(Date.now() / 1000), pingText(tag)), [RESP_CODE_OK, RESP_CODE_ERR]));
+  } finally {
+    // Reset the override straight away: it would otherwise scope every later flood
+    // this companion sends, not just the ping.
+    if (scoped && !replyOk(await companionReply(buildScopeFrame(null), [RESP_CODE_OK, RESP_CODE_ERR]))) {
+      dbg('ping: scope reset did not ack — the override may still be set on the companion', 'no');
+    }
+    releaseRadio();
+    p.running = false;
+  }
+  if (!sent) { p.failed++; dbg('ping: channel send not acknowledged', 'no'); return; }
+  p.sent++;
+  p.sentTimes = p.sentTimes.filter((t) => now - t < 3600 * 1000).concat(now);
+  p.last = { at: now, lat: fix.lat, lon: fix.lon };
+  p.cells = pruneCells({ ...p.cells, [cell]: now }, now, cfg.uplinkSkipDays);
+  savePingCells(p.cells);
+  p.window = { tag, at: new Date(now).toISOString(), fix, echoes: [], hash: null, channel: cfg.uplinkChannel, scope: p.scopeName };
+  dbg('ping → ' + cfg.uplinkChannel + ' "' + pingText(tag) + '"' + (p.scopeName ? ' scope ' + p.scopeName : '')
+    + ' (' + p.sentTimes.length + ' this hour)', 'tx');
+  setTimeout(closePingWindow, PING_ECHO_WINDOW_MS);
+}
+
+// notePingEcho checks one received GRP_TXT against the open window.
+async function notePingEcho(f) {
+  const p = state.ping;
+  const w = p.window;
+  if (!w || !p.key) return;
+  const e = await matchEcho(f.raw, p.key, p.hashByte, w.tag);
+  if (!e) return;
+  w.hash = w.hash || e.hash;
+  w.echoes.push({ first_hop: e.firstHop, last_hop: e.lastHop, hops: e.hops, snr: f.snr, rssi: f.rssi });
+  dbg('ping ← echo via ' + e.firstHop + (e.hops > 1 ? ' … ' + e.lastHop + ' (' + e.hops + ' hops)' : '') + ' snr ' + f.snr, 'ok');
+}
+
+function closePingWindow() {
+  const p = state.ping;
+  const w = p.window;
+  p.window = null;
+  if (!w) return;
+  if (w.echoes.length) p.echoed++;
+  state.queue.add(queued({
+    kind: 'uplink', at: w.at, tag: w.tag, channel: w.channel, scope: w.scope, pkt_hash: w.hash,
+    echoes: w.echoes, rx_pubkey: state.companionPubkey,
+    ...(w.fix ? { lat: w.fix.lat, lon: w.fix.lon, acc_m: w.fix.acc_m } : {}),
+  })).catch((e) => dbg('uplink queue failed: ' + e.message, 'no'));
+  dbg('ping ' + w.tag + ': ' + (w.echoes.length ? w.echoes.length + ' echo(es), first hop ' + w.echoes[0].first_hop : 'no echo heard'), w.echoes.length ? 'ok' : 'st');
+}
+
 function renderDiscoverStatus(dec) {
   const el = els('discStatus');
   if (dec.state === 'link-down') { el.textContent = '🎯 Discover paused — companion link down'; return; }
@@ -891,6 +1078,7 @@ function monitorTick() {
   // slot is available to the very next repeater heard instead of one tick later. The
   // asking itself happens on receptions (noteRepeaterHeard), never on a timer.
   regionTick(now);
+  pingTick(now);
   // A session that started without config must be able to heal without a restart:
   // retry once a minute (not per tick) for as long as it is missing.
   if (!getConfig() && (state.lastConfigTryAt == null || now - state.lastConfigTryAt >= 60000)) {
@@ -1053,6 +1241,9 @@ async function processFrame(dv) {
   const sig = ' snr=' + f.snr + ' rssi=' + f.rssi;
   if (state.verbose) dbg('0x88 raw=' + rawHex + sig, 'st'); // raw bytes only when verbose-debugging
   const pkt = parsePacket(f.raw);
+  if (state.ping.window && pkt && pkt.payloadType === PAYLOAD_TYPE_GRP_TXT && pkt.hops.length) {
+    notePingEcho(f).catch((e) => dbg('ping echo check failed: ' + e.message, 'no'));
+  }
   // An advert's Ed25519 signature is the only proof that the pubkey in it belongs to a
   // node that exists. Gated behind verifyAdverts, a failed check drops the identity and
   // leaves the reception itself in the non-attributed path below, where the measurement
@@ -1356,6 +1547,7 @@ async function connectAll() {
       // screen while the feature is actually live.
       state.fwVer = di.fwVer;
       state.regions.supported = di.fwVer >= REGION_DISCOVERY_MIN_FW;
+      state.ping.maxChannels = di.maxChannels;
     } catch (e) {
       // requestDeviceInfo threw or timed out — supported stays false and fwVer stays
       // null, and applyConfigToSettings/noteRegionInert below both report that as the
@@ -1504,6 +1696,7 @@ async function disconnectAll(keepProgress) {
   // gone, and a tag from this session must never match one from the next.
   state.regions.outstanding.clear();
   state.names.outstanding.clear();
+  Object.assign(state.ping, { setupTried: false, ready: false, running: false, window: null, maxChannels: null, status: '' });
   state.regions.queue.length = 0;
   // A contact left zero-hop here is exactly what the localStorage crash-safety record
   // covers — leave it in place (do NOT restore over a transport that's gone, and do NOT
@@ -1602,6 +1795,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         capped: state.regions.capped, bonus: state.regions.bonus,
         sigAnswered: state.regions.sigAnswered, sigSilent: state.regions.sigSilent,
       },
+      ping: { status: state.ping.status, sent: state.ping.sent, echoed: state.ping.echoed, failed: state.ping.failed },
       names: {
         wanted: state.names.wanted.size, named: state.names.named.size,
         asks: state.names.asks, replies: state.names.replies,
