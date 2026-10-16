@@ -89,3 +89,19 @@ export async function resolvePubkey(key) {
   const hit = await lookup(k);
   return hit ? hit.pubkey : '';
 }
+
+// nameMissing reports whether CoreScope positively does NOT know a name for this full
+// pubkey: true only on an answer without a name. null when that cannot be known
+// (resolveUrl unset, network error); a node is only ever asked for its name on true.
+export async function nameMissing(pubkey) {
+  if (!configured()) return null;
+  const hit = await lookup(pubkey.toLowerCase());
+  return hit ? !hit.name : null;
+}
+
+// rememberName files a name the node itself gave (ANON_REQ_TYPE_OWNER), so later
+// lookups of that pubkey answer with it instead of CoreScope's blank.
+export function rememberName(pubkey, name) {
+  const k = pubkey.toLowerCase();
+  cache.set(k, { pubkey: k, name });
+}

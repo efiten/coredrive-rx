@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { setConfig } from '../src/config.js';
-import { resolveName, resolvePubkey, pickForwarder, isPathHash } from '../src/names.js';
+import { resolveName, resolvePubkey, pickForwarder, isPathHash, nameMissing, rememberName } from '../src/names.js';
 
 test('resolveName returns "" and does not fetch when resolveUrl is empty', async () => {
   setConfig({ mqttUrl: 'wss://b/ws', resolveUrl: '' });
@@ -178,4 +178,28 @@ test('isPathHash: up to 4 bytes is a path hop, 8 and 32 are node keys', () => {
   assert.strictEqual(isPathHash('e470'), true);
   assert.strictEqual(isPathHash('e470a7fd'), true);
   assert.strictEqual(isPathHash('e470a7fd67fae706'), false);
+});
+
+test('nameMissing: true only when CoreScope answered without a name; rememberName fills it', async () => {
+  setConfig({ mqttUrl: 'wss://b/ws', resolveUrl: 'https://x/resolve' });
+  const orig = globalThis.fetch;
+  const unknown = 'c0cdee59' + '11'.repeat(28);
+  const known = 'cf7903ce' + '11'.repeat(28);
+  globalThis.fetch = async (url) => {
+    if (url.includes('cf79')) return { ok: true, json: async () => ({ pubkey: known, name: 'BE-HHE-LAAK-EDG-01', ambiguous: false }) };
+    if (url.includes('dead')) throw new Error('network down');
+    return { ok: true, json: async () => ({ prefix: unknown, ambiguous: false }) };
+  };
+  try {
+    assert.strictEqual(await nameMissing(unknown), true);
+    assert.strictEqual(await nameMissing(known), false);
+    assert.strictEqual(await nameMissing('dead' + '00'.repeat(30)), null);
+    rememberName(unknown, 'BE-NEW-RPT');
+    assert.strictEqual(await nameMissing(unknown), false);
+    assert.strictEqual(await resolveName(unknown), 'BE-NEW-RPT');
+    setConfig({ mqttUrl: 'wss://b/ws', resolveUrl: '' });
+    assert.strictEqual(await nameMissing(known), null);
+  } finally {
+    globalThis.fetch = orig;
+  }
 });

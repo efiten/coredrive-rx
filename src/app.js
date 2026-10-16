@@ -11,7 +11,7 @@ import { WebBluetoothTransport } from './transport.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute, ADV_TYPE_REPEATER } from './meshpacket.js';
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
-import { resolveName, resolvePubkey } from './names.js';
+import { resolveName, resolvePubkey, nameMissing, rememberName } from './names.js';
 import { upsertHeard, sameNode, addNodeKey } from './recent.js';
 import { updateMotion, captureDecision } from './motion.js';
 import { createWakeLock } from './wakelock.js';
@@ -33,10 +33,11 @@ import { signWithCompanion } from './companionsign.js';
 import { buildRfLogRecord } from './capture.js';
 import { heardKeyAfterVerify } from './advertsig.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
-import { buildRegionsRequest, parseRegionsResponse, parseSentAck } from './regionreq.js';
+import { buildRegionsRequest, buildOwnerRequest, parseRegionsResponse, parseOwnerResponse, parseSentAck } from './regionreq.js';
+import { nextAskKind, settledSet, settle } from './asknext.js';
 import {
   enqueue, dueToSend, takeNext, registerOutstanding, matchOutstanding, pruneOutstanding,
-  markAnswered, markAsked, newSignalRange, noteSignal, holdUntilReply, releaseHold,
+  markAsked, newSignalRange, noteSignal, holdUntilReply, releaseHold,
 } from './regionsched.js';
 import { regionsRows } from './regionsview.js';
 import { uplinkState, uplinkWarning, pushOutcome, regionInertReason, buildLogHeader, REGION_DISCOVERY_MIN_FW } from './uplink.js';
@@ -103,6 +104,18 @@ const state = {
     // is { target, regions, truncated, at, name }; name is filled in lazily once
     // resolveName returns (see noteRegionsAnswer).
     answers: [],
+  },
+  // Node names (ANON_REQ_TYPE_OWNER), for repeaters CoreScope has no name for. Asked
+  // through the regions queue and budget above (src/asknext.js says why).
+  //
+  //   checked      pubkeys already looked up in CoreScope this session
+  //   wanted       pubkeys CoreScope answered for without a name
+  //   named        pubkey -> the name the repeater gave
+  //   outstanding  sent tag -> request, kept apart from regions' because the reply
+  //                bytes of the two are laid out identically
+  names: {
+    checked: new Set(), wanted: new Set(), named: new Map(), outstanding: new Map(),
+    asks: 0, replies: 0, flooded: 0, dropped: 0,
   },
   // pathResolve: path-hash prefix -> whether it ever resolved to a full pubkey.
   // A Map, not two counters, because resolvePubkey is called on EVERY reception from
@@ -212,13 +225,17 @@ function switchView(v) {
 // against meshcore_py commands/control_data.py + firmware payloads.md.
 const CMD_SEND_CONTROL_DATA = 0x37;
 const CTRL_NODE_DISCOVER_REQ = 0x80; // sub_type 0x8 in the upper nibble
-const DISCOVER_PREFIX_ONLY = 0x01;   // lowest flag bit: responders send an 8-byte pubkey prefix
+// Lowest flag bit: responders send an 8-byte pubkey prefix instead of all 32 bytes.
+// Dropped when nodeNames is on, because a name can only be asked of a full pubkey and
+// an 8-byte prefix of a node CoreScope does not know cannot be resolved to one.
+const DISCOVER_PREFIX_ONLY = 0x01;
 const DISCOVER_FILTER_ALL = 0xff;    // type_filter: bit per ADV_TYPE_*; all bits = every node type
 
 function sendNodeDiscover() {
   if (!state.transport || !state.connected) return false;
   const tag = crypto.getRandomValues(new Uint8Array(4)); // reflected back in each DISCOVER_RESP
-  const frame = new Uint8Array([CMD_SEND_CONTROL_DATA, CTRL_NODE_DISCOVER_REQ | DISCOVER_PREFIX_ONLY, DISCOVER_FILTER_ALL, ...tag]);
+  const flags = featureEnabled(getConfig(), 'nodeNames') ? 0 : DISCOVER_PREFIX_ONLY;
+  const frame = new Uint8Array([CMD_SEND_CONTROL_DATA, CTRL_NODE_DISCOVER_REQ | flags, DISCOVER_FILTER_ALL, ...tag]);
   state.transport.send(frame).catch((e) => dbg('discover send failed: ' + e.message, 'no'));
   return true;
 }
@@ -243,6 +260,20 @@ const REGION_ACK_TIMEOUT_MS = 4000;
 // fallback keeps the old length.
 const OVERRIDE_HOLD_MS = 20000;
 
+// asksOn: either request that is asked of a repeater in range is switched on.
+function asksOn(cfg) {
+  return featureEnabled(cfg, 'regionDiscovery') || featureEnabled(cfg, 'nodeNames');
+}
+
+// askCtx is what src/asknext.js needs to tell what a repeater still owes.
+function askCtx() {
+  const cfg = getConfig();
+  return {
+    regionsOn: featureEnabled(cfg, 'regionDiscovery'), namesOn: featureEnabled(cfg, 'nodeNames'),
+    regionsAnswered: state.regions.answered, nameWanted: state.names.wanted, named: state.names.named,
+  };
+}
+
 // noteRepeaterHeard is called for every reception that identifies a repeater. It
 // decides nothing itself — enqueue does — it just records what was heard and how well.
 function noteRepeaterHeard(target, snr, rssi) {
@@ -251,12 +282,37 @@ function noteRepeaterHeard(target, snr, rssi) {
   const cfg = getConfig();
   // noteRegionInert says which gate is holding this, exactly once — the four reasons
   // are otherwise indistinguishable from "no repeater heard yet".
-  if (!featureEnabled(cfg, 'regionDiscovery') || !r.supported) { noteRegionInert(); return; }
+  if (!asksOn(cfg) || !r.supported) { noteRegionInert(); return; }
   r.heard++;
   // Overwritten by every later reception: the signal that matters is the one the ask
   // actually goes out on, not the one that first put this repeater in the queue.
   r.lastSignal.set(target, { snr, rssi });
-  const verdict = enqueue(r.queue, target, r.answered, r.targets, Date.now(), {
+  checkName(target);
+  queueAsk(target, snr);
+}
+
+// checkName looks a repeater up in CoreScope once per session. Only a positive "known,
+// no name" makes it wanted; a failed lookup is forgotten so the next reception retries.
+// Re-queued on the spot, because the reception that triggered the lookup has already
+// been through queueAsk and found nothing owed when regions is off or answered.
+function checkName(target) {
+  const n = state.names;
+  if (!featureEnabled(getConfig(), 'nodeNames') || n.checked.has(target)) return;
+  n.checked.add(target);
+  nameMissing(target).then((missing) => {
+    if (missing === null) { n.checked.delete(target); return; }
+    if (!missing) return;
+    n.wanted.add(target);
+    dbg('names: CoreScope has no name for ' + target.slice(0, 12) + '… — will ask the repeater', 'st');
+    const sig = state.regions.lastSignal.get(target);
+    if (state.transport) queueAsk(target, sig ? sig.snr : null);
+  });
+}
+
+function queueAsk(target, snr) {
+  const r = state.regions;
+  const cfg = getConfig();
+  const verdict = enqueue(r.queue, target, settledSet(askCtx()), r.targets, Date.now(), {
     targetGapMs: cfg.regionTargetGapSec * 1000,
     maxAsks: cfg.regionMaxAsks,
     forgetMs: cfg.regionForgetMin * 60000,
@@ -281,8 +337,9 @@ function regionTick(now) {
     r.dropped++;
     noteSignal(r.sigSilent, rec.snr, rec.rssi);
   }
+  state.names.dropped += pruneOutstanding(state.names.outstanding, now).length;
   if (!dueToSend(r.queue, now, r.lastSentAt, r.busy, getConfig().regionAskGapSec * 1000)) return;
-  const target = takeNext(r.queue, r.answered);
+  const target = takeNext(r.queue, settledSet(askCtx()));
   if (!target) return;
   askRepeater(target);
 }
@@ -318,6 +375,12 @@ function sendAndReadTag(frame) {
 // can never interleave their contact writes.
 async function askRepeater(target) {
   const r = state.regions;
+  const kind = nextAskKind(askCtx(), target);
+  if (!kind) return; // takeNext only hands out targets that owe something
+  // Per kind: which request, where its tag is filed, its counters and its log prefix.
+  const k = kind === 'owner'
+    ? { build: buildOwnerRequest, outstanding: state.names.outstanding, counts: state.names, label: 'names', done: () => state.names.named.has(target) }
+    : { build: buildRegionsRequest, outstanding: r.outstanding, counts: r, label: 'regions', done: () => r.answered.has(target) };
   r.busy = true;
   r.lastSentAt = Date.now();
   // Stamped at the transmission, not when the target was queued: a target that waited
@@ -327,7 +390,7 @@ async function askRepeater(target) {
   markAsked(r.targets, target, r.lastSentAt, sig.snr);
   let overrode = false;
   try {
-    const frame = buildRegionsRequest(target);
+    const frame = k.build(target);
     const contact = await getContact(target);
     if (needsPathOverride(contact)) {
       localStorage.setItem(RESTORE_STORAGE_KEY, encodePendingRestore(state.companionPubkey, target, contact.raw));
@@ -338,24 +401,24 @@ async function askRepeater(target) {
     }
     const ack = await sendAndReadTag(frame);
     if (ack == null) {
-      dbg('regions: no send-ack for ' + target.slice(0, 12) + '… — ask not counted', 'no');
+      dbg(k.label + ': no send-ack for ' + target.slice(0, 12) + '… — ask not counted', 'no');
     } else if (ack.isFlood) {
       // The companion floods whenever the target is a contact whose out_path is
       // unknown, and a repeater ignores a flooded request without any error. Saying so
       // is the difference between "no reply yet" and "no reply can come".
-      r.flooded++;
-      dbg('regions: ' + target.slice(0, 12) + '… went out over FLOOD — repeaters only answer DIRECT', 'no');
+      k.counts.flooded++;
+      dbg(k.label + ': ' + target.slice(0, 12) + '… went out over FLOOD — repeaters only answer DIRECT', 'no');
     } else {
-      r.asks++;
-      registerOutstanding(r.outstanding, ack.tag, target, Date.now(), sig.snr, sig.rssi);
-      dbg('regions → asked ' + target.slice(0, 12) + '… on snr ' + sig.snr + ' / rssi ' + sig.rssi
+      k.counts.asks++;
+      registerOutstanding(k.outstanding, ack.tag, target, Date.now(), sig.snr, sig.rssi);
+      dbg(k.label + ' → asked ' + target.slice(0, 12) + '… on snr ' + sig.snr + ' / rssi ' + sig.rssi
         + ' (attempt ' + r.targets.get(target).attempts + ' of ' + getConfig().regionMaxAsks
         + ' this encounter, queue ' + r.queue.length + ', outstanding ' + r.outstanding.size + ')', 'tx');
     }
     if (overrode) {
       // Held until this repeater answers, or OVERRIDE_HOLD_MS when it does not. A reply
       // can in principle land before the hold starts; then there is nothing to wait for.
-      const ended = r.answered.has(target) ? 'reply' : await holdUntilReply(r.replyWaiters, target, OVERRIDE_HOLD_MS);
+      const ended = k.done() ? 'reply' : await holdUntilReply(r.replyWaiters, target, OVERRIDE_HOLD_MS);
       const why = ended === 'reply' ? 'reply in, hold ended early' : 'no reply in ' + Math.round(OVERRIDE_HOLD_MS / 1000) + 's';
       const restored = await writeContact(buildRestoreFrame(r.overrideRaw), CONTACT_WRITE_TIMEOUT_MS);
       if (restored) { clearPendingRestore(target); dbg('regions: restored ' + target.slice(0, 12) + '…’s original path (' + why + ')', 'st'); }
@@ -462,6 +525,10 @@ function clearPendingRestore(target) {
 // and store it as fact.
 function onRegionsFrame(dv) {
   const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+  // An owner reply has the same layout as a regions reply, so the tag decides which
+  // one this is: a tag filed under names is an owner reply, anything else is regions.
+  const owner = parseOwnerResponse(bytes);
+  if (owner && state.names.outstanding.has(owner.tag)) { onOwnerReply(owner); return; }
   const parsed = parseRegionsResponse(bytes);
   if (!parsed) return;
   const r = state.regions;
@@ -473,7 +540,8 @@ function onRegionsFrame(dv) {
   }
   r.replies++;
   noteSignal(r.sigAnswered, hit.snr, hit.rssi);
-  markAnswered(r.answered, r.queue, hit.target);
+  r.answered.add(hit.target);
+  settle(r.queue, askCtx(), hit.target);
   releaseHold(r.replyWaiters, hit.target); // no-op unless this repeater's contact is held overridden
   noteRegionsAnswer(hit.target, hit.regions, hit.truncated);
   state.queue.add(queued({
@@ -484,6 +552,35 @@ function onRegionsFrame(dv) {
   dbg('regions ← ' + hit.target.slice(0, 12) + '… declares: ' + (hit.regions.join(',') || '(none)')
     + ' — asked on snr ' + hit.snr + ' / rssi ' + hit.rssi
     + ' (' + r.replies + ' of ' + r.asks + ' asks answered)', 'ok');
+}
+
+// onOwnerReply files a repeater's own name: in the session, on screen, and on the
+// /names topic with the position it was heard from. owner_info is not kept
+// (parseOwnerResponse drops it). An empty name still settles the ask, so a repeater
+// with no name set is not asked again, but nothing is published for it.
+function onOwnerReply(owner) {
+  const n = state.names;
+  const req = n.outstanding.get(owner.tag);
+  n.outstanding.delete(owner.tag);
+  n.replies++;
+  const target = req.target;
+  n.named.set(target, owner.name);
+  settle(state.regions.queue, askCtx(), target);
+  releaseHold(state.regions.replyWaiters, target);
+  if (!owner.name) { dbg('names ← ' + target.slice(0, 12) + '… answered with an empty name', 'no'); return; }
+  rememberName(target, owner.name);
+  for (const e of state.recent) if (sameNode(e.key, target)) e.name = owner.name;
+  for (const a of state.regions.answers) if (a.target === target) a.name = owner.name;
+  renderRecent();
+  renderRegionsCard();
+  const fix = currentFix();
+  state.queue.add(queued({
+    kind: 'names', at: new Date().toISOString(), target, name: owner.name,
+    repeater_clock: owner.repeaterClock, rx_pubkey: state.companionPubkey,
+    ...(fix ? { lat: fix.lat, lon: fix.lon, acc_m: fix.acc_m } : {}),
+  })).catch((e) => dbg('names queue failed: ' + e.message, 'no'));
+  dbg('names ← ' + target.slice(0, 12) + '… is "' + owner.name + '" — asked on snr ' + req.snr + ' / rssi ' + req.rssi
+    + ' (' + n.replies + ' of ' + n.asks + ' asks answered)', 'ok');
 }
 
 function renderDiscoverStatus(dec) {
@@ -1024,7 +1121,7 @@ async function processFrame(dv) {
   // is deliberate: it costs ~19 requests against the ~180 the discover sweep already
   // sends, and it keeps every stored list demonstrably current instead of assumed.
   const regionsCfg = getConfig();
-  if (featureEnabled(regionsCfg, 'regionDiscovery') && hk.src === 'advert' && pkt.advertType === ADV_TYPE_REPEATER && pkt.advertTs != null) {
+  if (asksOn(regionsCfg) && hk.src === 'advert' && pkt.advertType === ADV_TYPE_REPEATER && pkt.advertTs != null) {
     noteRepeaterHeard(hk.heardKey, f.snr, f.rssi);
   }
   // Discover responses are the common case (47h advert intervals mean real adverts are
@@ -1034,7 +1131,7 @@ async function processFrame(dv) {
   // stored null: the due rule (answered.get(pubkey) !== advertTs, see dueDelayMs)
   // then asks it once per session and re-asks automatically if a real advert with a
   // timestamp later arrives. Async and non-blocking — a failed resolve just adds nothing.
-  if (featureEnabled(regionsCfg, 'regionDiscovery') && hk.src === 'discover' && pkt.discoverType === ADV_TYPE_REPEATER) {
+  if (asksOn(regionsCfg) && hk.src === 'discover' && pkt.discoverType === ADV_TYPE_REPEATER) {
     resolvePubkey(hk.heardKey).then((pk) => {
       if (!pk) return;
       noteRepeaterHeard(pk, f.snr, f.rssi);
@@ -1059,7 +1156,7 @@ async function processFrame(dv) {
   // any organic reception, so in busy areas — where forwarder traffic is densest —
   // the sweep is suppressed and yields the FEWEST discover-sourced candidates exactly
   // where there is the most to hear.
-  if (featureEnabled(regionsCfg, 'regionDiscovery') && hk.src === 'rxlog') {
+  if (asksOn(regionsCfg) && hk.src === 'rxlog') {
     resolvePubkey(hk.heardKey).then((pk) => {
       state.pathResolve.set(hk.heardKey, !!pk);
       if (!pk) return;
@@ -1406,6 +1503,7 @@ async function disconnectAll(keepProgress) {
   // Outstanding requests die with the transport: no reply can arrive on a link that is
   // gone, and a tag from this session must never match one from the next.
   state.regions.outstanding.clear();
+  state.names.outstanding.clear();
   state.regions.queue.length = 0;
   // A contact left zero-hop here is exactly what the localStorage crash-safety record
   // covers — leave it in place (do NOT restore over a transport that's gone, and do NOT
@@ -1503,6 +1601,11 @@ window.addEventListener('DOMContentLoaded', async () => {
         unmatched: state.regions.unmatched, dropped: state.regions.dropped,
         capped: state.regions.capped, bonus: state.regions.bonus,
         sigAnswered: state.regions.sigAnswered, sigSilent: state.regions.sigSilent,
+      },
+      names: {
+        wanted: state.names.wanted.size, named: state.names.named.size,
+        asks: state.names.asks, replies: state.names.replies,
+        dropped: state.names.dropped, flooded: state.names.flooded,
       },
       lineCount: lines.length,
       lineCap: LOG_LINE_CAP,

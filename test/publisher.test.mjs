@@ -205,3 +205,16 @@ test('reconnect() still skips the wait between attempts once the socket has clos
   assert.strictEqual(streams.length, 2);
   assert.strictEqual(streams.filter((s) => !s.destroyed).length, 1);
 });
+
+test('kind names goes to /names with the NODE_NAME shape, gps only with a fix', () => {
+  const rec = { kind: 'names', at: '2026-10-16T08:49:02.000Z', target: 'c0'.repeat(32),
+    name: 'BE-NEW-RPT', repeater_clock: 1760604542, lat: 50.95, lon: 5.33, acc_m: 6 };
+  assert.equal(Publisher.topicFor('aa11', rec), 'meshcore/client/aa11/names');
+  assert.deepEqual(Publisher.payloadFor('aa11', rec, 'node'), {
+    origin_id: 'aa11', origin: 'node', timestamp: rec.at, type: 'NODE_NAME',
+    target: rec.target, name: 'BE-NEW-RPT', repeater_clock: 1760604542,
+    gps: { lat: 50.95, lon: 5.33, acc_m: 6 },
+  });
+  const noFix = Publisher.payloadFor('aa11', { ...rec, lat: undefined, lon: undefined, acc_m: undefined }, 'node');
+  assert.equal('gps' in noFix, false);
+});

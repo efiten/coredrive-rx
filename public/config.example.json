@@ -10,6 +10,8 @@
   "fullRfLog": true,
   "rfSampler": true,
   "regionDiscovery": true,
+  "_nodeNames": "For a repeater CoreScope has no name for, asks the repeater itself (ANON_REQ_TYPE_OWNER) and publishes the name on /names. Makes discover replies carry the full pubkey (+24 bytes each).",
+  "nodeNames": true,
   "verifyAdverts": false,
 
   "_regionPacing": "Optional. Defaults shown; see src/regionsched.js for why.",

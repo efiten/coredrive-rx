@@ -248,3 +248,10 @@ test('originOf accepts only http(s) and returns "" for anything else', () => {
   assert.strictEqual(originOf('wss://a.example/ws'), '');
   assert.strictEqual(originOf('::'), '');
 });
+
+test('nodeNames transmits, so it follows regionDiscovery: on in an existing config, off without one', () => {
+  const base = { mqttUrl: 'wss://b/ws' };
+  assert.equal(normalizeConfig(base).nodeNames, true);
+  assert.equal(normalizeConfig({ ...base, nodeNames: false }).nodeNames, false);
+  assert.equal(featureEnabled(null, 'nodeNames'), false);
+});
