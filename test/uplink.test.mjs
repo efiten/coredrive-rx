@@ -297,3 +297,11 @@ test('a push held for an unlinked companion says so instead of blaming the broke
 test('held with an empty queue is still "the queue is empty"', () => {
   assert.match(pushOutcome({ uplink: 'ok', pending: 0, published: 0, held: true }).message, /queue is empty/);
 });
+
+test('the header reports node-name asks, and only once a repeater lacked a name', () => {
+  const h = buildLogHeader({ ...BASE, names: { wanted: 3, named: 2, asks: 4, replies: 2, dropped: 2, flooded: 0 } });
+  assert.match(h, /names\s+2 of 3 repeaters without a CoreScope name answered — 4 asks sent, 2 answered, 2 timed out, 0 sent as FLOOD/);
+  assert.doesNotMatch(buildLogHeader({ ...BASE, names: { wanted: 0, named: 0, asks: 0, replies: 0, dropped: 0, flooded: 0 } }), /^names/m);
+  assert.doesNotMatch(buildLogHeader(BASE), /^names/m);
+  assert.match(buildLogHeader({ ...BASE, config: { nodeNames: false } }), /nodeNames=off/);
+});

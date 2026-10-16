@@ -17,6 +17,12 @@ test('normalizeConfig trims fields and defaults resolveUrl to empty', () => {
   assert.strictEqual(c.mqttUrl, 'wss://b:8084/ws');
   assert.strictEqual(c.mqttUsername, 'u');
   assert.strictEqual(c.resolveUrl, '');
+  assert.strictEqual(c.searchUrl, '');
+});
+
+test('normalizeConfig keeps searchUrl when provided', () => {
+  const c = normalizeConfig({ mqttUrl: 'wss://b/ws', searchUrl: ' https://x/api/nodes/search ' });
+  assert.strictEqual(c.searchUrl, 'https://x/api/nodes/search');
 });
 
 test('normalizeConfig keeps resolveUrl when provided', () => {
@@ -241,4 +247,11 @@ test('originOf accepts only http(s) and returns "" for anything else', () => {
   assert.strictEqual(originOf(undefined), '');
   assert.strictEqual(originOf('wss://a.example/ws'), '');
   assert.strictEqual(originOf('::'), '');
+});
+
+test('nodeNames transmits, so it follows regionDiscovery: on in an existing config, off without one', () => {
+  const base = { mqttUrl: 'wss://b/ws' };
+  assert.equal(normalizeConfig(base).nodeNames, true);
+  assert.equal(normalizeConfig({ ...base, nodeNames: false }).nodeNames, false);
+  assert.equal(featureEnabled(null, 'nodeNames'), false);
 });

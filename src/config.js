@@ -13,7 +13,7 @@ import {
 // failures made the case for reading silence as "on": a config cached before these
 // keys existed reported the features off while the served file said on, and that is
 // indistinguishable from the features being broken. An explicit `false` still wins.
-export const FEATURE_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: true, verifyAdverts: false };
+export const FEATURE_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: true, nodeNames: true, verifyAdverts: false };
 
 // NO_CONFIG_DEFAULTS applies when NO config loaded at all. The two logging features
 // stay on: data never collected is gone for good, while data collected and discarded
@@ -26,7 +26,10 @@ export const FEATURE_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscov
 // requester and type, so one client asking once a minute already claims most of that
 // budget. Collecting on an assumption spends our own bandwidth; transmitting on one
 // spends a stranger's airtime.
-export const NO_CONFIG_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: false, verifyAdverts: false };
+export const NO_CONFIG_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: false, nodeNames: false, verifyAdverts: false };
+
+// nodeNames transmits too (an ANON_REQ_TYPE_OWNER ask, and full-pubkey discover
+// replies), so it follows regionDiscovery in both tables for the same reason.
 
 // verifyAdverts is the one flag listed as false in BOTH maps, and deliberately so: it is
 // the only flag that makes the app record LESS than it heard. An advert whose Ed25519
@@ -80,6 +83,10 @@ export function normalizeConfig(raw) {
     mqttUsername: String(raw.mqttUsername || '').trim(),
     mqttPassword: raw.mqttPassword == null ? '' : String(raw.mqttPassword),
     resolveUrl: String(raw.resolveUrl || '').trim(),
+    // CoreScope's node search (/api/nodes/search), used by src/names.js to pick the one
+    // forwarder among the nodes an ambiguous path hash matches. Optional: empty leaves
+    // an ambiguous path hash unresolved, as before.
+    searchUrl: String(raw.searchUrl || '').trim(),
     // CoreScope's own origin, for login and companion linking (src/account.js).
     // Optional: absent or unusable falls back to the origin of resolveUrl, and both
     // empty turns the account feature off. Normalized here so nothing downstream ever
@@ -90,6 +97,7 @@ export function normalizeConfig(raw) {
     fullRfLog: featureEnabled(raw, 'fullRfLog'),
     rfSampler: featureEnabled(raw, 'rfSampler'),
     regionDiscovery: featureEnabled(raw, 'regionDiscovery'),
+    nodeNames: featureEnabled(raw, 'nodeNames'),
     // Region-discovery pacing (src/regionsched.js has the reasoning behind each
     // default). Here so a deployment on another mesh can retune without a rebuild.
     //
