@@ -39,7 +39,7 @@ import {
   makeTag, pingText, buildChannelMessage, buildScopeFrame, scopeKeyName, buildGetChannel, buildSetChannel,
   parseChannelInfo, pickSlot, matchEcho, RESP_CODE_CHANNEL_INFO, SCOPE_MIN_FW,
 } from './uplinkping.js';
-import { pingDecision, pruneCells } from './uplinksched.js';
+import { pingDecision, pruneCells, skipCell } from './uplinksched.js';
 import { channelKey, channelHash, PAYLOAD_TYPE_GRP_TXT } from './grptxt.js';
 import {
   enqueue, dueToSend, takeNext, registerOutstanding, matchOutstanding, pruneOutstanding,
@@ -696,6 +696,7 @@ async function setupPingChannel() {
 function pingTick(now) {
   const p = state.ping;
   const cfg = getConfig();
+  els('btnPingNow').style.display = featureEnabled(cfg, 'uplinkPing') && p.ready ? '' : 'none';
   if (!featureEnabled(cfg, 'uplinkPing')) return;
   if (!p.setupTried) { setupPingChannel(); return; }
   if (!p.ready || p.running || p.window || state.signing || state.regions.busy || state.paused) return;
@@ -742,6 +743,22 @@ async function sendPing(now, cell) {
   dbg('ping → ' + cfg.uplinkChannel + ' "' + pingText(tag) + '"' + (p.scopeName ? ' scope ' + p.scopeName : '')
     + ' (' + p.sentTimes.length + ' this hour)', 'tx');
   setTimeout(closePingWindow, PING_ECHO_WINDOW_MS);
+}
+
+// pingNow is the manual test ping: it skips the interval, distance, parked and
+// skip-cell rules, but keeps the hourly cap and needs a fix to file the result.
+function pingNow() {
+  const p = state.ping;
+  const now = Date.now();
+  const fix = currentFix();
+  if (!p.ready) { dbg('ping: not ready — ' + (p.status || 'channel not set up'), 'no'); return; }
+  if (p.running || p.window) { dbg('ping: one is still in flight', 'no'); return; }
+  if (state.signing || state.regions.busy) { dbg('ping: radio busy, try again in a few seconds', 'no'); return; }
+  if (!fix) { dbg('ping: no GPS fix yet', 'no'); return; }
+  const lastHour = p.sentTimes.filter((t) => now - t < 3600 * 1000).length;
+  if (lastHour >= getConfig().uplinkMaxPerHour) { dbg('ping: hourly cap reached', 'no'); return; }
+  dbg('ping: manual', 'st');
+  sendPing(now, skipCell(fix));
 }
 
 // notePingEcho checks one received GRP_TXT against the open window.
@@ -1807,6 +1824,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     const text = header + (lines.join('\n') || '(empty log)');
     try { await shareLog(text); } catch (e) { dbg('share failed: ' + e.message, 'no'); }
   });
+  els('btnPingNow').addEventListener('click', pingNow);
   els('btnDbg').addEventListener('click', () => {
     const logEl = els('log');
     const show = logEl.style.display === 'none';
