@@ -98,6 +98,7 @@ export function normalizeConfig(raw) {
     rfSampler: featureEnabled(raw, 'rfSampler'),
     regionDiscovery: featureEnabled(raw, 'regionDiscovery'),
     nodeNames: featureEnabled(raw, 'nodeNames'),
+    verifyAdverts: featureEnabled(raw, 'verifyAdverts'),
     // Region-discovery pacing (src/regionsched.js has the reasoning behind each
     // default). Here so a deployment on another mesh can retune without a rebuild.
     //
