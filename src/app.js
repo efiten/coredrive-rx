@@ -155,8 +155,9 @@ const state = {
   // sampler stand down meanwhile, and region discovery is held off through
   // regions.busy, because RESP_CODE_OK/ERR carry no correlator (src/companionsign.js).
   // lastDrainHeld / holdLogged: the last drain pass was held for an unlinked companion,
-  // and whether that transition has been logged.
-  account: null, signing: false, lastDrainHeld: false, holdLogged: false,
+  // and whether that transition has been logged. waitingLogged: how many queued rows
+  // of another companion were last logged (src/drain.js drainOnce `waiting`).
+  account: null, signing: false, lastDrainHeld: false, holdLogged: false, waitingLogged: 0,
   // bleEpoch counts BLE status changes, so a sign exchange can tell that the link
   // dropped and came back while it ran (src/account.js signFailure).
   bleEpoch: 0,
@@ -975,7 +976,7 @@ async function retryConfig() {
 }
 
 // queued stamps a record with the companion connected now (src/drain.js stampRecord),
-// so a backlog is always published under the companion that captured it.
+// so a backlog is only published while the companion that captured it is connected.
 function queued(rec) {
   return stampRecord(rec, state.companionPubkey, state.companionName);
 }
@@ -1510,6 +1511,10 @@ const drain = serialiseDrain(async () => {
         ? 'uploads held — this CoreScope only accepts data from companions linked to an account; the queue keeps everything until this one is linked'
         : 'uploads released — this companion is linked', state.lastDrainHeld ? 'no' : 'ok');
       renderAccount();
+    }
+    if (r.waiting !== state.waitingLogged) {
+      state.waitingLogged = r.waiting;
+      if (r.waiting) dbg(r.waiting + ' queued record(s) belong to another companion, kept until that one is connected again', 'no');
     }
   }
   if (r.committed) {
