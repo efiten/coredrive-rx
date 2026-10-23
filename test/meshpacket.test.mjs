@@ -131,3 +131,12 @@ test('a packet that is not an advert exposes no signed message', () => {
   const raw = '2E' + '00' + '90' + '14' + 'deadbeef' + '1122334455667788';
   assert.strictEqual(parsePacket(hexToBytes(raw)).advertSig, null);
 });
+
+test('node-discover reply without prefix_only carries the full 32-byte pubkey (nodeNames)', () => {
+  // simple_repeater/MyMesh.cpp:824 sends 6 + PUB_KEY_SIZE bytes when prefix_only is clear.
+  const pubkey = 'c0cdee59e0db981b' + '11'.repeat(24);
+  const raw = '2e' + '00' + '92' + '14' + 'deadbeef' + pubkey;
+  const pkt = parsePacket(hexToBytes(raw));
+  assert.strictEqual(pkt.discoverType, 2);
+  assert.deepStrictEqual(deriveHeardKey('rx', pkt), { heardKey: pubkey, heardKeyLen: 32, src: 'discover' });
+});

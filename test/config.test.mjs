@@ -2,7 +2,7 @@
 // Run: node --test
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { normalizeConfig, featureEnabled } from '../src/config.js';
+import { normalizeConfig, featureEnabled, originOf } from '../src/config.js';
 import {
   DEFAULT_ASK_GAP_MS, DEFAULT_TARGET_GAP_MS, DEFAULT_MAX_ASKS, DEFAULT_FORGET_MS,
   DEFAULT_BONUS_SNR_DB,
@@ -17,6 +17,12 @@ test('normalizeConfig trims fields and defaults resolveUrl to empty', () => {
   assert.strictEqual(c.mqttUrl, 'wss://b:8084/ws');
   assert.strictEqual(c.mqttUsername, 'u');
   assert.strictEqual(c.resolveUrl, '');
+  assert.strictEqual(c.searchUrl, '');
+});
+
+test('normalizeConfig keeps searchUrl when provided', () => {
+  const c = normalizeConfig({ mqttUrl: 'wss://b/ws', searchUrl: ' https://x/api/nodes/search ' });
+  assert.strictEqual(c.searchUrl, 'https://x/api/nodes/search');
 });
 
 test('normalizeConfig keeps resolveUrl when provided', () => {
@@ -183,6 +189,14 @@ test('verifyAdverts stays off unless config.json turns it on', () => {
   assert.strictEqual(featureEnabled({ verifyAdverts: true }, 'verifyAdverts'), true);
 });
 
+// The app reads the flag from the normalized config (getConfig), not from raw
+// config.json, so the check above alone passed while the flag never reached the gate.
+test('normalizeConfig keeps verifyAdverts', () => {
+  assert.strictEqual(featureEnabled(normalizeConfig({ mqttUrl: 'wss://x/ws', verifyAdverts: true }), 'verifyAdverts'), true);
+  assert.strictEqual(featureEnabled(normalizeConfig({ mqttUrl: 'wss://x/ws' }), 'verifyAdverts'), false);
+  assert.strictEqual(featureEnabled(normalizeConfig({ mqttUrl: 'wss://x/ws', verifyAdverts: false }), 'verifyAdverts'), false);
+});
+
 // --- Region pacing defaults ---------------------------------------------------
 // These were written out twice — once in src/regionsched.js and once here — and drifted
 // apart: the scheduler said four asks per encounter, config.js said three, and since the
@@ -208,4 +222,62 @@ test('an unusable region pacing value falls back to the default, never to no lim
   const c = normalizeConfig({ mqttUrl: 'wss://x/ws', regionMaxAsks: 'lots', regionTargetGapSec: -5 });
   assert.equal(c.regionMaxAsks, DEFAULT_MAX_ASKS);
   assert.equal(c.regionTargetGapSec, DEFAULT_TARGET_GAP_MS / 1000);
+});
+
+// --- corescopeUrl: the CoreScope origin the account feature talks to ----------
+
+test('corescopeUrl is normalized to an origin: no path, no trailing slash', () => {
+  const base = { mqttUrl: 'wss://b/ws' };
+  assert.strictEqual(normalizeConfig({ ...base, corescopeUrl: 'https://corescope.example/' }).corescopeUrl, 'https://corescope.example');
+  assert.strictEqual(normalizeConfig({ ...base, corescopeUrl: '  https://corescope.example/some/path?q=1  ' }).corescopeUrl, 'https://corescope.example');
+  assert.strictEqual(normalizeConfig({ ...base, corescopeUrl: 'http://localhost:3000/' }).corescopeUrl, 'http://localhost:3000');
+});
+
+test('corescopeUrl falls back to the origin of resolveUrl when absent', () => {
+  const c = normalizeConfig({ mqttUrl: 'wss://b/ws', resolveUrl: 'https://cs.example:8443/api/nodes/resolve' });
+  assert.strictEqual(c.corescopeUrl, 'https://cs.example:8443');
+});
+
+test('an unusable corescopeUrl also falls back to resolveUrl, never to garbage', () => {
+  const r = 'https://cs.example/api/nodes/resolve';
+  assert.strictEqual(normalizeConfig({ mqttUrl: 'wss://b/ws', resolveUrl: r, corescopeUrl: 'not a url' }).corescopeUrl, 'https://cs.example');
+  assert.strictEqual(normalizeConfig({ mqttUrl: 'wss://b/ws', resolveUrl: r, corescopeUrl: 'ftp://cs.example' }).corescopeUrl, 'https://cs.example');
+});
+
+test('corescopeUrl is empty — feature off — when both it and resolveUrl are empty', () => {
+  assert.strictEqual(normalizeConfig({ mqttUrl: 'wss://b/ws' }).corescopeUrl, '');
+  assert.strictEqual(normalizeConfig({ mqttUrl: 'wss://b/ws', corescopeUrl: '', resolveUrl: '' }).corescopeUrl, '');
+});
+
+test('originOf accepts only http(s) and returns "" for anything else', () => {
+  assert.strictEqual(originOf('https://a.example/x/'), 'https://a.example');
+  assert.strictEqual(originOf(''), '');
+  assert.strictEqual(originOf(undefined), '');
+  assert.strictEqual(originOf('wss://a.example/ws'), '');
+  assert.strictEqual(originOf('::'), '');
+});
+
+test('nodeNames transmits, so it follows regionDiscovery: on in an existing config, off without one', () => {
+  const base = { mqttUrl: 'wss://b/ws' };
+  assert.equal(normalizeConfig(base).nodeNames, true);
+  assert.equal(normalizeConfig({ ...base, nodeNames: false }).nodeNames, false);
+  assert.equal(featureEnabled(null, 'nodeNames'), false);
+});
+
+test('uplinkPing floods the region, so it is off unless config turns it on, with paced defaults', () => {
+  const base = { mqttUrl: 'wss://b/ws' };
+  const c = normalizeConfig(base);
+  assert.equal(c.uplinkPing, false);
+  assert.equal(featureEnabled(null, 'uplinkPing'), false);
+  assert.equal(c.uplinkChannel, '#coredrive');
+  assert.equal(c.uplinkScope, '');
+  assert.deepEqual([c.uplinkIntervalSec, c.uplinkMinMoveM, c.uplinkMaxPerHour, c.uplinkSkipDays], [60, 250, 50, 7]);
+  const on = normalizeConfig({ ...base, uplinkPing: true, uplinkScope: ' be ', uplinkIntervalSec: 90, uplinkChannel: '#test' });
+  assert.equal(on.uplinkPing, true);
+  assert.equal(on.uplinkScope, 'be');
+  assert.equal(on.uplinkIntervalSec, 90);
+  assert.equal(on.uplinkChannel, '#test');
+  assert.equal(c.uplinkRegionsUrl, '', 'no CoreScope, no declared regions');
+  assert.equal(normalizeConfig({ ...base, corescopeUrl: 'https://cs.example/x' }).uplinkRegionsUrl, 'https://cs.example/api/nodes/declared-regions');
+  assert.equal(normalizeConfig({ ...base, corescopeUrl: 'https://cs.example', uplinkRegionsUrl: 'https://o/r' }).uplinkRegionsUrl, 'https://o/r');
 });

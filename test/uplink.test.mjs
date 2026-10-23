@@ -283,3 +283,32 @@ test('buildLogHeader omits the ask rows when nothing passed them', () => {
   });
   assert.doesNotMatch(h, /asks/);
 });
+
+test('a push held for an unlinked companion says so instead of blaming the broker', () => {
+  const r = pushOutcome({ uplink: 'ok', pending: 7, published: 0, held: true });
+  assert.match(r.message, /7 record/);
+  assert.match(r.message, /linked/);
+  assert.doesNotMatch(r.message, /broker accepted nothing/);
+  assert.strictEqual(r.level, 'no');
+  assert.strictEqual(r.reconnect, false);
+  assert.strictEqual(r.reloadConfig, false);
+});
+
+test('held with an empty queue is still "the queue is empty"', () => {
+  assert.match(pushOutcome({ uplink: 'ok', pending: 0, published: 0, held: true }).message, /queue is empty/);
+});
+
+test('the header reports node-name asks, and only once a repeater lacked a name', () => {
+  const h = buildLogHeader({ ...BASE, names: { wanted: 3, named: 2, asks: 4, replies: 2, dropped: 2, flooded: 0 } });
+  assert.match(h, /names\s+2 of 3 repeaters without a CoreScope name answered — 4 asks sent, 2 answered, 2 timed out, 0 sent as FLOOD/);
+  assert.doesNotMatch(buildLogHeader({ ...BASE, names: { wanted: 0, named: 0, asks: 0, replies: 0, dropped: 0, flooded: 0 } }), /^names/m);
+  assert.doesNotMatch(buildLogHeader(BASE), /^names/m);
+  assert.match(buildLogHeader({ ...BASE, config: { nodeNames: false } }), /nodeNames=off/);
+});
+
+test('the header reports uplink pings once the feature has a status or sent one', () => {
+  const h = buildLogHeader({ ...BASE, ping: { status: 'on — #coredrive in slot 3, scope #be', sent: 4, echoed: 3, failed: 0 } });
+  assert.match(h, /ping\s+on — #coredrive in slot 3, scope #be — 4 sent, 3 echoed by a repeater, 0 failed to send/);
+  assert.doesNotMatch(buildLogHeader({ ...BASE, ping: { status: '', sent: 0, echoed: 0, failed: 0 } }), /^ping/m);
+  assert.match(buildLogHeader({ ...BASE, config: { uplinkPing: true } }), /uplinkPing=on/);
+});

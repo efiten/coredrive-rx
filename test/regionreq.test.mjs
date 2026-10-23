@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildRegionsRequest, parseRegionsResponse, CMD_SEND_ANON_REQ,
+  buildOwnerRequest, parseOwnerResponse,
   parseSentAck, RESP_CODE_SENT, TRUNCATION_WARN_BYTES,
 } from '../src/regionreq.js';
 
@@ -130,4 +131,28 @@ test('a wildcard-only reply survives padding as exactly "*"', () => {
 test('a reply that is only padding yields no regions, not one empty name', () => {
   const padded = new Uint8Array([0x8c, 0, ...le32(1), ...le32(2), 0, 0, 0, 0, 0, 0, 0, 0]);
   assert.deepEqual(parseRegionsResponse(padded).regions, []);
+});
+
+test('buildOwnerRequest is [57][pubkey 32][0x02][0x00]', () => {
+  const f = buildOwnerRequest(PK.toUpperCase());
+  assert.equal(f.length, 1 + 32 + 2);
+  assert.equal(f[0], CMD_SEND_ANON_REQ);
+  assert.deepEqual(Array.from(f.slice(1, 33)), new Array(32).fill(0xaa));
+  assert.equal(f[33], 0x02, 'ANON_REQ_TYPE_OWNER');
+  assert.equal(f[34], 0x00);
+  assert.throws(() => buildOwnerRequest('aa'.repeat(31)), /buildOwnerRequest/);
+});
+
+test('parseOwnerResponse keeps the name, drops owner_info and the AES padding', () => {
+  const text = ascii('BE-HSS-HVZZWL-DIS\nON8AR, call me');
+  const bytes = new Uint8Array([0x8c, 0, ...le32(0x11223344), ...le32(1760000000), ...text, 0, 0, 0]);
+  assert.deepEqual(parseOwnerResponse(bytes), { tag: 0x11223344, repeaterClock: 1760000000, name: 'BE-HSS-HVZZWL-DIS' });
+});
+
+test('parseOwnerResponse: empty owner_info, a UTF-8 name, and a foreign frame', () => {
+  const name = new TextEncoder().encode('Brüssel-RPT\n');
+  const bytes = new Uint8Array([0x8c, 0, ...le32(7), ...le32(0), ...name]);
+  assert.equal(parseOwnerResponse(bytes).name, 'Brüssel-RPT');
+  assert.equal(parseOwnerResponse(new Uint8Array([0x8b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 65])), null);
+  assert.equal(parseOwnerResponse(new Uint8Array([0x8c, 0, 0])), null);
 });

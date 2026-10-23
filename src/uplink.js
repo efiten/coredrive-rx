@@ -68,7 +68,10 @@ export function uplinkWarning(state, connected = true) {
 // uplink sitting on hundreds of buffered records, and its recovery branch was
 // skipped in exactly the case that needed it (no publisher at all).
 //   { uplink, pending, published } → { message, level, reconnect, reloadConfig }
-export function pushOutcome({ uplink, pending, published }) {
+// held: the last drain pass was held because CoreScope only accepts data from linked
+// companions and this one is not linked (src/drain.js). Without it, a held queue read
+// as "the broker accepted nothing", which sends a diagnosis to the wrong place.
+export function pushOutcome({ uplink, pending, published, held = false }) {
   const recs = (n) => n + ' record(s)';
   if (uplink === 'no-config') {
     return { message: 'config.json was never loaded — ' + recs(pending) + ' buffered; needs internet to fetch settings, retrying…', level: 'no', reconnect: false, reloadConfig: true };
@@ -78,6 +81,9 @@ export function pushOutcome({ uplink, pending, published }) {
   }
   if (uplink === 'down') {
     return { message: 'CoreScope not connected — ' + recs(pending) + ' buffered; forcing reconnect…', level: 'no', reconnect: true, reloadConfig: false };
+  }
+  if (held && pending > 0) {
+    return { message: recs(pending) + ' held — this CoreScope only accepts data from companions linked to an account; log in under Settings → CoreScope account', level: 'no', reconnect: false, reloadConfig: false };
   }
   if (published > 0) {
     return { message: 'pushed ' + recs(published), level: 'ok', reconnect: false, reloadConfig: false };
@@ -120,7 +126,7 @@ function signalRange(r) {
 export function buildLogHeader(info) {
   const {
     version, nowISO, config, fwVer, regionsSupported,
-    companionName, companionPubkey, uplink, pending, lineCount, lineCap, pathResolve, asks,
+    companionName, companionPubkey, uplink, pending, lineCount, lineCap, pathResolve, asks, names, ping,
   } = info;
   const row = (k, v) => k.padEnd(10) + ' ' + v;
   const onOff = (b) => (b ? 'on' : 'off');
@@ -136,11 +142,14 @@ export function buildLogHeader(info) {
   // three above predate that helper and keep their raw reads.
   lines.push(config
     ? row('config', 'loaded — fullRfLog=' + onOff(config.fullRfLog) + ' rfSampler=' + onOff(config.rfSampler) + ' regionDiscovery=' + onOff(config.regionDiscovery)
-        + ' verifyAdverts=' + onOff(featureEnabled(config, 'verifyAdverts')))
+        + ' nodeNames=' + onOff(featureEnabled(config, 'nodeNames'))
+        + ' verifyAdverts=' + onOff(featureEnabled(config, 'verifyAdverts'))
+        + ' uplinkPing=' + onOff(featureEnabled(config, 'uplinkPing')))
     : row('config', 'NOT LOADED — nothing can be published; collecting on defaults '
         + 'fullRfLog=' + onOff(featureEnabled(null, 'fullRfLog'))
         + ' rfSampler=' + onOff(featureEnabled(null, 'rfSampler'))
         + ' regionDiscovery=' + onOff(featureEnabled(null, 'regionDiscovery'))
+        + ' nodeNames=' + onOff(featureEnabled(null, 'nodeNames'))
         + ' verifyAdverts=' + onOff(featureEnabled(null, 'verifyAdverts'))));
 
   lines.push(row('firmware', fwVer == null ? 'unknown (device info not read)' : 'v' + fwVer));
@@ -177,6 +186,19 @@ export function buildLogHeader(info) {
     // They argue for a floor only if they do NOT overlap.
     lines.push(row('asks sig', 'answered ' + signalRange(asks.sigAnswered)
       + ' | silent ' + signalRange(asks.sigSilent)));
+  }
+
+  // Node names: how many repeaters CoreScope had no name for, and how many of those
+  // gave theirs. Omitted while there were none, for the same reason as path keys.
+  // Uplink pings: how many went out and how many a repeater was heard re-broadcasting.
+  if (ping && (ping.sent > 0 || ping.status)) {
+    lines.push(row('ping', (ping.status ? ping.status + ' — ' : '') + ping.sent + ' sent, ' + ping.echoed + ' echoed by a repeater, '
+      + ping.failed + ' failed to send'));
+  }
+  if (names && names.wanted > 0) {
+    lines.push(row('names', names.named + ' of ' + names.wanted + ' repeaters without a CoreScope name answered — '
+      + names.asks + ' asks sent, ' + names.replies + ' answered, ' + names.dropped + ' timed out, '
+      + names.flooded + ' sent as FLOOD'));
   }
 
   if (companionPubkey) {

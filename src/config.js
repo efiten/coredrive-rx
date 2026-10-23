@@ -13,7 +13,7 @@ import {
 // failures made the case for reading silence as "on": a config cached before these
 // keys existed reported the features off while the served file said on, and that is
 // indistinguishable from the features being broken. An explicit `false` still wins.
-export const FEATURE_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: true, verifyAdverts: false };
+export const FEATURE_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: true, nodeNames: true, verifyAdverts: false, uplinkPing: false };
 
 // NO_CONFIG_DEFAULTS applies when NO config loaded at all. The two logging features
 // stay on: data never collected is gone for good, while data collected and discarded
@@ -26,7 +26,10 @@ export const FEATURE_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscov
 // requester and type, so one client asking once a minute already claims most of that
 // budget. Collecting on an assumption spends our own bandwidth; transmitting on one
 // spends a stranger's airtime.
-export const NO_CONFIG_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: false, verifyAdverts: false };
+export const NO_CONFIG_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: false, nodeNames: false, verifyAdverts: false, uplinkPing: false };
+
+// nodeNames transmits too (an ANON_REQ_TYPE_OWNER ask, and full-pubkey discover
+// replies), so it follows regionDiscovery in both tables for the same reason.
 
 // verifyAdverts is the one flag listed as false in BOTH maps, and deliberately so: it is
 // the only flag that makes the app record LESS than it heard. An advert whose Ed25519
@@ -58,6 +61,21 @@ function positiveSeconds(value, fallback) {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+// originOf returns scheme://host[:port] of an http(s) URL, or '' for anything else.
+// An origin never carries a path or a trailing slash, so `origin + '/api/…'` is always
+// well-formed. Used for corescopeUrl, which the account feature (src/account.js)
+// binds its token to.
+export function originOf(value) {
+  const s = String(value ?? '').trim();
+  if (!s) return '';
+  try {
+    const u = new URL(s);
+    return u.protocol === 'https:' || u.protocol === 'http:' ? u.origin : '';
+  } catch (e) {
+    return '';
+  }
+}
+
 export function normalizeConfig(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config.json: expected a JSON object');
   const c = {
@@ -65,11 +83,22 @@ export function normalizeConfig(raw) {
     mqttUsername: String(raw.mqttUsername || '').trim(),
     mqttPassword: raw.mqttPassword == null ? '' : String(raw.mqttPassword),
     resolveUrl: String(raw.resolveUrl || '').trim(),
+    // CoreScope's node search (/api/nodes/search), used by src/names.js to pick the one
+    // forwarder among the nodes an ambiguous path hash matches. Optional: empty leaves
+    // an ambiguous path hash unresolved, as before.
+    searchUrl: String(raw.searchUrl || '').trim(),
+    // CoreScope's own origin, for login and companion linking (src/account.js).
+    // Optional: absent or unusable falls back to the origin of resolveUrl, and both
+    // empty turns the account feature off. Normalized here so nothing downstream ever
+    // builds a URL out of a path or a trailing slash.
+    corescopeUrl: originOf(raw.corescopeUrl) || originOf(raw.resolveUrl),
     // Absent → FEATURE_DEFAULTS; present → coerced. See FEATURE_DEFAULTS above for
     // why the two logging flags and the transmitting one differ.
     fullRfLog: featureEnabled(raw, 'fullRfLog'),
     rfSampler: featureEnabled(raw, 'rfSampler'),
     regionDiscovery: featureEnabled(raw, 'regionDiscovery'),
+    nodeNames: featureEnabled(raw, 'nodeNames'),
+    verifyAdverts: featureEnabled(raw, 'verifyAdverts'),
     // Region-discovery pacing (src/regionsched.js has the reasoning behind each
     // default). Here so a deployment on another mesh can retune without a rebuild.
     //
@@ -93,7 +122,22 @@ export function normalizeConfig(raw) {
     //                        one this encounter already spent an ask on, to buy one
     //                        extra ask. Set from one field case, so it is a knob.
     regionBonusSnrDb: positiveSeconds(raw.regionBonusSnrDb, DEFAULT_BONUS_SNR_DB),
+    // Uplink ping (src/uplinkping.js): off unless config turns it on, because every
+    // ping is a flood the whole region carries. uplinkScope is a region or a
+    // preference list ("de,nl,be"): each ping takes the one the repeaters heard around
+    // the companion forward (src/autoscope.js). Empty leaves the companion's own
+    // default scope in charge. uplinkRegionsUrl is where the declared regions come
+    // from, by default CoreScope's /api/nodes/declared-regions.
+    uplinkPing: featureEnabled(raw, 'uplinkPing'),
+    uplinkChannel: String(raw.uplinkChannel || '#coredrive').trim(),
+    uplinkScope: String(raw.uplinkScope || '').trim(),
+    uplinkIntervalSec: positiveSeconds(raw.uplinkIntervalSec, 60),
+    uplinkMinMoveM: positiveSeconds(raw.uplinkMinMoveM, 250),
+    uplinkMaxPerHour: positiveSeconds(raw.uplinkMaxPerHour, 50),
+    uplinkSkipDays: positiveSeconds(raw.uplinkSkipDays, 7),
   };
+  c.uplinkRegionsUrl = String(raw.uplinkRegionsUrl || '').trim()
+    || (c.corescopeUrl ? c.corescopeUrl + '/api/nodes/declared-regions' : '');
   if (!c.mqttUrl) throw new Error('config.json: "mqttUrl" is required');
   return c;
 }

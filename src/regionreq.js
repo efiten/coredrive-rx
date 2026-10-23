@@ -8,6 +8,7 @@
 export const CMD_SEND_ANON_REQ = 57;
 export const PUSH_CODE_BINARY_RESPONSE = 0x8c;
 export const ANON_REQ_TYPE_REGIONS = 0x01;
+export const ANON_REQ_TYPE_OWNER = 0x02; // simple_repeater/MyMesh.cpp:56
 export const RESP_CODE_SENT = 6; // companion_radio/MyMesh.cpp:77 — shared by every CMD_SEND_* path
 
 // The repeater's CSV budget is sizeof(reply_data) - 12 = 172 bytes (MAX_PACKET_PAYLOAD
@@ -25,17 +26,51 @@ export const RESP_CODE_SENT = 6; // companion_radio/MyMesh.cpp:77 — shared by 
 // still hiding a dropped 30-char name right after it. Flag at or above that floor.
 export const TRUNCATION_WARN_BYTES = 139;
 
-export function buildRegionsRequest(pubkeyHex) {
+function buildAnonRequest(pubkeyHex, type, fn) {
   const pk = pubkeyHex.trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(pk)) {
-    throw new TypeError(`buildRegionsRequest: pubkeyHex must be exactly 64 hex characters, got: ${pubkeyHex}`);
+    throw new TypeError(`${fn}: pubkeyHex must be exactly 64 hex characters, got: ${pubkeyHex}`);
   }
   const out = new Uint8Array(1 + 32 + 2);
   out[0] = CMD_SEND_ANON_REQ;
   for (let i = 0; i < 32; i++) out[1 + i] = parseInt(pk.substr(i * 2, 2), 16);
-  out[33] = ANON_REQ_TYPE_REGIONS;
+  out[33] = type;
   out[34] = 0x00; // reply_path_len — zero-hop reply
   return out;
+}
+
+export function buildRegionsRequest(pubkeyHex) {
+  return buildAnonRequest(pubkeyHex, ANON_REQ_TYPE_REGIONS, 'buildRegionsRequest');
+}
+
+// buildOwnerRequest asks a repeater for its name. Same request layout as regions:
+// handleAnonOwnerReq (simple_repeater/MyMesh.cpp:165) reads only the reply path, and
+// answers only over a DIRECT route (MyMesh.cpp:598), like the regions request.
+export function buildOwnerRequest(pubkeyHex) {
+  return buildAnonRequest(pubkeyHex, ANON_REQ_TYPE_OWNER, 'buildOwnerRequest');
+}
+
+// parseOwnerResponse reads an ANON_REQ_TYPE_OWNER reply. The repeater writes
+// "<node_name>\n<owner_info>" after its 4-byte clock (MyMesh.cpp:177), and the
+// companion forwards it as [0x8c][reserved][tag:4][clock:4][text]
+// (companion_radio/MyMesh.cpp:740-746). Only the name is returned; owner_info is
+// free text the operator typed and is not used. The reply is NUL-padded to the AES
+// block size, as in parseRegionsResponse.
+//
+// The bytes alone cannot tell an owner reply from a regions reply: both share this
+// layout. The caller decides by the tag, which it registered per request kind.
+export function parseOwnerResponse(bytes) {
+  if (!bytes || bytes.length < 10 || bytes[0] !== PUSH_CODE_BINARY_RESPONSE) return null;
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let end = bytes.length;
+  while (end > 10 && bytes[end - 1] === 0) end--;
+  const text = new TextDecoder().decode(bytes.slice(10, end));
+  const nl = text.indexOf('\n');
+  return {
+    tag: v.getUint32(2, true),
+    repeaterClock: v.getUint32(6, true),
+    name: (nl >= 0 ? text.slice(0, nl) : text).trim(),
+  };
 }
 
 export function parseRegionsResponse(bytes) {

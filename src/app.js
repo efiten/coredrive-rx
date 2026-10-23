@@ -11,7 +11,7 @@ import { WebBluetoothTransport } from './transport.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute, ADV_TYPE_REPEATER } from './meshpacket.js';
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
-import { resolveName, resolvePubkey } from './names.js';
+import { resolveName, resolvePubkey, nameMissing, rememberName } from './names.js';
 import { upsertHeard, sameNode, addNodeKey } from './recent.js';
 import { updateMotion, captureDecision } from './motion.js';
 import { createWakeLock } from './wakelock.js';
@@ -25,15 +25,29 @@ import { shareLog } from './sharelog.js';
 import { Gps } from './gps.js';
 import { Queue } from './queue.js';
 import { Publisher, KEEPALIVE_SECS } from './publisher.js';
-import { drainOnce, serialiseDrain } from './drain.js';
+import { drainOnce, serialiseDrain, stampRecord } from './drain.js';
 import { loadConfig, getConfig, featureEnabled } from './config.js';
+import { createAccount, deviceNameFrom, transientError, signFailure } from './account.js';
+import { accountView } from './accountview.js';
+import { signWithCompanion } from './companionsign.js';
 import { buildRfLogRecord } from './capture.js';
 import { heardKeyAfterVerify } from './advertsig.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
-import { buildRegionsRequest, parseRegionsResponse, parseSentAck } from './regionreq.js';
+import { buildRegionsRequest, buildOwnerRequest, parseRegionsResponse, parseOwnerResponse, parseSentAck } from './regionreq.js';
+import { nextAskKind, settledSet, settle } from './asknext.js';
+import {
+  makeTag, pingText, buildChannelMessage, buildScopeFrame, scopeKeyName, buildGetChannel, buildSetChannel,
+  parseChannelInfo, pickSlot, matchEcho, RESP_CODE_CHANNEL_INFO, SCOPE_MIN_FW,
+} from './uplinkping.js';
+import { pingDecision, pruneCells, skipCell } from './uplinksched.js';
+import { channelKey, channelHash, PAYLOAD_TYPE_GRP_TXT } from './grptxt.js';
+import {
+  parseScopeList, chooseScope, mergeRegionTable, pruneHeard, buildUnscopedFrame, buildGetDefaultScope,
+  parseDefaultScope, RESP_CODE_DEFAULT_FLOOD_SCOPE, DEFAULT_SCOPE_MIN_FW, UNSCOPED_MIN_FW,
+} from './autoscope.js';
 import {
   enqueue, dueToSend, takeNext, registerOutstanding, matchOutstanding, pruneOutstanding,
-  markAnswered, markAsked, newSignalRange, noteSignal, holdUntilReply, releaseHold,
+  markAsked, newSignalRange, noteSignal, holdUntilReply, releaseHold,
 } from './regionsched.js';
 import { regionsRows } from './regionsview.js';
 import { uplinkState, uplinkWarning, pushOutcome, regionInertReason, buildLogHeader, REGION_DISCOVERY_MIN_FW } from './uplink.js';
@@ -101,6 +115,34 @@ const state = {
     // resolveName returns (see noteRegionsAnswer).
     answers: [],
   },
+  // Node names (ANON_REQ_TYPE_OWNER), for repeaters CoreScope has no name for. Asked
+  // through the regions queue and budget above (src/asknext.js says why).
+  //
+  //   checked      pubkeys already looked up in CoreScope this session
+  //   wanted       pubkeys CoreScope answered for without a name
+  //   named        pubkey -> the name the repeater gave
+  //   outstanding  sent tag -> request, kept apart from regions' because the reply
+  //                bytes of the two are laid out identically
+  names: {
+    checked: new Set(), wanted: new Set(), named: new Map(), outstanding: new Map(),
+    asks: 0, replies: 0, flooded: 0, dropped: 0,
+  },
+  // Uplink ping (src/uplinkping.js). Set up once per connection, when config turns it on.
+  //   maxChannels  channel slots the companion has (DEVICE_INFO)
+  //   idx/key/hashByte  the ping channel's slot and crypto, once ready
+  //   prefs        config.uplinkScope as a preference list (src/autoscope.js)
+  //   companionDefault  the companion's own default scope, '' none, null unknown
+  //   heard        key -> last time heard directly, for the scope choice
+  //   serverRegions / regionsAt  CoreScope's declared regions and when they were fetched
+  //   window       the ping whose echoes are being collected, or null
+  //   cells        skip cells pinged recently, persisted across sessions
+  ping: {
+    maxChannels: null, setupTried: false, ready: false, running: false, status: '',
+    idx: null, key: null, hashByte: null, prefs: [], companionDefault: null,
+    heard: new Map(), serverRegions: [], regionsAt: 0, regionsFetching: false, scopeKeys: new Map(),
+    window: null, last: null, sentTimes: [], cells: loadPingCells(),
+    sent: 0, echoed: 0, failed: 0,
+  },
   // pathResolve: path-hash prefix -> whether it ever resolved to a full pubkey.
   // A Map, not two counters, because resolvePubkey is called on EVERY reception from
   // a forwarder and answers from its session cache — counting calls would report the
@@ -108,6 +150,17 @@ const state = {
   // could actually be identified. Last result wins, so a prefix that failed on a
   // transient network error and resolved later ends up counted as resolved.
   pathResolve: new Map(),
+  // CoreScope account (src/account.js); null until config names a CoreScope origin.
+  // signing: the companion is signing a link challenge. The discover sweep and the RF
+  // sampler stand down meanwhile, and region discovery is held off through
+  // regions.busy, because RESP_CODE_OK/ERR carry no correlator (src/companionsign.js).
+  // lastDrainHeld / holdLogged: the last drain pass was held for an unlinked companion,
+  // and whether that transition has been logged. waitingLogged: how many queued rows
+  // of another companion were last logged (src/drain.js drainOnce `waiting`).
+  account: null, signing: false, lastDrainHeld: false, holdLogged: false, waitingLogged: 0,
+  // bleEpoch counts BLE status changes, so a sign exchange can tell that the link
+  // dropped and came back while it ran (src/account.js signFailure).
+  bleEpoch: 0,
 };
 
 const RECENT_MAX = 20;
@@ -199,13 +252,17 @@ function switchView(v) {
 // against meshcore_py commands/control_data.py + firmware payloads.md.
 const CMD_SEND_CONTROL_DATA = 0x37;
 const CTRL_NODE_DISCOVER_REQ = 0x80; // sub_type 0x8 in the upper nibble
-const DISCOVER_PREFIX_ONLY = 0x01;   // lowest flag bit: responders send an 8-byte pubkey prefix
+// Lowest flag bit: responders send an 8-byte pubkey prefix instead of all 32 bytes.
+// Dropped when nodeNames is on, because a name can only be asked of a full pubkey and
+// an 8-byte prefix of a node CoreScope does not know cannot be resolved to one.
+const DISCOVER_PREFIX_ONLY = 0x01;
 const DISCOVER_FILTER_ALL = 0xff;    // type_filter: bit per ADV_TYPE_*; all bits = every node type
 
 function sendNodeDiscover() {
   if (!state.transport || !state.connected) return false;
   const tag = crypto.getRandomValues(new Uint8Array(4)); // reflected back in each DISCOVER_RESP
-  const frame = new Uint8Array([CMD_SEND_CONTROL_DATA, CTRL_NODE_DISCOVER_REQ | DISCOVER_PREFIX_ONLY, DISCOVER_FILTER_ALL, ...tag]);
+  const flags = featureEnabled(getConfig(), 'nodeNames') ? 0 : DISCOVER_PREFIX_ONLY;
+  const frame = new Uint8Array([CMD_SEND_CONTROL_DATA, CTRL_NODE_DISCOVER_REQ | flags, DISCOVER_FILTER_ALL, ...tag]);
   state.transport.send(frame).catch((e) => dbg('discover send failed: ' + e.message, 'no'));
   return true;
 }
@@ -230,6 +287,20 @@ const REGION_ACK_TIMEOUT_MS = 4000;
 // fallback keeps the old length.
 const OVERRIDE_HOLD_MS = 20000;
 
+// asksOn: either request that is asked of a repeater in range is switched on.
+function asksOn(cfg) {
+  return featureEnabled(cfg, 'regionDiscovery') || featureEnabled(cfg, 'nodeNames');
+}
+
+// askCtx is what src/asknext.js needs to tell what a repeater still owes.
+function askCtx() {
+  const cfg = getConfig();
+  return {
+    regionsOn: featureEnabled(cfg, 'regionDiscovery'), namesOn: featureEnabled(cfg, 'nodeNames'),
+    regionsAnswered: state.regions.answered, nameWanted: state.names.wanted, named: state.names.named,
+  };
+}
+
 // noteRepeaterHeard is called for every reception that identifies a repeater. It
 // decides nothing itself — enqueue does — it just records what was heard and how well.
 function noteRepeaterHeard(target, snr, rssi) {
@@ -238,12 +309,37 @@ function noteRepeaterHeard(target, snr, rssi) {
   const cfg = getConfig();
   // noteRegionInert says which gate is holding this, exactly once — the four reasons
   // are otherwise indistinguishable from "no repeater heard yet".
-  if (!featureEnabled(cfg, 'regionDiscovery') || !r.supported) { noteRegionInert(); return; }
+  if (!asksOn(cfg) || !r.supported) { noteRegionInert(); return; }
   r.heard++;
   // Overwritten by every later reception: the signal that matters is the one the ask
   // actually goes out on, not the one that first put this repeater in the queue.
   r.lastSignal.set(target, { snr, rssi });
-  const verdict = enqueue(r.queue, target, r.answered, r.targets, Date.now(), {
+  checkName(target);
+  queueAsk(target, snr);
+}
+
+// checkName looks a repeater up in CoreScope once per session. Only a positive "known,
+// no name" makes it wanted; a failed lookup is forgotten so the next reception retries.
+// Re-queued on the spot, because the reception that triggered the lookup has already
+// been through queueAsk and found nothing owed when regions is off or answered.
+function checkName(target) {
+  const n = state.names;
+  if (!featureEnabled(getConfig(), 'nodeNames') || n.checked.has(target)) return;
+  n.checked.add(target);
+  nameMissing(target).then((missing) => {
+    if (missing === null) { n.checked.delete(target); return; }
+    if (!missing) return;
+    n.wanted.add(target);
+    dbg('names: CoreScope has no name for ' + target.slice(0, 12) + '… — will ask the repeater', 'st');
+    const sig = state.regions.lastSignal.get(target);
+    if (state.transport) queueAsk(target, sig ? sig.snr : null);
+  });
+}
+
+function queueAsk(target, snr) {
+  const r = state.regions;
+  const cfg = getConfig();
+  const verdict = enqueue(r.queue, target, settledSet(askCtx()), r.targets, Date.now(), {
     targetGapMs: cfg.regionTargetGapSec * 1000,
     maxAsks: cfg.regionMaxAsks,
     forgetMs: cfg.regionForgetMin * 60000,
@@ -268,8 +364,9 @@ function regionTick(now) {
     r.dropped++;
     noteSignal(r.sigSilent, rec.snr, rec.rssi);
   }
+  state.names.dropped += pruneOutstanding(state.names.outstanding, now).length;
   if (!dueToSend(r.queue, now, r.lastSentAt, r.busy, getConfig().regionAskGapSec * 1000)) return;
-  const target = takeNext(r.queue, r.answered);
+  const target = takeNext(r.queue, settledSet(askCtx()));
   if (!target) return;
   askRepeater(target);
 }
@@ -305,6 +402,12 @@ function sendAndReadTag(frame) {
 // can never interleave their contact writes.
 async function askRepeater(target) {
   const r = state.regions;
+  const kind = nextAskKind(askCtx(), target);
+  if (!kind) return; // takeNext only hands out targets that owe something
+  // Per kind: which request, where its tag is filed, its counters and its log prefix.
+  const k = kind === 'owner'
+    ? { build: buildOwnerRequest, outstanding: state.names.outstanding, counts: state.names, label: 'names', done: () => state.names.named.has(target) }
+    : { build: buildRegionsRequest, outstanding: r.outstanding, counts: r, label: 'regions', done: () => r.answered.has(target) };
   r.busy = true;
   r.lastSentAt = Date.now();
   // Stamped at the transmission, not when the target was queued: a target that waited
@@ -314,7 +417,7 @@ async function askRepeater(target) {
   markAsked(r.targets, target, r.lastSentAt, sig.snr);
   let overrode = false;
   try {
-    const frame = buildRegionsRequest(target);
+    const frame = k.build(target);
     const contact = await getContact(target);
     if (needsPathOverride(contact)) {
       localStorage.setItem(RESTORE_STORAGE_KEY, encodePendingRestore(state.companionPubkey, target, contact.raw));
@@ -325,24 +428,24 @@ async function askRepeater(target) {
     }
     const ack = await sendAndReadTag(frame);
     if (ack == null) {
-      dbg('regions: no send-ack for ' + target.slice(0, 12) + '… — ask not counted', 'no');
+      dbg(k.label + ': no send-ack for ' + target.slice(0, 12) + '… — ask not counted', 'no');
     } else if (ack.isFlood) {
       // The companion floods whenever the target is a contact whose out_path is
       // unknown, and a repeater ignores a flooded request without any error. Saying so
       // is the difference between "no reply yet" and "no reply can come".
-      r.flooded++;
-      dbg('regions: ' + target.slice(0, 12) + '… went out over FLOOD — repeaters only answer DIRECT', 'no');
+      k.counts.flooded++;
+      dbg(k.label + ': ' + target.slice(0, 12) + '… went out over FLOOD — repeaters only answer DIRECT', 'no');
     } else {
-      r.asks++;
-      registerOutstanding(r.outstanding, ack.tag, target, Date.now(), sig.snr, sig.rssi);
-      dbg('regions → asked ' + target.slice(0, 12) + '… on snr ' + sig.snr + ' / rssi ' + sig.rssi
+      k.counts.asks++;
+      registerOutstanding(k.outstanding, ack.tag, target, Date.now(), sig.snr, sig.rssi);
+      dbg(k.label + ' → asked ' + target.slice(0, 12) + '… on snr ' + sig.snr + ' / rssi ' + sig.rssi
         + ' (attempt ' + r.targets.get(target).attempts + ' of ' + getConfig().regionMaxAsks
         + ' this encounter, queue ' + r.queue.length + ', outstanding ' + r.outstanding.size + ')', 'tx');
     }
     if (overrode) {
       // Held until this repeater answers, or OVERRIDE_HOLD_MS when it does not. A reply
       // can in principle land before the hold starts; then there is nothing to wait for.
-      const ended = r.answered.has(target) ? 'reply' : await holdUntilReply(r.replyWaiters, target, OVERRIDE_HOLD_MS);
+      const ended = k.done() ? 'reply' : await holdUntilReply(r.replyWaiters, target, OVERRIDE_HOLD_MS);
       const why = ended === 'reply' ? 'reply in, hold ended early' : 'no reply in ' + Math.round(OVERRIDE_HOLD_MS / 1000) + 's';
       const restored = await writeContact(buildRestoreFrame(r.overrideRaw), CONTACT_WRITE_TIMEOUT_MS);
       if (restored) { clearPendingRestore(target); dbg('regions: restored ' + target.slice(0, 12) + '…’s original path (' + why + ')', 'st'); }
@@ -449,6 +552,10 @@ function clearPendingRestore(target) {
 // and store it as fact.
 function onRegionsFrame(dv) {
   const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+  // An owner reply has the same layout as a regions reply, so the tag decides which
+  // one this is: a tag filed under names is an owner reply, anything else is regions.
+  const owner = parseOwnerResponse(bytes);
+  if (owner && state.names.outstanding.has(owner.tag)) { onOwnerReply(owner); return; }
   const parsed = parseRegionsResponse(bytes);
   if (!parsed) return;
   const r = state.regions;
@@ -460,17 +567,288 @@ function onRegionsFrame(dv) {
   }
   r.replies++;
   noteSignal(r.sigAnswered, hit.snr, hit.rssi);
-  markAnswered(r.answered, r.queue, hit.target);
+  r.answered.add(hit.target);
+  settle(r.queue, askCtx(), hit.target);
   releaseHold(r.replyWaiters, hit.target); // no-op unless this repeater's contact is held overridden
   noteRegionsAnswer(hit.target, hit.regions, hit.truncated);
-  state.queue.add({
+  state.queue.add(queued({
     kind: 'regions', at: new Date().toISOString(), target: hit.target,
     regions: hit.regions, truncated: hit.truncated, repeater_clock: hit.repeaterClock,
     rx_pubkey: state.companionPubkey,
-  }).catch((e) => dbg('regions queue failed: ' + e.message, 'no'));
+  })).catch((e) => dbg('regions queue failed: ' + e.message, 'no'));
   dbg('regions ← ' + hit.target.slice(0, 12) + '… declares: ' + (hit.regions.join(',') || '(none)')
     + ' — asked on snr ' + hit.snr + ' / rssi ' + hit.rssi
     + ' (' + r.replies + ' of ' + r.asks + ' asks answered)', 'ok');
+}
+
+// onOwnerReply files a repeater's own name: in the session, on screen, and on the
+// /names topic with the position it was heard from. owner_info is not kept
+// (parseOwnerResponse drops it). An empty name still settles the ask, so a repeater
+// with no name set is not asked again, but nothing is published for it.
+function onOwnerReply(owner) {
+  const n = state.names;
+  const req = n.outstanding.get(owner.tag);
+  n.outstanding.delete(owner.tag);
+  n.replies++;
+  const target = req.target;
+  n.named.set(target, owner.name);
+  settle(state.regions.queue, askCtx(), target);
+  releaseHold(state.regions.replyWaiters, target);
+  if (!owner.name) { dbg('names ← ' + target.slice(0, 12) + '… answered with an empty name', 'no'); return; }
+  rememberName(target, owner.name);
+  for (const e of state.recent) if (sameNode(e.key, target)) e.name = owner.name;
+  for (const a of state.regions.answers) if (a.target === target) a.name = owner.name;
+  renderRecent();
+  renderRegionsCard();
+  const fix = currentFix();
+  state.queue.add(queued({
+    kind: 'names', at: new Date().toISOString(), target, name: owner.name,
+    repeater_clock: owner.repeaterClock, rx_pubkey: state.companionPubkey,
+    ...(fix ? { lat: fix.lat, lon: fix.lon, acc_m: fix.acc_m } : {}),
+  })).catch((e) => dbg('names queue failed: ' + e.message, 'no'));
+  dbg('names ← ' + target.slice(0, 12) + '… is "' + owner.name + '" — asked on snr ' + req.snr + ' / rssi ' + req.rssi
+    + ' (' + n.replies + ' of ' + n.asks + ' asks answered)', 'ok');
+}
+
+// --- Uplink ping (outbound: does the mesh hear US?) ---
+// One channel message with a random tag, then a window in which a repeater's
+// re-broadcast of it is collected as an echo. The position travels over MQTT only.
+// src/uplinksched.js decides when; this is the BLE round, the window and the record.
+const PING_ECHO_WINDOW_MS = 10000;
+const PING_REPLY_TIMEOUT_MS = 4000;
+// loadPingCells runs while `state` is being built, before any const below this point
+// exists, so the storage key is a literal inside a hoisted function.
+function pingCellsKey() { return 'coredrive-uplink-cells'; }
+
+function loadPingCells() {
+  try { return JSON.parse(localStorage.getItem(pingCellsKey())) || {}; } catch (e) { return {}; }
+}
+
+function savePingCells(cells) {
+  try { localStorage.setItem(pingCellsKey(), JSON.stringify(cells)); } catch (e) { /* per-device convenience only */ }
+}
+
+// companionReply sends one frame and resolves with the first reply whose code is in
+// `codes`, or null on timeout or a failed write. RESP_CODE_OK/ERR carry no correlator,
+// so callers hold the radio (acquireRadio) for the whole exchange.
+function companionReply(frame, codes, timeoutMs = PING_REPLY_TIMEOUT_MS) {
+  if (!state.transport) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const onFrame = (dv) => {
+      const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+      if (!codes.includes(b[0])) return;
+      cleanup();
+      resolve(b);
+    };
+    const timer = setTimeout(() => { cleanup(); resolve(null); }, timeoutMs);
+    function cleanup() { clearTimeout(timer); if (state.transport) state.transport.offFrame(onFrame); }
+    state.transport.onFrame(onFrame);
+    state.transport.send(frame).catch(() => { cleanup(); resolve(null); });
+  });
+}
+
+const replyOk = (r) => !!r && r[0] === RESP_CODE_OK;
+
+// setupPingChannel finds or creates the ping channel's slot on the companion. A slot
+// holding another channel is never touched; with no free slot, pinging stays off.
+async function setupPingChannel() {
+  const p = state.ping;
+  const cfg = getConfig();
+  p.setupTried = true;
+  p.ready = false;
+  const off = (why) => { p.status = 'off — ' + why; dbg('ping: ' + p.status, 'no'); };
+  if (!p.maxChannels) { off('companion did not report its channel slots'); return; }
+  const prefs = parseScopeList(cfg.uplinkScope);
+  if (prefs.length && (state.fwVer == null || state.fwVer < SCOPE_MIN_FW)) { off('a ping scope needs firmware v' + SCOPE_MIN_FW + '+'); return; }
+  try {
+    await acquireRadio();
+  } catch (e) {
+    p.setupTried = false; // try again on a later tick
+    return;
+  }
+  try {
+    const key = await channelKey(cfg.uplinkChannel);
+    const channels = [];
+    for (let i = 0; i < p.maxChannels; i++) {
+      const c = parseChannelInfo(await companionReply(buildGetChannel(i), [RESP_CODE_CHANNEL_INFO, RESP_CODE_ERR]));
+      if (!c) break;
+      channels.push(c);
+      if (pickSlot([c], cfg.uplinkChannel, key)?.write === false) break; // ours found
+    }
+    const slot = pickSlot(channels, cfg.uplinkChannel, key);
+    if (!slot) { off('no free channel slot of ' + channels.length + ' read'); return; }
+    if (slot.write) {
+      if (!replyOk(await companionReply(buildSetChannel(slot.idx, cfg.uplinkChannel, key), [RESP_CODE_OK, RESP_CODE_ERR]))) {
+        off('could not write channel slot ' + slot.idx); return;
+      }
+      dbg('ping: added ' + cfg.uplinkChannel + ' to the companion in channel slot ' + slot.idx, 'st');
+    }
+    p.idx = slot.idx;
+    p.key = key;
+    p.hashByte = await channelHash(key);
+    p.prefs = prefs;
+    p.companionDefault = null;
+    if (state.fwVer >= DEFAULT_SCOPE_MIN_FW) {
+      p.companionDefault = parseDefaultScope(await companionReply(buildGetDefaultScope(), [RESP_CODE_DEFAULT_FLOOD_SCOPE, RESP_CODE_ERR]));
+    }
+    p.ready = true;
+    const def = p.companionDefault == null ? 'unknown' : p.companionDefault || 'none';
+    p.status = 'on — ' + cfg.uplinkChannel + ' in slot ' + slot.idx + ', scope '
+      + (prefs.length ? 'auto from ' + prefs.join(',') : 'companion default') + ' (companion default ' + def + ')';
+    dbg('ping: ' + p.status, 'st');
+  } catch (e) {
+    off(e.message);
+  } finally {
+    releaseRadio();
+  }
+}
+
+// pingTick runs every second: sets the channel up once, then lets uplinksched.js
+// decide whether a ping goes out now. Never while the radio is in use or parked.
+function pingTick(now) {
+  const p = state.ping;
+  const cfg = getConfig();
+  els('btnPingNow').style.display = featureEnabled(cfg, 'uplinkPing') && p.ready ? '' : 'none';
+  if (!featureEnabled(cfg, 'uplinkPing')) return;
+  if (!p.setupTried) { setupPingChannel(); return; }
+  if (p.ready && p.prefs.length) refreshServerRegions(now);
+  if (!p.ready || p.running || p.window || state.signing || state.regions.busy || state.paused) return;
+  const d = pingDecision({ now, fix: currentFix(), last: p.last, sentTimes: p.sentTimes, recentCells: p.cells, cfg });
+  if (d.send) sendPing(now, d.cell);
+}
+
+// refreshServerRegions fetches CoreScope's declared regions once per
+// SERVER_REGIONS_MS. A failure keeps the last list and retries after a minute: the
+// scope choice then runs on that plus this session's own answers, and without
+// either it falls back to the companion default.
+const SERVER_REGIONS_MS = 30 * 60000;
+function refreshServerRegions(now) {
+  const p = state.ping;
+  const url = getConfig().uplinkRegionsUrl;
+  if (!url || p.regionsFetching || now - p.regionsAt < SERVER_REGIONS_MS) return;
+  p.regionsFetching = true;
+  fetch(url, { cache: 'no-store' })
+    .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then((j) => {
+      p.serverRegions = Array.isArray(j && j.nodes) ? j.nodes : [];
+      p.regionsAt = now;
+      dbg('ping: declared regions of ' + p.serverRegions.length + ' repeaters from CoreScope', 'st');
+    })
+    .catch((e) => { p.regionsAt = now - SERVER_REGIONS_MS + 60000; dbg('ping: declared regions fetch failed (' + e.message + '), retry in 1 min', 'no'); })
+    .finally(() => { p.regionsFetching = false; });
+}
+
+// pingScope decides how the next ping goes out (src/autoscope.js). An un-scoped
+// choice needs the explicit firmware variant unless the companion has no default
+// scope, in which case sending without an override is already un-scoped.
+async function pingScope(now) {
+  const p = state.ping;
+  if (!p.prefs.length) return { mode: 'default', scope: p.companionDefault || '', reason: 'no uplinkScope configured' };
+  const c = chooseScope({
+    prefs: p.prefs, companionDefault: p.companionDefault,
+    heardKeys: [...pruneHeard(p.heard, now).keys()],
+    table: mergeRegionTable(p.serverRegions, state.regions.answers),
+  });
+  if (c.mode === 'unscoped' && p.companionDefault === '') return { ...c, mode: 'default' };
+  if (c.mode === 'unscoped' && !(state.fwVer >= UNSCOPED_MIN_FW)) {
+    return { mode: 'default', scope: p.companionDefault || '', reason: c.reason + '; unscoped needs firmware v' + UNSCOPED_MIN_FW + '+' };
+  }
+  if (c.mode === 'scope') {
+    // A region key is derived the same way as a hashtag channel key: SHA-256 of the
+    // '#'-prefixed name, first 16 bytes (helpers/TransportKeyStore.cpp).
+    const name = scopeKeyName(c.scope);
+    if (!p.scopeKeys.has(name)) p.scopeKeys.set(name, await channelKey(name));
+    c.key = p.scopeKeys.get(name);
+  }
+  return c;
+}
+
+async function sendPing(now, cell) {
+  const p = state.ping;
+  const cfg = getConfig();
+  const fix = currentFix();
+  const tag = makeTag();
+  p.running = true;
+  try {
+    await acquireRadio();
+  } catch (e) {
+    p.running = false;
+    return;
+  }
+  let sent = false;
+  let scoped = false;
+  let choice;
+  try {
+    choice = await pingScope(now);
+    if (choice.mode !== 'default') {
+      const frame = choice.mode === 'scope' ? buildScopeFrame(choice.key) : buildUnscopedFrame();
+      scoped = replyOk(await companionReply(frame, [RESP_CODE_OK, RESP_CODE_ERR]));
+      if (!scoped) { p.failed++; dbg('ping: scope ' + (choice.scope || 'unscoped') + ' not set — ping not sent', 'no'); return; }
+    }
+    sent = replyOk(await companionReply(buildChannelMessage(p.idx, Math.floor(Date.now() / 1000), pingText(tag)), [RESP_CODE_OK, RESP_CODE_ERR]));
+  } finally {
+    // Reset the override straight away: it would otherwise scope every later flood
+    // this companion sends, not just the ping.
+    if (scoped && !replyOk(await companionReply(buildScopeFrame(null), [RESP_CODE_OK, RESP_CODE_ERR]))) {
+      dbg('ping: scope reset did not ack — the override may still be set on the companion', 'no');
+    }
+    releaseRadio();
+    p.running = false;
+  }
+  if (!sent) { p.failed++; dbg('ping: channel send not acknowledged', 'no'); return; }
+  p.sent++;
+  p.sentTimes = p.sentTimes.filter((t) => now - t < 3600 * 1000).concat(now);
+  p.last = { at: now, lat: fix.lat, lon: fix.lon };
+  p.cells = pruneCells({ ...p.cells, [cell]: now }, now, cfg.uplinkSkipDays);
+  savePingCells(p.cells);
+  const scope = choice.scope ? scopeKeyName(choice.scope) : '';
+  p.window = { tag, at: new Date(now).toISOString(), fix, echoes: [], hash: null, channel: cfg.uplinkChannel, scope };
+  dbg('ping → ' + cfg.uplinkChannel + ' "' + pingText(tag) + '" ' + (scope ? 'scope ' + scope : 'unscoped')
+    + (choice.mode === 'default' ? ' (companion default)' : '') + ' — ' + choice.reason
+    + ' (' + p.sentTimes.length + ' this hour)', 'tx');
+  setTimeout(closePingWindow, PING_ECHO_WINDOW_MS);
+}
+
+// pingNow is the manual test ping: it skips the interval, distance, parked and
+// skip-cell rules, but keeps the hourly cap and needs a fix to file the result.
+function pingNow() {
+  const p = state.ping;
+  const now = Date.now();
+  const fix = currentFix();
+  if (!p.ready) { dbg('ping: not ready — ' + (p.status || 'channel not set up'), 'no'); return; }
+  if (p.running || p.window) { dbg('ping: one is still in flight', 'no'); return; }
+  if (state.signing || state.regions.busy) { dbg('ping: radio busy, try again in a few seconds', 'no'); return; }
+  if (!fix) { dbg('ping: no GPS fix yet', 'no'); return; }
+  const lastHour = p.sentTimes.filter((t) => now - t < 3600 * 1000).length;
+  if (lastHour >= getConfig().uplinkMaxPerHour) { dbg('ping: hourly cap reached', 'no'); return; }
+  dbg('ping: manual', 'st');
+  sendPing(now, skipCell(fix));
+}
+
+// notePingEcho checks one received GRP_TXT against the open window.
+async function notePingEcho(f) {
+  const p = state.ping;
+  const w = p.window;
+  if (!w || !p.key) return;
+  const e = await matchEcho(f.raw, p.key, p.hashByte, w.tag);
+  if (!e) return;
+  w.hash = w.hash || e.hash;
+  w.echoes.push({ first_hop: e.firstHop, last_hop: e.lastHop, hops: e.hops, snr: f.snr, rssi: f.rssi });
+  dbg('ping ← echo via ' + e.firstHop + (e.hops > 1 ? ' … ' + e.lastHop + ' (' + e.hops + ' hops)' : '') + ' snr ' + f.snr, 'ok');
+}
+
+function closePingWindow() {
+  const p = state.ping;
+  const w = p.window;
+  p.window = null;
+  if (!w) return;
+  if (w.echoes.length) p.echoed++;
+  state.queue.add(queued({
+    kind: 'uplink', at: w.at, tag: w.tag, channel: w.channel, scope: w.scope, pkt_hash: w.hash,
+    echoes: w.echoes, rx_pubkey: state.companionPubkey,
+    ...(w.fix ? { lat: w.fix.lat, lon: w.fix.lon, acc_m: w.fix.acc_m } : {}),
+  })).catch((e) => dbg('uplink queue failed: ' + e.message, 'no'));
+  dbg('ping ' + w.tag + ': ' + (w.echoes.length ? w.echoes.length + ' echo(es), first hop ' + w.echoes[0].first_hop : 'no echo heard'), w.echoes.length ? 'ok' : 'st');
 }
 
 function renderDiscoverStatus(dec) {
@@ -588,12 +966,163 @@ async function retryConfig() {
   dbg('config.json loaded on retry — uploading and feature flags are live now', 'ok');
   applyConfigToSettings();
   noteRegionInert();
+  initAccount();
   if (state.connected) {
     try { await startPublisher(); } catch (e) { dbg('broker connect after config retry failed: ' + e.message, 'no'); }
     startRfSampler(); // returns immediately if the flag is off; was skipped when config was missing at connect
   }
   renderUplinkChip();
   return true;
+}
+
+// queued stamps a record with the companion connected now (src/drain.js stampRecord),
+// so a backlog is only published while the companion that captured it is connected.
+function queued(rec) {
+  return stampRecord(rec, state.companionPubkey, state.companionName);
+}
+
+// --- CoreScope account (src/account.js does the work; this is wiring) ---------
+
+// initAccount builds the account once config names a CoreScope origin, then runs
+// discovery. Safe to call repeatedly: startup and a late config retry both call it.
+async function initAccount() {
+  const cfg = getConfig();
+  if (state.account || !cfg || !cfg.corescopeUrl) { renderAccount(); return; }
+  state.account = createAccount({
+    baseUrl: cfg.corescopeUrl,
+    fetch: (url, opts) => fetch(url, opts), // window.fetch called unbound throws "Illegal invocation"
+    storage: localStorage,
+    log: dbg,
+    onChange: renderAccount,
+    // A discovery without an answer, or a link left waiting, is asked again after a
+    // growing delay (src/account.js RETRY_DELAYS_MS).
+    onRetry: (what) => {
+      if (what === 'discover') discoverAccount().catch((e) => dbg('account: rediscovery failed: ' + e.message, 'no'));
+      else linkCurrentCompanion();
+    },
+  });
+  renderAccount();
+  await discoverAccount();
+}
+
+// discoverAccount runs discovery, refreshes the linked cache when logged in, and tries
+// to link the connected companion. Once per start, plus once per `online` event while
+// no discovery has got an answer yet — never in a loop.
+async function discoverAccount() {
+  const a = state.account;
+  if (!a) return;
+  await a.discover();
+  if (a.enabled && a.loggedIn) {
+    try { await a.refreshCompanions(); } catch (e) { dbg('account: companions list not refreshed (' + e.message + ')', 'no'); }
+  }
+  renderAccount();
+  linkCurrentCompanion();
+}
+
+// renderAccount writes accountView's model into the card. Called on every account
+// change and from the per-second status strip (for "N waiting"). It never rebuilds the
+// login inputs, so typing is never interrupted.
+function renderAccount() {
+  const a = state.account;
+  const card = els('accountCard');
+  if (!a) { card.style.display = 'none'; return; }
+  const pk = state.connected ? state.companionPubkey : '';
+  const v = accountView({
+    enabled: a.enabled, loggedIn: a.loggedIn, displayName: a.displayName, companions: a.companions,
+    connectedPubkey: pk, link: a.linkState, holding: !!pk && a.shouldHold(pk), pending: state.pendingCount,
+  });
+  card.style.display = v.visible ? 'block' : 'none';
+  if (!v.visible) return;
+  els('acctOut').style.display = v.mode === 'out' ? '' : 'none';
+  els('acctIn').style.display = v.mode === 'in' ? '' : 'none';
+  els('acctWho').textContent = v.who;
+  els('acctCompanions').innerHTML = v.rows.length
+    ? v.rows.map((r) => '<div class="rr"><span class="rname">' + esc(r.label) + '</span><span class="rc">' + esc(r.short) + '</span></div>').join('')
+    : (v.mode === 'in' ? '<div class="muted">No linked companions yet</div>' : '');
+  els('acctLink').textContent = v.linkText;
+  els('btnLinkRetry').style.display = v.showRetry ? '' : 'none';
+  els('acctHold').textContent = v.holdText;
+  els('acctHold').style.display = v.holdText ? '' : 'none';
+}
+
+// The longest a region round can hold the radio is one with a contact-path override
+// (OVERRIDE_HOLD_MS plus two writes); wait a little longer than that before giving up.
+const RADIO_WAIT_MS = 30000;
+
+// acquireRadio gives the sign exchange the companion to itself: it waits for a running
+// region round to finish, then holds regions.busy (so regionTick starts no new round)
+// and sets state.signing (so the discover sweep and the RF sampler stand down).
+async function acquireRadio() {
+  const deadline = Date.now() + RADIO_WAIT_MS;
+  while (state.regions.busy) {
+    if (Date.now() > deadline) throw transientError('the radio stayed busy with region discovery');
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  state.regions.busy = true;
+  state.signing = true;
+}
+
+function releaseRadio() {
+  state.signing = false;
+  state.regions.busy = false;
+}
+
+// signOnCompanion is the `sign` account.link() calls, for companion `pubkey`. A link
+// that is down, drops mid-exchange, or now belongs to another companion is transient:
+// account.js retries it later, and never has one companion sign another's challenge.
+async function signOnCompanion(bytes, pubkey) {
+  const isTarget = () => String(state.companionPubkey || '').toLowerCase() === pubkey;
+  if (!bleLinkUp()) throw transientError('the companion link is down');
+  if (!isTarget()) throw transientError('another companion is connected now');
+  await acquireRadio();
+  const epoch = state.bleEpoch;
+  try {
+    if (!bleLinkUp()) throw transientError('the companion link is down');
+    if (!isTarget()) throw transientError('another companion is connected now');
+    return await signWithCompanion(state.transport, bytes);
+  } catch (e) {
+    throw signFailure(e, { linkUp: bleLinkUp(), linkChanged: state.bleEpoch !== epoch });
+  } finally {
+    releaseRadio();
+  }
+}
+
+// linkCurrentCompanion asks account.js to link the connected companion. account.js
+// decides whether anything needs doing (cached, blocked, single-flight); a successful
+// link kicks a drain so a held queue goes out immediately.
+function linkCurrentCompanion(force = false) {
+  const a = state.account;
+  if (!a || !a.enabled || !a.loggedIn || !state.connected || !state.companionPubkey) return;
+  a.link({ pubkey: state.companionPubkey, name: state.companionName, sign: signOnCompanion, force })
+    .then((status) => { if (status === 'linked') drain().then(refreshCounters).catch(() => {}); })
+    .catch((e) => dbg('account: link attempt failed unexpectedly: ' + e.message, 'no'));
+}
+
+async function onLogin() {
+  const a = state.account;
+  if (!a) return;
+  const b = els('btnLogin');
+  b.disabled = true;
+  els('acctMsg').textContent = '';
+  try {
+    const r = await a.login(els('acctEmail').value, els('acctPassword').value, deviceNameFrom(navigator.userAgent));
+    if (r.ok) {
+      els('acctPassword').value = ''; // not kept anywhere, not even in the field
+      linkCurrentCompanion();
+    } else {
+      els('acctMsg').textContent = r.message;
+    }
+  } finally {
+    b.disabled = false;
+    renderAccount();
+  }
+}
+
+function onLogout() {
+  if (!state.account) return;
+  state.account.logout();
+  els('acctMsg').textContent = '';
+  renderAccount();
 }
 
 // bleLinkUp asks the transport, which asks the browser. Not a flag of ours: the link
@@ -621,13 +1150,16 @@ function monitorTick() {
   const linkUp = bleLinkUp();
   noteLinkState(linkUp);
   const dec = discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused, linkUp);
-  if (dec.fire) { fireDiscover(now); renderDiscoverStatus(discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused, linkUp)); }
+  // Not while signing: the sweep answers RESP_CODE_OK, which the sign exchange cannot
+  // tell from its own. The sweep fires on the first tick after signing ends.
+  if (dec.fire && !state.signing) { fireDiscover(now); renderDiscoverStatus(discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused, linkUp)); }
   else renderDiscoverStatus(dec);
   if (!linkUp) return; // nothing below this can reach the radio
   // The only region-discovery work left on the clock: free a timed-out ask, so the
   // slot is available to the very next repeater heard instead of one tick later. The
   // asking itself happens on receptions (noteRepeaterHeard), never on a timer.
   regionTick(now);
+  pingTick(now);
   // A session that started without config must be able to heal without a restart:
   // retry once a minute (not per tick) for as long as it is missing.
   if (!getConfig() && (state.lastConfigTryAt == null || now - state.lastConfigTryAt >= 60000)) {
@@ -666,6 +1198,7 @@ async function renderStatusStrip() {
   els('sGps').textContent = fix ? '✓ ' + Math.round(fix.acc_m) + 'm' : '… no fix';
   state.pendingCount = await state.queue.count(); // also stamped into the exported log header
   els('sPending').textContent = state.pendingCount + ' pending';
+  renderAccount(); // the card's "N waiting" follows the same count
   els('sRate').textContent = state.rxTimes.length + ' pkt/min';
   const dot = els('uDot');
   const color = !state.publisher ? '#9aa4b2'
@@ -789,6 +1322,9 @@ async function processFrame(dv) {
   const sig = ' snr=' + f.snr + ' rssi=' + f.rssi;
   if (state.verbose) dbg('0x88 raw=' + rawHex + sig, 'st'); // raw bytes only when verbose-debugging
   const pkt = parsePacket(f.raw);
+  if (state.ping.window && pkt && pkt.payloadType === PAYLOAD_TYPE_GRP_TXT && pkt.hops.length) {
+    notePingEcho(f).catch((e) => dbg('ping echo check failed: ' + e.message, 'no'));
+  }
   // An advert's Ed25519 signature is the only proof that the pubkey in it belongs to a
   // node that exists. Gated behind verifyAdverts, a failed check drops the identity and
   // leaves the reception itself in the non-attributed path below, where the measurement
@@ -833,7 +1369,7 @@ async function processFrame(dv) {
     });
     if (!rfRec) return;
     state.rfLogged++;
-    await state.queue.add(rfRec);
+    await state.queue.add(queued(rfRec));
     renderCounters();
     return;
   }
@@ -857,7 +1393,7 @@ async function processFrame(dv) {
   // is deliberate: it costs ~19 requests against the ~180 the discover sweep already
   // sends, and it keeps every stored list demonstrably current instead of assumed.
   const regionsCfg = getConfig();
-  if (featureEnabled(regionsCfg, 'regionDiscovery') && hk.src === 'advert' && pkt.advertType === ADV_TYPE_REPEATER && pkt.advertTs != null) {
+  if (asksOn(regionsCfg) && hk.src === 'advert' && pkt.advertType === ADV_TYPE_REPEATER && pkt.advertTs != null) {
     noteRepeaterHeard(hk.heardKey, f.snr, f.rssi);
   }
   // Discover responses are the common case (47h advert intervals mean real adverts are
@@ -867,7 +1403,7 @@ async function processFrame(dv) {
   // stored null: the due rule (answered.get(pubkey) !== advertTs, see dueDelayMs)
   // then asks it once per session and re-asks automatically if a real advert with a
   // timestamp later arrives. Async and non-blocking — a failed resolve just adds nothing.
-  if (featureEnabled(regionsCfg, 'regionDiscovery') && hk.src === 'discover' && pkt.discoverType === ADV_TYPE_REPEATER) {
+  if (asksOn(regionsCfg) && hk.src === 'discover' && pkt.discoverType === ADV_TYPE_REPEATER) {
     resolvePubkey(hk.heardKey).then((pk) => {
       if (!pk) return;
       noteRepeaterHeard(pk, f.snr, f.rssi);
@@ -892,7 +1428,7 @@ async function processFrame(dv) {
   // any organic reception, so in busy areas — where forwarder traffic is densest —
   // the sweep is suppressed and yields the FEWEST discover-sourced candidates exactly
   // where there is the most to hear.
-  if (featureEnabled(regionsCfg, 'regionDiscovery') && hk.src === 'rxlog') {
+  if (asksOn(regionsCfg) && hk.src === 'rxlog') {
     resolvePubkey(hk.heardKey).then((pk) => {
       state.pathResolve.set(hk.heardKey, !!pk);
       if (!pk) return;
@@ -901,6 +1437,7 @@ async function processFrame(dv) {
   }
 
   noteHeard(hk.heardKey, hk.heardKeyLen, f.snr, f.rssi, hk.src); // show in the list even without a GPS fix
+  if (hk.src === 'advert' || hk.src === 'discover' || hk.src === 'rxlog') state.ping.heard.set(hk.heardKey.toLowerCase(), Date.now());
   state.rxTotal++;
   state.rxTimes.push(Date.now());
   addNodeKey(state.nodeKeys, hk.heardKey);
@@ -923,7 +1460,7 @@ async function processFrame(dv) {
   state.hexCells.add(hexCellAt(fix.lat, fix.lon, HEX_COUNT_RES));
   renderCounters();
   const rec = { rx_at: new Date().toISOString(), raw: rawHex, snr: f.snr, rssi: f.rssi, lat: fix.lat, lon: fix.lon, acc_m: fix.acc_m };
-  await state.queue.add(rec);
+  await state.queue.add(queued(rec));
   if (state.soundEnabled && state.beeper) state.beeper.beep(); // audio cue per mapped node (#7)
   if (state.localMap) state.localMap.addPoint(fix.lat, fix.lon, f.snr); // live hex on the map
   refreshCounters();
@@ -961,7 +1498,25 @@ const drain = serialiseDrain(async () => {
     name: state.companionName,
     failures: state.pubFailures,
     log: dbg,
+    // Only when CoreScope requires linked companions (src/account.js shouldHold).
+    // Off — the default — publishing never looks at the account.
+    hold: (pk) => !!state.account && state.account.shouldHold(pk),
   });
+  // A pass stopped by the broker link says nothing about the hold either way.
+  if (r.stopped !== 'link') {
+    state.lastDrainHeld = r.stopped === 'held';
+    if (state.lastDrainHeld !== state.holdLogged) {
+      state.holdLogged = state.lastDrainHeld;
+      dbg(state.lastDrainHeld
+        ? 'uploads held — this CoreScope only accepts data from companions linked to an account; the queue keeps everything until this one is linked'
+        : 'uploads released — this companion is linked', state.lastDrainHeld ? 'no' : 'ok');
+      renderAccount();
+    }
+    if (r.waiting !== state.waitingLogged) {
+      state.waitingLogged = r.waiting;
+      if (r.waiting) dbg(r.waiting + ' queued record(s) belong to another companion, kept until that one is connected again', 'no');
+    }
+  }
   if (r.committed) {
     state.lastUploadAt = Date.now();
     dbg('published ' + r.committed + ' record(s)' + (r.stopped === 'link' ? ' before the link dropped — rest kept' : ''), 'ok');
@@ -999,7 +1554,7 @@ async function pushNow() {
     const pending = await state.queue.count();
     const uplink = currentUplink();
     const published = uplink === 'ok' ? await drain() : 0;
-    const outcome = pushOutcome({ uplink, pending, published });
+    const outcome = pushOutcome({ uplink, pending, published, held: state.lastDrainHeld });
     dbg(outcome.message, outcome.level);
     if (outcome.reloadConfig) {
       if (await retryConfig()) await drain(); // config arrived — flush immediately
@@ -1030,8 +1585,10 @@ async function connectAll() {
     state.transport.onFrame(processFrame);
     state.transport.onFrame(onRegionsFrame); // no-op unless a region request is in flight
     state.transport.onStatus((s) => {
+      state.bleEpoch++;
       dbg('BLE: ' + s);
       if (state.connected) log(s === 'connected' ? 'capturing' : 'BLE ' + s + '…');
+      if (s === 'connected') linkCurrentCompanion(); // a link that dropped mid-sign retries here
     });
     await state.transport.connect();
     s1.textContent = '① Companion connected ✓';
@@ -1045,6 +1602,7 @@ async function connectAll() {
     s2.className = '';
     els('companionInfo').textContent = (info.name ? info.name + ' · ' : '') + state.companionPubkey.slice(0, 20) + '…';
     dbg('SELF_INFO → ' + (info.name || '(unnamed)') + ' ' + state.companionPubkey);
+    if (state.account) state.account.newConnection(); // a new connect may try again what the last one gave up on
     await maybeReplayPendingRestore(); // fix up any contact left zero-hop by a crash/BLE-drop last session, before anything else touches it
 
     // Ensure the companion adverts with 2-byte path hashes — 1-byte mode produces
@@ -1075,6 +1633,7 @@ async function connectAll() {
       // screen while the feature is actually live.
       state.fwVer = di.fwVer;
       state.regions.supported = di.fwVer >= REGION_DISCOVERY_MIN_FW;
+      state.ping.maxChannels = di.maxChannels;
     } catch (e) {
       // requestDeviceInfo threw or timed out — supported stays false and fwVer stays
       // null, and applyConfigToSettings/noteRegionInert below both report that as the
@@ -1118,6 +1677,9 @@ async function connectAll() {
     renderUplinkChip();
     log('capturing as ' + (info.name || state.companionPubkey.slice(0, 12)));
     switchView('home'); // connected → jump to the live monitor
+    // Last, so the sign exchange starts after setup's own commands (device query,
+    // path-hash mode) have been answered.
+    linkCurrentCompanion();
 
   } catch (e) {
     step('✗ ' + e.message, 'err');
@@ -1177,7 +1739,7 @@ function startRfSampler() {
     if (!state.transport || !state.companionPubkey) return;
     // A sample taken over a dead link is three writes that throw and one
     // "rf sample incomplete — discarded" line. Reschedule and wait for the link.
-    if (!bleLinkUp()) {
+    if (!bleLinkUp() || state.signing) {
       if (state.rfGen !== myGen) return;
       state.rfTimer = setTimeout(tick, nextSampleDelay(state.motion ? state.motion.paused : false));
       return;
@@ -1189,7 +1751,7 @@ function startRfSampler() {
       const packets = await ask(STATS_PACKETS);
       const sample = mergeSample(core, radio, packets, fix, new Date().toISOString(), state.motion ? state.motion.paused : false);
       if (sample) {
-        await state.queue.add(sample);
+        await state.queue.add(queued(sample));
         state.lastRfSample = sample; // Settings diagnostics line
         renderRfSampler();
         dbg('rf sample noise=' + sample.noise_floor + 'dBm rx_air=' + sample.rx_air_secs + 's', 'st');
@@ -1219,6 +1781,9 @@ async function disconnectAll(keepProgress) {
   // Outstanding requests die with the transport: no reply can arrive on a link that is
   // gone, and a tag from this session must never match one from the next.
   state.regions.outstanding.clear();
+  state.names.outstanding.clear();
+  Object.assign(state.ping, { setupTried: false, ready: false, running: false, window: null, maxChannels: null, status: '', companionDefault: null });
+  state.ping.heard.clear();
   state.regions.queue.length = 0;
   // A contact left zero-hop here is exactly what the localStorage crash-safety record
   // covers — leave it in place (do NOT restore over a transport that's gone, and do NOT
@@ -1247,6 +1812,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   try {
     await loadConfig();
     applyConfigToSettings();
+    initAccount(); // not awaited: discovery has its own 5 s timeout and must not delay startup
   } catch (e) {
     // Loud on THREE surfaces. This failure previously wrote one line to els('status'),
     // which connectAll then cleared with log('') — so the most consequential startup
@@ -1282,6 +1848,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (state.soundEnabled) state.beeper.ensure(); // unlock + confirm audio in this gesture
   });
   els('btnPush').addEventListener('click', pushNow);
+  els('btnLogin').addEventListener('click', onLogin);
+  els('acctPassword').addEventListener('keydown', (e) => { if (e.key === 'Enter') onLogin(); });
+  els('btnLogout').addEventListener('click', onLogout);
+  els('btnLinkRetry').addEventListener('click', () => linkCurrentCompanion(true));
   els('btnShareLog').addEventListener('click', async () => {
     const lines = Array.from(els('log').childNodes).map((n) => n.textContent);
     // Built HERE, at share time, so it can never roll out of the ring buffer the way
@@ -1312,12 +1882,19 @@ window.addEventListener('DOMContentLoaded', async () => {
         capped: state.regions.capped, bonus: state.regions.bonus,
         sigAnswered: state.regions.sigAnswered, sigSilent: state.regions.sigSilent,
       },
+      ping: { status: state.ping.status, sent: state.ping.sent, echoed: state.ping.echoed, failed: state.ping.failed },
+      names: {
+        wanted: state.names.wanted.size, named: state.names.named.size,
+        asks: state.names.asks, replies: state.names.replies,
+        dropped: state.names.dropped, flooded: state.names.flooded,
+      },
       lineCount: lines.length,
       lineCap: LOG_LINE_CAP,
     });
     const text = header + (lines.join('\n') || '(empty log)');
     try { await shareLog(text); } catch (e) { dbg('share failed: ' + e.message, 'no'); }
   });
+  els('btnPingNow').addEventListener('click', pingNow);
   els('btnDbg').addEventListener('click', () => {
     const logEl = els('log');
     const show = logEl.style.display === 'none';
@@ -1340,6 +1917,10 @@ window.addEventListener('DOMContentLoaded', async () => {
   // — with no config there is no publisher to drain into.
   window.addEventListener('online', () => {
     retryConfig().finally(() => { drain().then(refreshCounters).catch(() => {}); });
+    // A start without network never got an answer from CoreScope: ask once more now.
+    // Otherwise only a link that was waiting on the network needs another go.
+    if (state.account && !state.account.discovered) discoverAccount();
+    else linkCurrentCompanion();
   });
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});

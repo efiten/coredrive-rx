@@ -3,7 +3,7 @@
 // not lose or duplicate what it already delivered.
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { drainOnce, COMMIT_EVERY, POISON_AFTER } from '../src/drain.js';
+import { drainOnce, COMMIT_EVERY, POISON_AFTER, stampRecord } from '../src/drain.js';
 
 // fakeQueue records exactly what was removed and when, which is the whole question.
 function fakeQueue(n) {
@@ -139,7 +139,7 @@ test('no publisher, no connection or no pubkey is a no-op, not an error', async 
 test('an empty queue publishes nothing and commits nothing', async () => {
   const q = fakeQueue(0);
   const r = await drainOnce(base(q, fakePublisher({})));
-  assert.deepStrictEqual(r, { published: 0, committed: 0, skipped: 0, stopped: 'done' });
+  assert.deepStrictEqual(r, { published: 0, committed: 0, skipped: 0, waiting: 0, stopped: 'done' });
   assert.strictEqual(q.removals.length, 0, 'must not call remove([]) for nothing');
 });
 
@@ -198,4 +198,111 @@ test('serialiseDrain releases the slot after a rejection, and propagates it', as
   await assert.rejects(() => drain(), /boom/);
   assert.strictEqual(await drain(), 'ok', 'the slot must be free again');
   assert.strictEqual(starts, 2);
+});
+
+// --- hold until linked (src/account.js shouldHold) ---------------------------
+
+test('a held pass publishes nothing and leaves the queue exactly as it was', async () => {
+  const q = fakeQueue(4);
+  let reads = 0;
+  const takeAll = q.takeAll.bind(q);
+  q.takeAll = async () => { reads++; return takeAll(); };
+  const p = fakePublisher({});
+  const r = await drainOnce({ ...base(q, p), hold: () => true });
+  assert.deepStrictEqual(r, { published: 0, committed: 0, skipped: 0, waiting: 0, stopped: 'held' });
+  assert.strictEqual(p.calls, 0);
+  assert.deepStrictEqual(q.removals, []);
+  assert.deepStrictEqual(q.remaining(), [1, 2, 3, 4]);
+});
+
+test('without a hold function the pass is exactly as before', async () => {
+  const q = fakeQueue(3);
+  const r = await drainOnce(base(q, fakePublisher({})));
+  assert.strictEqual(r.published, 3);
+  assert.strictEqual(r.stopped, 'done');
+});
+
+test('a hold that lifts releases the whole queue on the next pass', async () => {
+  const q = fakeQueue(5);
+  const p = fakePublisher({});
+  let held = true;
+  const hold = () => held;
+  assert.strictEqual((await drainOnce({ ...base(q, p), hold })).stopped, 'held');
+  held = false;
+  const r = await drainOnce({ ...base(q, p), hold });
+  assert.strictEqual(r.published, 5);
+  assert.deepStrictEqual(q.remaining(), []);
+});
+
+test('a broker link that is down still reports "link", not "held"', async () => {
+  const q = fakeQueue(2);
+  const p = fakePublisher({});
+  p.up = false;
+  assert.strictEqual((await drainOnce({ ...base(q, p), hold: () => true })).stopped, 'link');
+});
+
+// --- each row belongs to the companion that captured it ----------------------
+// A queue can hold rows of an earlier companion (an offline backlog, or a hold for a
+// companion that never got linked). Those must never go out under the one connected
+// now, and not under their own pubkey either: the MQTT clientId is the connected
+// companion, the ACL binds the topic to ${clientid}, and EMQX's default
+// deny_action=ignore still acknowledges the denied publish, so the row was removed
+// and never stored. They wait in the queue for their own companion.
+
+function recordingPublisher() {
+  const p = { up: true, sent: [], connected() { return this.up; },
+    async publish(pk, rec, name) { this.sent.push({ pk, id: rec.id, name }); } };
+  return p;
+}
+const A = 'aa'.repeat(32), B = 'bb'.repeat(32);
+
+test('a row of another companion stays queued; only rows of the connected one go out', async () => {
+  const q = fakeQueue(0);
+  q.rows = [{ id: 1, raw: 'aa', rx: A, rx_name: 'Car' }, { id: 2, raw: 'aa', rx: B, rx_name: 'Bike' }];
+  const p = recordingPublisher();
+  const r = await drainOnce({ queue: q, publisher: p, pubkey: B, name: 'Bike', failures: new Map() });
+  assert.strictEqual(r.published, 1);
+  assert.strictEqual(r.waiting, 1);
+  assert.strictEqual(r.stopped, 'done', 'waiting for another companion is not a hold');
+  assert.deepStrictEqual(p.sent, [{ pk: B, id: 2, name: 'Bike' }]);
+  assert.deepStrictEqual(q.remaining(), [1]);
+});
+
+test('the waiting rows go out once their own companion is connected', async () => {
+  const q = fakeQueue(0);
+  q.rows = [{ id: 1, raw: 'aa', rx: A, rx_name: 'Car' }, { id: 2, raw: 'aa', rx: B, rx_name: 'Bike' }];
+  await drainOnce({ queue: q, publisher: recordingPublisher(), pubkey: B, name: 'Bike', failures: new Map() });
+  const p = recordingPublisher();
+  const r = await drainOnce({ queue: q, publisher: p, pubkey: A, name: 'Car', failures: new Map() });
+  assert.strictEqual(r.waiting, 0);
+  assert.deepStrictEqual(p.sent, [{ pk: A, id: 1, name: 'Car' }]);
+  assert.deepStrictEqual(q.remaining(), []);
+});
+
+test('an unstamped row (queued before this version) still goes out under the connected companion', async () => {
+  const q = fakeQueue(1);
+  const p = recordingPublisher();
+  await drainOnce({ queue: q, publisher: p, pubkey: B, name: 'Bike', failures: new Map() });
+  assert.deepStrictEqual(p.sent, [{ pk: B, id: 1, name: 'Bike' }]);
+});
+
+test('the hold is asked for the connected companion only, never for a waiting row', async () => {
+  const q = fakeQueue(0);
+  q.rows = [{ id: 1, raw: 'aa', rx: A }, { id: 2, raw: 'aa', rx: B }, { id: 3, raw: 'aa', rx: A }];
+  const p = recordingPublisher();
+  const asked = [];
+  const r = await drainOnce({ queue: q, publisher: p, pubkey: B, name: 'Bike', failures: new Map(),
+    hold: (pk) => { asked.push(pk); return true; } });
+  assert.deepStrictEqual(p.sent, []);
+  assert.deepStrictEqual(q.remaining(), [1, 2, 3]);
+  assert.strictEqual(r.stopped, 'held');
+  assert.strictEqual(r.waiting, 2);
+  assert.deepStrictEqual(asked, [B]);
+});
+
+test('stampRecord adds the capturing companion, lowercased, without touching the record', () => {
+  const rec = { kind: 'rf', at: 't', noise_floor: -110 };
+  assert.deepStrictEqual(stampRecord(rec, A.toUpperCase(), 'Car'), { kind: 'rf', at: 't', noise_floor: -110, rx: A, rx_name: 'Car' });
+  assert.deepStrictEqual(rec, { kind: 'rf', at: 't', noise_floor: -110 }, 'a copy, not a mutation');
+  assert.deepStrictEqual(stampRecord(rec, '', ''), rec, 'no companion known: unstamped');
 });
