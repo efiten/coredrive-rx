@@ -139,7 +139,7 @@ test('no publisher, no connection or no pubkey is a no-op, not an error', async 
 test('an empty queue publishes nothing and commits nothing', async () => {
   const q = fakeQueue(0);
   const r = await drainOnce(base(q, fakePublisher({})));
-  assert.deepStrictEqual(r, { published: 0, committed: 0, skipped: 0, stopped: 'done' });
+  assert.deepStrictEqual(r, { published: 0, committed: 0, skipped: 0, waiting: 0, stopped: 'done' });
   assert.strictEqual(q.removals.length, 0, 'must not call remove([]) for nothing');
 });
 
@@ -209,7 +209,7 @@ test('a held pass publishes nothing and leaves the queue exactly as it was', asy
   q.takeAll = async () => { reads++; return takeAll(); };
   const p = fakePublisher({});
   const r = await drainOnce({ ...base(q, p), hold: () => true });
-  assert.deepStrictEqual(r, { published: 0, committed: 0, skipped: 0, stopped: 'held' });
+  assert.deepStrictEqual(r, { published: 0, committed: 0, skipped: 0, waiting: 0, stopped: 'held' });
   assert.strictEqual(p.calls, 0);
   assert.deepStrictEqual(q.removals, []);
   assert.deepStrictEqual(q.remaining(), [1, 2, 3, 4]);
@@ -243,8 +243,11 @@ test('a broker link that is down still reports "link", not "held"', async () => 
 
 // --- each row belongs to the companion that captured it ----------------------
 // A queue can hold rows of an earlier companion (an offline backlog, or a hold for a
-// companion that never got linked). Those must go out under THEIR pubkey, never the
-// one connected now, and the hold is decided per row.
+// companion that never got linked). Those must never go out under the one connected
+// now, and not under their own pubkey either: the MQTT clientId is the connected
+// companion, the ACL binds the topic to ${clientid}, and EMQX's default
+// deny_action=ignore still acknowledges the denied publish, so the row was removed
+// and never stored. They wait in the queue for their own companion.
 
 function recordingPublisher() {
   const p = { up: true, sent: [], connected() { return this.up; },
@@ -253,13 +256,27 @@ function recordingPublisher() {
 }
 const A = 'aa'.repeat(32), B = 'bb'.repeat(32);
 
-test('a stamped row is published under the companion that captured it, not the one connected now', async () => {
+test('a row of another companion stays queued; only rows of the connected one go out', async () => {
   const q = fakeQueue(0);
   q.rows = [{ id: 1, raw: 'aa', rx: A, rx_name: 'Car' }, { id: 2, raw: 'aa', rx: B, rx_name: 'Bike' }];
   const p = recordingPublisher();
   const r = await drainOnce({ queue: q, publisher: p, pubkey: B, name: 'Bike', failures: new Map() });
-  assert.strictEqual(r.published, 2);
-  assert.deepStrictEqual(p.sent, [{ pk: A, id: 1, name: 'Car' }, { pk: B, id: 2, name: 'Bike' }]);
+  assert.strictEqual(r.published, 1);
+  assert.strictEqual(r.waiting, 1);
+  assert.strictEqual(r.stopped, 'done', 'waiting for another companion is not a hold');
+  assert.deepStrictEqual(p.sent, [{ pk: B, id: 2, name: 'Bike' }]);
+  assert.deepStrictEqual(q.remaining(), [1]);
+});
+
+test('the waiting rows go out once their own companion is connected', async () => {
+  const q = fakeQueue(0);
+  q.rows = [{ id: 1, raw: 'aa', rx: A, rx_name: 'Car' }, { id: 2, raw: 'aa', rx: B, rx_name: 'Bike' }];
+  await drainOnce({ queue: q, publisher: recordingPublisher(), pubkey: B, name: 'Bike', failures: new Map() });
+  const p = recordingPublisher();
+  const r = await drainOnce({ queue: q, publisher: p, pubkey: A, name: 'Car', failures: new Map() });
+  assert.strictEqual(r.waiting, 0);
+  assert.deepStrictEqual(p.sent, [{ pk: A, id: 1, name: 'Car' }]);
+  assert.deepStrictEqual(q.remaining(), []);
 });
 
 test('an unstamped row (queued before this version) still goes out under the connected companion', async () => {
@@ -269,17 +286,18 @@ test('an unstamped row (queued before this version) still goes out under the con
   assert.deepStrictEqual(p.sent, [{ pk: B, id: 1, name: 'Bike' }]);
 });
 
-test('the hold is per row: rows of an unlinked companion stay queued while rows of a linked one go out', async () => {
+test('the hold is asked for the connected companion only, never for a waiting row', async () => {
   const q = fakeQueue(0);
   q.rows = [{ id: 1, raw: 'aa', rx: A }, { id: 2, raw: 'aa', rx: B }, { id: 3, raw: 'aa', rx: A }];
   const p = recordingPublisher();
   const asked = [];
   const r = await drainOnce({ queue: q, publisher: p, pubkey: B, name: 'Bike', failures: new Map(),
-    hold: (pk) => { asked.push(pk); return pk === A; } });
-  assert.deepStrictEqual(p.sent.map((s) => s.id), [2]);
-  assert.deepStrictEqual(q.remaining(), [1, 3]);
-  assert.strictEqual(r.stopped, 'held', 'something is still held');
-  assert.ok(asked.includes(A) && asked.includes(B));
+    hold: (pk) => { asked.push(pk); return true; } });
+  assert.deepStrictEqual(p.sent, []);
+  assert.deepStrictEqual(q.remaining(), [1, 2, 3]);
+  assert.strictEqual(r.stopped, 'held');
+  assert.strictEqual(r.waiting, 2);
+  assert.deepStrictEqual(asked, [B]);
 });
 
 test('stampRecord adds the capturing companion, lowercased, without touching the record', () => {

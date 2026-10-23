@@ -189,6 +189,14 @@ test('verifyAdverts stays off unless config.json turns it on', () => {
   assert.strictEqual(featureEnabled({ verifyAdverts: true }, 'verifyAdverts'), true);
 });
 
+// The app reads the flag from the normalized config (getConfig), not from raw
+// config.json, so the check above alone passed while the flag never reached the gate.
+test('normalizeConfig keeps verifyAdverts', () => {
+  assert.strictEqual(featureEnabled(normalizeConfig({ mqttUrl: 'wss://x/ws', verifyAdverts: true }), 'verifyAdverts'), true);
+  assert.strictEqual(featureEnabled(normalizeConfig({ mqttUrl: 'wss://x/ws' }), 'verifyAdverts'), false);
+  assert.strictEqual(featureEnabled(normalizeConfig({ mqttUrl: 'wss://x/ws', verifyAdverts: false }), 'verifyAdverts'), false);
+});
+
 // --- Region pacing defaults ---------------------------------------------------
 // These were written out twice — once in src/regionsched.js and once here — and drifted
 // apart: the scheduler said four asks per encounter, config.js said three, and since the

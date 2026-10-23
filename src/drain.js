@@ -24,9 +24,9 @@ export const COMMIT_EVERY = 10; // ids per queue.remove — bounds re-publishing
 export const POISON_AFTER = 3;  // consecutive failures before a record is stepped over
 
 // stampRecord returns a copy of a queue record that names the companion that captured
-// it (rx, rx_name), so drainOnce publishes it under that companion even when another
-// one is connected by then. Neither field is part of any MQTT payload: the builders in
-// src/publisher.js pick their fields explicitly. No companion known: unchanged.
+// it (rx, rx_name), so drainOnce publishes it only while THAT companion is connected.
+// Neither field is part of any MQTT payload: the builders in src/publisher.js pick
+// their fields explicitly. No companion known: unchanged.
 export function stampRecord(rec, pubkey, name) {
   const pk = String(pubkey || '').toLowerCase();
   return pk ? { ...rec, rx: pk, rx_name: String(name || '') } : rec;
@@ -37,11 +37,15 @@ export function stampRecord(rec, pubkey, name) {
 // deps:
 //   queue     { takeAll(), remove(ids) }
 //   publisher { connected(), publish(pubkey, rec, name) }  — publish rejects on failure
-//   pubkey, name  the companion connected now. A row stamped with the companion that
-//             captured it (rec.rx, rec.rx_name; src/app.js stampRecord) is published
-//             under THAT companion: a queue can hold an earlier companion's backlog,
-//             and its receptions must never be attributed to the one connected now.
-//             An unstamped row (queued before stamping existed) uses pubkey/name.
+//   pubkey, name  the companion connected now, which is also the MQTT clientId. A row
+//             stamped with another companion (rec.rx; src/app.js stampRecord) stays in
+//             the queue until that companion is connected again: its receptions must
+//             never be attributed to the one connected now, and publishing them under
+//             their own pubkey does not work either. The documented ACL binds the topic
+//             to ${clientid}, and with EMQX's default deny_action=ignore the broker
+//             still acknowledges the denied publish, so the row was removed from the
+//             queue and never stored. An unstamped row (queued before stamping
+//             existed) uses pubkey/name.
 //   failures  Map<id, count> of consecutive publish failures, owned by the caller so it
 //             survives across drains (a poison record must be recognised over time)
 //   log       (msg, level) optional
@@ -51,13 +55,14 @@ export function stampRecord(rec, pubkey, name) {
 //             data AFTER the broker acknowledged it, so the row stays in the queue;
 //             capture goes on. Absent or false (the default): publishing as before.
 //
-// Returns { published, committed, skipped, stopped } where `stopped` says why the
-// pass ended: 'done' | 'link' | 'error' | 'held' ('held': the pass got through the
-// queue but left rows of a held companion in it).
+// Returns { published, committed, skipped, waiting, stopped } where `waiting` counts
+// the rows left for another companion and `stopped` says why the pass ended:
+// 'done' | 'link' | 'error' | 'held' ('held': the pass got through the queue but left
+// rows of a held companion in it).
 export async function drainOnce({ queue, publisher, pubkey, name, failures, log, hold }) {
   const note = log || (() => {});
   if (!(publisher && publisher.connected() && pubkey)) {
-    return { published: 0, committed: 0, skipped: 0, stopped: 'link' };
+    return { published: 0, committed: 0, skipped: 0, waiting: 0, stopped: 'link' };
   }
   const rows = await queue.takeAll();
   const pending = [];      // acked ids not yet removed from the queue
@@ -66,6 +71,7 @@ export async function drainOnce({ queue, publisher, pubkey, name, failures, log,
   let skipped = 0;
   let stopped = 'done';
   let held = 0;
+  let waiting = 0;
 
   // commit is called as progress accumulates AND on every exit path, so an
   // acknowledged record is never left in the queue to be sent twice.
@@ -81,11 +87,10 @@ export async function drainOnce({ queue, publisher, pubkey, name, failures, log,
       // Re-check the link before every record: it is the whole point of committing
       // incrementally that a mid-flush drop keeps what was already delivered.
       if (!publisher.connected()) { stopped = 'link'; break; }
-      const owner = r.rx || pubkey;
-      const ownerName = r.rx ? (r.rx_name || '') : name;
-      if (hold && hold(owner)) { held++; continue; }
+      if (r.rx && r.rx !== pubkey) { waiting++; continue; }
+      if (hold && hold(pubkey)) { held++; continue; }
       try {
-        await publisher.publish(owner, r, ownerName);
+        await publisher.publish(pubkey, r, name);
       } catch (e) {
         // A publish that failed because the LINK went down says nothing about the
         // record, so it must not count as a strike against it — three drops in a row
@@ -122,7 +127,7 @@ export async function drainOnce({ queue, publisher, pubkey, name, failures, log,
   }
 
   if (stopped === 'done' && held) stopped = 'held';
-  return { published, committed, skipped, stopped };
+  return { published, committed, skipped, waiting, stopped };
 }
 
 // serialiseDrain wraps a drain function so only ONE pass runs at a time; a caller
