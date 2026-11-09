@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   makeTag, pingText, buildChannelMessage, buildScopeFrame, scopeKeyName, buildGetChannel,
-  buildSetChannel, parseChannelInfo, pickSlot, matchEcho, RESP_CODE_CHANNEL_INFO,
+  buildSetChannel, parseChannelInfo, pickSlot, matchEcho, channelPacket, RESP_CODE_CHANNEL_INFO,
 } from '../src/uplinkping.js';
 import { channelKey, channelHash } from '../src/grptxt.js';
 import { hexToBytes } from '../src/meshpacket.js';
@@ -63,7 +63,7 @@ test('pickSlot reuses our slot, else takes the first empty one, never a foreign 
 
 // buildEcho makes a GRP_TXT the way the firmware would, then wraps it in a flooded
 // packet with the given 2-byte hops.
-async function buildEcho(name, text, hops) {
+async function buildEcho(name, text, hops, type = 5) {
   const key = await channelKey(name);
   const hb = await channelHash(key);
   const t = new TextEncoder().encode(text);
@@ -76,7 +76,7 @@ async function buildEcho(name, text, hops) {
   const hk = await crypto.subtle.importKey('raw', secret, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const mac = new Uint8Array(await crypto.subtle.sign('HMAC', hk, ct)).slice(0, 2);
   const hopBytes = hops.flatMap((h) => Array.from(hexToBytes(h)));
-  return { key, hb, raw: new Uint8Array([(5 << 2) | 1, 0x40 | hops.length, ...hopBytes, hb, ...mac, ...ct]) };
+  return { key, hb, raw: new Uint8Array([(type << 2) | 1, 0x40 | hops.length, ...hopBytes, hb, ...mac, ...ct]) };
 }
 
 test('matchEcho finds our tag and names the first and last hop', async () => {
@@ -95,4 +95,29 @@ test('matchEcho ignores another tag, another channel and an unforwarded packet',
   assert.equal(await matchEcho(b.raw, a.key, a.hb, '0a1b2c3d'), null, 'other channel');
   const c = await buildEcho('#coredrive', 'X: cdrx 0a1b2c3d', []);
   assert.equal(await matchEcho(c.raw, c.key, c.hb, '0a1b2c3d'), null, 'no hops: not a re-broadcast');
+});
+
+test('channelPacket matches any of the companion channels, ours or not, with or without hops', async () => {
+  const cd = await buildEcho('#coredrive', 'Car B: cdrx 11223344', []);
+  const pub = await buildEcho('#public', 'Someone: hello', ['c0cd']);
+  const channels = [{ key: pub.key, hashByte: pub.hb }, { key: cd.key, hashByte: cd.hb }];
+  const o = await channelPacket(cd.raw, channels, new Set(['0a1b2c3d']));
+  assert.equal(o.own, false);
+  assert.match(o.hash, /^[0-9a-f]{16}$/);
+  assert.equal((await channelPacket(pub.raw, channels, new Set())).own, false, 'a channel other than the ping channel');
+  const mine = await buildEcho('#coredrive', 'ON8AR mobile: cdrx 0a1b2c3d', ['c0cd']);
+  assert.equal((await channelPacket(mine.raw, channels, new Set(['0a1b2c3d']))).own, true);
+});
+
+test('channelPacket ignores channels the companion does not have, and handles GRP_DATA', async () => {
+  const pub = await buildEcho('#public', 'Someone: hello', ['c0cd']);
+  const other = await buildEcho('#elsewhere', 'X: hi', ['c0cd']);
+  const channels = [{ key: pub.key, hashByte: pub.hb }];
+  assert.equal(await channelPacket(other.raw, channels, new Set()), null);
+  assert.equal(await channelPacket(other.raw, [], new Set()), null, 'no channels known');
+  const data = await buildEcho('#public', 'binary', [], 6);
+  const d = await channelPacket(data.raw, channels, new Set());
+  assert.equal(d.own, false);
+  const advert = new Uint8Array([(4 << 2) | 1, 0, ...new Array(40).fill(1)]);
+  assert.equal(await channelPacket(advert, channels, new Set()), null, 'not a channel packet');
 });

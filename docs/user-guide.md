@@ -33,6 +33,14 @@ Not with the same companion at the same time. A companion accepts one Bluetooth 
 while CoreDrive RX holds it, the MeshCore app cannot connect. Press **Disconnect** in Settings and
 the MeshCore app can connect again. To map and chat at once you need a second companion.
 
+Messages are not lost meanwhile: the companion keeps up to 16 of them until the MeshCore app
+connects again (when it is full, the oldest channel messages go first). To know when a direct
+message arrives, tick **Notify when a direct message waits on the companion** in Settings (off
+by default, optionally with a sound). A blue note on Home then counts them; tap it to dismiss.
+Channel messages, including the `#coredrive` pings of other users, are not counted. Room-server
+posts arrive like direct messages and are counted. CoreDrive RX never reads or removes the
+messages.
+
 ## Does it transmit?
 
 Yes, a little. It is not a pure listener:
@@ -97,6 +105,8 @@ Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributor
 - **Companion:** name and details of the connected radio.
 - **Capture:** *Sound ping when a node is mapped* gives a short beep per mapped reception, so you
   do not have to look at the phone.
+  *Notify when a direct message waits on the companion* (and *with a sound*) shows the message note on
+  Home, see [Can I still chat?](#can-i-still-chat).
 - **Diagnostics:** debug log, **Share / mail debug log**, and **Uplink ping now** to send one ping
   by hand.
 

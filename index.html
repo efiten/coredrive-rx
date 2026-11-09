@@ -97,6 +97,7 @@
        uploaded. Red, not amber — the pause chip above is a normal condition, this
        one is not. A degraded uplink used to be visible nowhere on this screen. -->
   <div id="uplinkchip" style="display:none;background:#3a1414;color:#ff8a80;border:1px solid #6b1212;border-radius:8px;padding:10px 12px;margin:10px 0;font-size:13px;font-weight:600"></div>
+  <div id="msgchip" style="display:none;cursor:pointer;background:#10283a;color:#8cc8ff;border:1px solid #1d4a6b;border-radius:8px;padding:10px 12px;margin:10px 0;font-size:13px"></div>
   <div class="card">
     <label>Recently heard nodes (latest SNR)</label>
     <div id="recent" class="recent"><div class="muted">— nothing yet —</div></div>
@@ -150,6 +151,8 @@
     <div class="card">
       <label>Capture</label>
       <label class="inline"><input type="checkbox" id="chkSound"> Sound ping when a node is mapped</label>
+      <label class="inline"><input type="checkbox" id="chkMsg"> Notify when a direct message waits on the companion</label>
+      <label class="inline"><input type="checkbox" id="chkMsgSound"> &hellip; with a sound</label>
     </div>
     <div class="card">
       <label>Diagnostics</label>
