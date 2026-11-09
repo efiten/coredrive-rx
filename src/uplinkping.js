@@ -113,6 +113,22 @@ export async function matchEcho(raw, key, hashByte, tag) {
   };
 }
 
+// pingChannelPacket checks one received raw packet for ANY message on the ping
+// channel, from us or another client. Returns { hash, own } or null. own: the text
+// carries one of `ownTags`. Used to tell ping-channel traffic apart from real
+// messages (src/msgwait.js).
+export async function pingChannelPacket(raw, key, hashByte, ownTags) {
+  const bytes = typeof raw === 'string' ? hexToBytes(raw) : raw;
+  const pkt = parsePacket(bytes);
+  if (!pkt || pkt.payloadType !== PAYLOAD_TYPE_GRP_TXT) return null;
+  const payload = bytes.slice(payloadOffset(bytes));
+  const msg = await decryptGroupText(payload, key, hashByte);
+  if (!msg) return null;
+  let own = false;
+  for (const tag of ownTags) if (msg.text.endsWith(': ' + pingText(tag))) { own = true; break; }
+  return { hash: await packetHash(PAYLOAD_TYPE_GRP_TXT, payload), own };
+}
+
 // payloadOffset: header, 4 transport-code bytes on TRANSPORT routes, the path byte,
 // then hashCount * hashSize path bytes (Packet.cpp).
 function payloadOffset(bytes) {

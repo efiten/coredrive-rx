@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   makeTag, pingText, buildChannelMessage, buildScopeFrame, scopeKeyName, buildGetChannel,
-  buildSetChannel, parseChannelInfo, pickSlot, matchEcho, RESP_CODE_CHANNEL_INFO,
+  buildSetChannel, parseChannelInfo, pickSlot, matchEcho, pingChannelPacket, RESP_CODE_CHANNEL_INFO,
 } from '../src/uplinkping.js';
 import { channelKey, channelHash } from '../src/grptxt.js';
 import { hexToBytes } from '../src/meshpacket.js';
@@ -95,4 +95,15 @@ test('matchEcho ignores another tag, another channel and an unforwarded packet',
   assert.equal(await matchEcho(b.raw, a.key, a.hb, '0a1b2c3d'), null, 'other channel');
   const c = await buildEcho('#coredrive', 'X: cdrx 0a1b2c3d', []);
   assert.equal(await matchEcho(c.raw, c.key, c.hb, '0a1b2c3d'), null, 'no hops: not a re-broadcast');
+});
+
+test('pingChannelPacket names any ping-channel message, ours or not, with or without hops', async () => {
+  const other = await buildEcho('#coredrive', 'Car B: cdrx 11223344', []);
+  const o = await pingChannelPacket(other.raw, other.key, other.hb, new Set(['0a1b2c3d']));
+  assert.equal(o.own, false);
+  assert.match(o.hash, /^[0-9a-f]{16}$/);
+  const mine = await buildEcho('#coredrive', 'ON8AR mobile: cdrx 0a1b2c3d', ['c0cd']);
+  assert.equal((await pingChannelPacket(mine.raw, mine.key, mine.hb, new Set(['0a1b2c3d']))).own, true);
+  const elsewhere = await buildEcho('#public', 'Someone: hello', ['c0cd']);
+  assert.equal(await pingChannelPacket(elsewhere.raw, other.key, other.hb, new Set()), null);
 });
