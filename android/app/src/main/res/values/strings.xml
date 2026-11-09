@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">CoreDrive RX</string>
+    <string name="title_activity_main">CoreDrive RX</string>
+    <string name="package_name">eu.on8ar.coredriverx</string>
+    <string name="custom_url_scheme">eu.on8ar.coredriverx</string>
+</resources>

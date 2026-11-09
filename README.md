@@ -239,6 +239,24 @@ npm test         # node --test
 Web Bluetooth requires a secure context (HTTPS or `localhost`). For phone testing over LAN, serve via
 HTTPS (e.g. a dev tunnel) — Chrome blocks Web Bluetooth on plain HTTP origins.
 
+### Android app (experimental)
+
+The same code also builds as a native Android app with [Capacitor](https://capacitorjs.com/)
+(`android/`, `capacitor.config.json`). `src/platform.js` picks the native Bluetooth plugin and a
+background GPS watcher there, so mapping can continue with the screen off; a persistent
+notification shows while it runs. Not in any store yet: build and install it yourself.
+
+Needs JDK 21 and the Android SDK (Android Studio installs both).
+
+```bash
+cp public/config.example.json public/config.json   # bundled into the APK, same as on a web server
+npm run android:sync     # vite build + copy dist/ into android/
+npx cap open android     # build / run from Android Studio
+```
+
+The app's origin is `https://localhost`, so a `resolveUrl` or `corescopeUrl` on another host must
+allow that origin in CORS.
+
 ## Deploy
 
 Two optional SSH helpers — both leave the server's `config.json` intact:

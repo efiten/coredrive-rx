@@ -1,0 +1,8 @@
+{
+  "appId": "eu.on8ar.coredriverx",
+  "appName": "CoreDrive RX",
+  "webDir": "dist",
+  "android": {
+    "useLegacyBridge": true
+  }
+}
