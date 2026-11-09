@@ -5,6 +5,9 @@ that connects over BLE to a MeshCore **companion** radio, captures which nodes i
 tags each reception with the phone's GPS, and publishes to MQTT so a CoreScope ingestor stores it in
 `client_receptions` and renders per-node hex coverage on the Reach page.
 
+**Using the app?** Read the [user guide](docs/user-guide.md). The rest of this README is for
+people hosting it.
+
 ## Supported browsers
 
 The app needs **Web Bluetooth**, which not every browser has:
