@@ -7,7 +7,7 @@
 // Home is a pure monitor (counters, status strip, last-reception SNR meter, recently
 // heard). Discover runs automatically with a traffic backoff (see monitor.js). Config
 // and diagnostics live on the Settings tab.
-import { WebBluetoothTransport } from './transport.js';
+import { createTransport, createGps, isNativeApp } from './platform.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute, ADV_TYPE_REPEATER } from './meshpacket.js';
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
@@ -22,7 +22,6 @@ import {
   discoverDecision, isOrganicHeard, snrToPct, decayPeak, pruneTimestamps, linkTransition,
 } from './monitor.js';
 import { shareLog } from './sharelog.js';
-import { Gps } from './gps.js';
 import { Queue } from './queue.js';
 import { Publisher, KEEPALIVE_SECS } from './publisher.js';
 import { drainOnce, serialiseDrain, stampRecord } from './drain.js';
@@ -62,7 +61,7 @@ const LOG_LINE_CAP = 200; // dbg ring buffer; stated in the exported log header
 
 const els = (id) => document.getElementById(id);
 const state = {
-  transport: null, gps: new Gps(), queue: new Queue(), publisher: null,
+  transport: null, gps: createGps(), queue: new Queue(), publisher: null,
   companionPubkey: '', companionName: '', connected: false, recent: [],
   localMap: null, verbose: false, motion: null, paused: false, wakeLock: null,
   soundEnabled: false, beeper: null,
@@ -1676,7 +1675,7 @@ async function connectAll() {
   log('');
   const s1 = step('① Connecting to companion…', 'pending');
   try {
-    state.transport = new WebBluetoothTransport();
+    state.transport = createTransport();
     state.transport.onFrame(processFrame);
     state.transport.onFrame(onMsgWaitingFrame);
     state.transport.onFrame(onRegionsFrame); // no-op unless a region request is in flight
@@ -1741,11 +1740,14 @@ async function connectAll() {
     applyConfigToSettings();
     noteRegionInert();
 
-    state.gps.start((fix) => {
+    // The native GPS starts asynchronously (permission prompt, foreground service);
+    // its failure is logged, as the browser's is not reported either beyond no fix.
+    const gpsStarted = state.gps.start((fix) => {
       if (state.localMap) state.localMap.setPosition(fix.lat, fix.lon);
       state.motion = updateMotion(state.motion, fix, Date.now());
       setPaused(state.motion.paused);
     });
+    if (gpsStarted && gpsStarted.catch) gpsStarted.catch((e) => dbg('GPS: ' + e.message, 'no'));
 
     const s3 = step('③ Connecting to CoreScope…', 'pending');
     // One more attempt at the fetch whose single startup failure used to sink the
@@ -1938,7 +1940,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   els('chkMsgSound').checked = state.msg.sound;
   els('chkMsgSound').disabled = !state.msg.notify;
   // Web Bluetooth missing (e.g. iOS Safari) — point the user to a supported browser.
-  if (!navigator.bluetooth) els('btnotice').style.display = 'block';
+  if (!navigator.bluetooth && !isNativeApp()) els('btnotice').style.display = 'block';
   els('btnConnect').addEventListener('click', () => {
     if (state.connected) { disconnectAll(); return; }
     state.wakeLock.enable(); // acquire in the user gesture (iOS needs it for video.play())
@@ -2039,7 +2041,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (state.account && !state.account.discovered) discoverAccount();
     else linkCurrentCompanion();
   });
-  if ('serviceWorker' in navigator) {
+  // The native app ships its files inside the APK; a service worker there would only
+  // pin an old copy over the one the app update installed.
+  if ('serviceWorker' in navigator && !isNativeApp()) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   }
 });
