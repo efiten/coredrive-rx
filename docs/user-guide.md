@@ -29,11 +29,19 @@ shows real direct links and nothing inferred.
 
 ## Can I still chat?
 
-Not with the same companion at the same time. A companion accepts one Bluetooth connection, and
-while CoreDrive RX holds it, the MeshCore app cannot connect. Press **Disconnect** in Settings and
+With the stock companion firmware, not on the same companion at the same time. It accepts one
+Bluetooth connection, and while CoreDrive RX holds it, the MeshCore app cannot connect. Press **Disconnect** in Settings and
 the MeshCore app can connect again. To map and chat at once you need a second companion.
 
-Messages are not lost meanwhile: the companion keeps up to 16 of them until the MeshCore app
+A companion with a screen (for example a T-Deck) still shows incoming direct messages on its own
+display while CoreDrive RX is connected, but without its notification sound. Replying needs the
+MeshCore app, or a standalone firmware with a keyboard UI.
+
+Users report that this works with [Wadamesh](https://wadamesh.com/), a MeshCore firmware with
+on-device chat for the LilyGo T-Deck and other boards: CoreDrive RX maps over Bluetooth while
+you chat on the device itself. This was not tested by the CoreDrive RX project.
+
+Messages are not lost meanwhile: the stock companion keeps up to 16 of them until the MeshCore app
 connects again (when it is full, the oldest channel messages go first). To know when a direct
 message arrives, tick **Notify when a direct message waits on the companion** in Settings (off
 by default, optionally with a sound). A blue note on Home then counts them; tap it to dismiss.
