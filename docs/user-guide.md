@@ -16,7 +16,8 @@ shows real direct links and nothing inferred.
 
 ## What you need
 
-- A MeshCore **companion** radio with Bluetooth (BLE) firmware.
+- A MeshCore **companion** radio with Bluetooth (BLE) firmware. **v1.16.0 or newer** gets every
+  feature; see [Firmware](#firmware) for what older versions miss.
 - A browser with Web Bluetooth:
   - **Android:** Chrome.
   - **iPhone / iPad:** the [Bluefy](https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055)
@@ -91,16 +92,65 @@ Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributor
 
 - **Connect / Disconnect.**
 - **CoreScope:** broker status and **Push pending now** to upload the queue immediately.
-- **CoreScope account** (only on deployments with user accounts): log in so the companions you
-  connect are linked to your account and your coverage is attributed to you.
+- **CoreScope account** (only on deployments with user accounts), see
+  [CoreScope account](#corescope-account).
 - **Companion:** name and details of the connected radio.
 - **Capture:** *Sound ping when a node is mapped* gives a short beep per mapped reception, so you
   do not have to look at the phone.
 - **Diagnostics:** debug log, **Share / mail debug log**, and **Uplink ping now** to send one ping
   by hand.
 
+## CoreScope account
+
+<img src="img/screen-account.png" alt="CoreScope account card, logged in" width="300">
+
+Only shown when the CoreScope you upload to has user accounts. Log in with your CoreScope email
+and password. The app keeps only a device token, which shows under **Devices** on your account
+page in CoreScope and can be revoked there.
+
+Every companion you connect while logged in is linked to your account: the companion signs a
+challenge from the server with its own key, so only someone holding the radio can link it. Linked
+companions show in the card (the connected one marked ●) and under **Companions** on your
+CoreScope account page. Coverage they collect is attributed to you.
+
+Some deployments only accept data from linked companions. There the app keeps an unlinked
+companion's receptions on the phone ("Log in to contribute your data, N waiting") and uploads them
+once it is linked, so nothing is lost. A companion whose firmware cannot sign shows "update it to
+link".
+
+## Seeing your results
+
+Coverage is shown in CoreScope, not in this app (the Map tab only shows the current session). For
+rx.on8ar.eu that is [analyzer.on8ar.eu](https://analyzer.on8ar.eu); other deployments use their
+own CoreScope.
+
+1. Open **Nodes** and pick a node you drove past.
+2. Press **Reach**.
+3. Tick **coverage** ("where clients heard it"). The hexes are where clients like yours heard that
+   node.
+
+## Firmware
+
+Features check the companion's firmware on connect and switch themselves off when it is too old.
+The debug log says why.
+
+| Feature | Companion firmware |
+|---|---|
+| Coverage capture | stock BLE companion firmware |
+| Region questions to repeaters | v1.16.0+ |
+| Uplink ping with a region scope (rx.on8ar.eu uses one) | v1.10.0+ |
+| Uplink ping using the companion's own default scope | v1.14.0+ |
+| Uplink ping explicitly unscoped | v1.16.0+ |
+
+On connect the app also switches the companion to 2-byte path hashes if it was on 1-byte, because
+1-byte IDs collide too often to be attributed. That setting stays on the radio.
+
 ## Good to know
 
+- **Keep the app in front.** The app keeps the screen awake by itself. If you switch to another
+  app or lock the phone, the browser slows the page down and GPS updates can stall. Receptions are
+  then stamped with the last position the phone reported, which can be well behind where you
+  are. Use a phone holder and leave it on the CoreDrive RX screen.
 - **Standing still pauses capture.** After 5 minutes within 75 m of the same spot the app stops
   recording and stops sending discover requests. It resumes by itself as soon as you move.
 - **Offline is fine.** Receptions are kept on the phone and uploaded later. They are only removed
