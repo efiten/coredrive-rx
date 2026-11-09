@@ -37,7 +37,7 @@ import { buildRegionsRequest, buildOwnerRequest, parseRegionsResponse, parseOwne
 import { nextAskKind, settledSet, settle } from './asknext.js';
 import {
   makeTag, pingText, buildChannelMessage, buildScopeFrame, scopeKeyName, buildGetChannel, buildSetChannel,
-  parseChannelInfo, pickSlot, matchEcho, pingChannelPacket, RESP_CODE_CHANNEL_INFO, SCOPE_MIN_FW,
+  parseChannelInfo, pickSlot, matchEcho, channelPacket, RESP_CODE_CHANNEL_INFO, SCOPE_MIN_FW,
 } from './uplinkping.js';
 import { createMsgWait, noteChannelPacket, onMessageWaiting, clearCount } from './msgwait.js';
 import { pingDecision, pruneCells, skipCell } from './uplinksched.js';
@@ -68,8 +68,10 @@ const state = {
   soundEnabled: false, beeper: null,
   // Message-waiting notice (src/msgwait.js). Off by default; nothing is fetched.
   // ownTags: tags of our recent pings, so their echoes are recognised as ours.
-  // chain orders the async ping-channel check of a 0x88 before the 0x83 after it.
-  msg: { notify: false, sound: false, wait: createMsgWait(), ownTags: new Set(), chain: Promise.resolve(), key: null, hashByte: null, keyFor: '' },
+  // chain orders the async channel check of a 0x88 before the 0x83 after it.
+  // channels: the companion's channel slots ({ idx, key, hashByte }), read once per
+  // connection; the MeshCore app cannot change them while we hold the link.
+  msg: { notify: false, sound: false, wait: createMsgWait(), ownTags: new Set(), chain: Promise.resolve(), channels: [], channelsTried: false },
   // monitor counters / state
   rxTotal: 0, rfLogged: 0, nodeKeys: [], hexCells: new Set(), rxTimes: [],
   lastUploadAt: null, brokerState: 'offline',
@@ -687,6 +689,7 @@ async function setupPingChannel() {
         off('could not write channel slot ' + slot.idx); return;
       }
       dbg('ping: added ' + cfg.uplinkChannel + ' to the companion in channel slot ' + slot.idx, 'st');
+      addMsgChannel({ idx: slot.idx, key, hashByte: await channelHash(key) });
     }
     p.idx = slot.idx;
     p.key = key;
@@ -905,20 +908,49 @@ function noteOwnTag(tag) {
   if (t.size > OWN_TAG_CAP) t.delete(t.values().next().value);
 }
 
-// The ping channel's key is derived from config even with uplinkPing off: a slot
-// written by an earlier session stays on the companion and keeps receiving.
-async function pingChannelKey() {
-  const name = (getConfig() && getConfig().uplinkChannel) || '#coredrive';
-  if (state.msg.keyFor !== name) {
-    state.msg.key = await channelKey(name);
-    state.msg.hashByte = await channelHash(state.msg.key);
-    state.msg.keyFor = name;
+const PAYLOAD_TYPE_GRP_DATA = 6;
+
+// readMsgChannels reads every channel slot of the companion once per connection, so a
+// channel message can be recognised the way the firmware does and only direct
+// messages are counted. Empty slots are skipped.
+async function readMsgChannels() {
+  const m = state.msg;
+  m.channelsTried = true;
+  const max = state.ping.maxChannels;
+  if (!max) { dbg('messages: companion did not report its channel slots, every message counts', 'no'); return; }
+  try {
+    await acquireRadio();
+  } catch (e) {
+    m.channelsTried = false; // try again on a later tick
+    return;
+  }
+  try {
+    const found = [];
+    for (let i = 0; i < max; i++) {
+      const c = parseChannelInfo(await companionReply(buildGetChannel(i), [RESP_CODE_CHANNEL_INFO, RESP_CODE_ERR]));
+      if (!c) break;
+      if (c.name === '' && c.secret.every((v) => v === 0)) continue;
+      found.push({ idx: c.idx, key: c.secret, hashByte: await channelHash(c.secret) });
+    }
+    for (const c of found) addMsgChannel(c);
+    dbg('messages: ' + m.channels.length + ' channel(s) on the companion are filtered, direct messages are counted', 'st');
+  } catch (e) {
+    dbg('messages: reading channels failed (' + e.message + '), every message counts', 'no');
+  } finally {
+    releaseRadio();
   }
 }
 
-async function notePingChannel(raw, now) {
-  await pingChannelKey();
-  const hit = await pingChannelPacket(raw, state.msg.key, state.msg.hashByte, state.msg.ownTags);
+function addMsgChannel(c) {
+  if (!state.msg.channels.some((x) => x.idx === c.idx)) state.msg.channels.push(c);
+}
+
+function msgTick() {
+  if (state.msg.notify && !state.msg.channelsTried) readMsgChannels();
+}
+
+async function noteChannelRx(raw, now) {
+  const hit = await channelPacket(raw, state.msg.channels, state.msg.ownTags);
   if (hit) noteChannelPacket(state.msg.wait, { hash: hit.hash, own: hit.own, now });
 }
 
@@ -926,9 +958,8 @@ function onMsgWaitingFrame(dv) {
   if (dv.byteLength < 1 || dv.getUint8(0) !== PUSH_CODE_MSG_WAITING || !state.msg.notify) return;
   const now = Date.now();
   state.msg.chain = state.msg.chain.then(() => {
-    const kind = onMessageWaiting(state.msg.wait, now);
-    dbg(kind === 'message' ? 'message waiting on the companion (' + state.msg.wait.count + ')' : 'ping-channel message on the companion, not shown', 'st');
-    if (kind !== 'message') return;
+    if (onMessageWaiting(state.msg.wait, now) === 'channel') { dbg('channel message on the companion, not counted', 'st'); return; }
+    dbg('direct message waiting on the companion (' + state.msg.wait.count + ')', 'st');
     renderMsgChip();
     if (state.msg.sound && state.beeper) chime();
   });
@@ -943,7 +974,7 @@ function renderMsgChip() {
   const n = state.msg.wait.count;
   const el = els('msgchip');
   if (!state.msg.notify || !n) { el.style.display = 'none'; return; }
-  el.textContent = '✉ ' + n + (n === 1 ? ' message' : ' messages') + ' waiting on your companion. Read them in the MeshCore app. Tap to dismiss.';
+  el.textContent = '✉ ' + n + (n === 1 ? ' direct message' : ' direct messages') + ' waiting on your companion. Read them in the MeshCore app. Tap to dismiss.';
   el.style.display = 'block';
 }
 
@@ -1219,6 +1250,7 @@ function monitorTick() {
   // asking itself happens on receptions (noteRepeaterHeard), never on a timer.
   regionTick(now);
   pingTick(now);
+  msgTick();
   // A session that started without config must be able to heal without a restart:
   // retry once a minute (not per tick) for as long as it is missing.
   if (!getConfig() && (state.lastConfigTryAt == null || now - state.lastConfigTryAt >= 60000)) {
@@ -1381,9 +1413,9 @@ async function processFrame(dv) {
   const sig = ' snr=' + f.snr + ' rssi=' + f.rssi;
   if (state.verbose) dbg('0x88 raw=' + rawHex + sig, 'st'); // raw bytes only when verbose-debugging
   const pkt = parsePacket(f.raw);
-  if (state.msg.notify && pkt && pkt.payloadType === PAYLOAD_TYPE_GRP_TXT) {
+  if (state.msg.notify && pkt && (pkt.payloadType === PAYLOAD_TYPE_GRP_TXT || pkt.payloadType === PAYLOAD_TYPE_GRP_DATA)) {
     const now = Date.now(), raw = f.raw;
-    state.msg.chain = state.msg.chain.then(() => notePingChannel(raw, now)).catch((e) => dbg('message check failed: ' + e.message, 'no'));
+    state.msg.chain = state.msg.chain.then(() => noteChannelRx(raw, now)).catch((e) => dbg('message check failed: ' + e.message, 'no'));
   }
   if (state.ping.window && pkt && pkt.payloadType === PAYLOAD_TYPE_GRP_TXT && pkt.hops.length) {
     notePingEcho(f).catch((e) => dbg('ping echo check failed: ' + e.message, 'no'));
@@ -1838,6 +1870,8 @@ function stopRfSampler() {
 async function disconnectAll(keepProgress) {
   state.connected = false;
   state.msg.wait = createMsgWait(); // the count was this connection's; the MeshCore app takes over
+  state.msg.channels = [];
+  state.msg.channelsTried = false;
   renderMsgChip();
   state.motion = null;
   state.paused = false;

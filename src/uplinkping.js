@@ -113,20 +113,29 @@ export async function matchEcho(raw, key, hashByte, tag) {
   };
 }
 
-// pingChannelPacket checks one received raw packet for ANY message on the ping
-// channel, from us or another client. Returns { hash, own } or null. own: the text
-// carries one of `ownTags`. Used to tell ping-channel traffic apart from real
-// messages (src/msgwait.js).
-export async function pingChannelPacket(raw, key, hashByte, ownTags) {
+const PAYLOAD_TYPE_GRP_DATA = 6;
+
+// channelPacket checks one received raw packet against the companion's channels
+// ([{ key, hashByte }]) the way the firmware does: a GRP_TXT or GRP_DATA whose
+// channel hash and MAC match one of them (Mesh.cpp:225-236). Returns { hash, own }
+// or null. own: a GRP_TXT carrying one of `ownTags`, i.e. our own ping. Used to tell
+// channel traffic apart from direct messages (src/msgwait.js).
+export async function channelPacket(raw, channels, ownTags) {
   const bytes = typeof raw === 'string' ? hexToBytes(raw) : raw;
   const pkt = parsePacket(bytes);
-  if (!pkt || pkt.payloadType !== PAYLOAD_TYPE_GRP_TXT) return null;
+  if (!pkt || (pkt.payloadType !== PAYLOAD_TYPE_GRP_TXT && pkt.payloadType !== PAYLOAD_TYPE_GRP_DATA)) return null;
   const payload = bytes.slice(payloadOffset(bytes));
-  const msg = await decryptGroupText(payload, key, hashByte);
-  if (!msg) return null;
-  let own = false;
-  for (const tag of ownTags) if (msg.text.endsWith(': ' + pingText(tag))) { own = true; break; }
-  return { hash: await packetHash(PAYLOAD_TYPE_GRP_TXT, payload), own };
+  for (const c of channels) {
+    if (payload[0] !== c.hashByte) continue;
+    const msg = await decryptGroupText(payload, c.key, c.hashByte);
+    if (!msg) continue;
+    let own = false;
+    if (pkt.payloadType === PAYLOAD_TYPE_GRP_TXT) {
+      for (const tag of ownTags) if (msg.text.endsWith(': ' + pingText(tag))) { own = true; break; }
+    }
+    return { hash: await packetHash(pkt.payloadType, payload), own };
+  }
+  return null;
 }
 
 // payloadOffset: header, 4 transport-code bytes on TRANSPORT routes, the path byte,
