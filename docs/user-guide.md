@@ -61,18 +61,34 @@ Your position never goes over the mesh. It is only sent to CoreScope over the in
 
 ## The screens
 
+The screenshots below were made with made-up demo data, not a real drive.
+
 **Home**
-- Counters: distinct nodes, hex cells covered, total receptions.
+
+<img src="img/screen-home.png" alt="Home screen" width="300">
+
+- Counters: distinct nodes, hex cells covered, total receptions, and "RF log" (receptions kept for
+  diagnostics only) when the deployment has full RF logging on.
 - Status strip: GPS accuracy, receptions waiting to upload ("pending"), upload health and the age
   of the last upload, packets per minute.
 - **Last reception:** SNR of the latest reception on a meter with a peak marker.
 - **Recently heard nodes** with their latest SNR.
 - A red warning when receptions are queued but not uploading, and a "Paused, stationary" line when
   you stand still (see below).
+- **Last 5 declared scopes:** the regions the most recently asked repeaters said they serve.
 
-**Map:** the cells you covered in this session. They clear when you reload the page.
+**Map**
+
+<img src="img/screen-map.png" alt="Map screen" width="300">
+
+The cells you covered in this session, coloured by best SNR (green strong, yellow, orange, red
+weak). They clear when you reload the page. The pin button re-centres on your position.
+Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors.
 
 **Settings**
+
+<img src="img/screen-settings.png" alt="Settings screen, connected" width="300">
+
 - **Connect / Disconnect.**
 - **CoreScope:** broker status and **Push pending now** to upload the queue immediately.
 - **CoreScope account** (only on deployments with user accounts): log in so the companions you
