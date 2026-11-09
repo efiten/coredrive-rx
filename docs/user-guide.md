@@ -33,6 +33,11 @@ Not with the same companion at the same time. A companion accepts one Bluetooth 
 while CoreDrive RX holds it, the MeshCore app cannot connect. Press **Disconnect** in Settings and
 the MeshCore app can connect again. To map and chat at once you need a second companion.
 
+A companion with a screen (for example a T-Deck) still shows incoming direct messages on its own
+display while CoreDrive RX is connected, but without its notification sound. Replying needs the
+MeshCore app, or a standalone firmware with a keyboard UI; whether such a firmware also works
+with CoreDrive RX is untested.
+
 Messages are not lost meanwhile: the companion keeps up to 16 of them until the MeshCore app
 connects again (when it is full, the oldest channel messages go first). To know when a direct
 message arrives, tick **Notify when a direct message waits on the companion** in Settings (off
