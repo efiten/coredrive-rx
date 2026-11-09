@@ -38,8 +38,9 @@ display while CoreDrive RX is connected, but without its notification sound. Rep
 MeshCore app, or a standalone firmware with a keyboard UI.
 
 Users report that this works with [Wadamesh](https://wadamesh.com/), a MeshCore firmware with
-on-device chat for the LilyGo T-Deck and other boards: CoreDrive RX maps over Bluetooth while
-you chat on the device itself. This was not tested by the CoreDrive RX project.
+on-device chat for the LilyGo T-Deck and other boards. On a LilyGo T-Deck one user runs three
+at once: CoreDrive RX over Bluetooth, the Kiekr app over Wi-Fi, and chat on the device's own
+screen and keyboard. This was not tested by the CoreDrive RX project.
 
 Messages are not lost meanwhile: the stock companion keeps up to 16 of them until the MeshCore app
 connects again (when it is full, the oldest channel messages go first). To know when a direct
