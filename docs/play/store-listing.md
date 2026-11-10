@@ -41,4 +41,4 @@ CoreDrive RX is open source: https://github.com/efiten/coredrive-rx
 |---|---|---|
 | App icon | 512x512 PNG | `public/icon-512.png` |
 | Feature graphic | 1024x500 PNG | `docs/play/feature-graphic.png` (scripts/play-graphics.ps1) |
-| Phone screenshots | 2 to 8, 9:16 or similar | `docs/img/screen-*.png` (538x919, web app with demo data); replace with Android screenshots once the app has demo data to show |
+| Phone screenshots | 2 to 8, max 2:1 | `docs/play/screenshots/*.png`, 1080x1920 (9:16): Home, Map, Settings with made-up demo data, rendered by headless Chrome at phone size (432x768 CSS px, 2.5x) |
