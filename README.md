@@ -249,13 +249,18 @@ notification shows while it runs. Not in any store yet: build and install it you
 Needs JDK 21 and the Android SDK (Android Studio installs both).
 
 ```bash
-cp public/config.example.json public/config.json   # bundled into the APK, same as on a web server
-npm run android:sync     # vite build + copy dist/ into android/
+npm run android:sync     # vite build + copy dist/ into android/ (without any config.json)
 npx cap open android     # build / run from Android Studio
 ```
 
-The app's origin is `https://localhost`, so a `resolveUrl` or `corescopeUrl` on another host must
-allow that origin in CORS.
+The APK carries no deployment. On first start the app asks for the URL of a CoreDrive RX web
+deployment (for example `https://rx.on8ar.eu`) under Settings, reads that deployment's
+`config.json` and keeps the last good copy for starts without network (`src/deployment.js`).
+So one APK works for every deployment, and no broker login is ever built into it.
+
+For operators: the web deployment you already host is all the app needs. The app's origin is
+`https://localhost`, so add that to `corsAllowedOrigins` of your CoreScope (login and companion
+linking), and to any proxy in front of `resolveUrl` / `searchUrl`.
 
 ## Deploy
 

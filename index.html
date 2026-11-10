@@ -112,6 +112,15 @@
     <div id="liveMap"></div>
   </div>
   <div id="view-settings" style="display:none">
+    <!-- Native app only (src/deployment.js): which CoreDrive RX deployment's
+         config.json this app uses. The web app always uses its own. -->
+    <div class="card" id="deployCard" style="display:none">
+      <label for="deployUrl">Deployment</label>
+      <input id="deployUrl" class="txt" type="url" inputmode="url" autocapitalize="off" spellcheck="false" placeholder="https://rx.example.org">
+      <button id="btnDeploy" class="btn2" style="margin-top:8px">Use this deployment</button>
+      <div class="muted" id="deployInfo">The address of the CoreDrive RX web version you upload to. Your local sysop or mesh community can tell you which one.</div>
+      <div class="muted" id="deployMsg" style="color:#ff8b7a"></div>
+    </div>
     <div class="card">
       <button id="btnConnect">Connect companion (BLE)</button>
       <div class="progress" id="progress"></div>

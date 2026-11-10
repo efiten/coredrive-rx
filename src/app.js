@@ -7,7 +7,8 @@
 // Home is a pure monitor (counters, status strip, last-reception SNR meter, recently
 // heard). Discover runs automatically with a traffic backoff (see monitor.js). Config
 // and diagnostics live on the Settings tab.
-import { createTransport, createGps, isNativeApp } from './platform.js';
+import { createTransport, createGps, isNativeApp, nativeHttpGet } from './platform.js';
+import { normalizeDeploymentUrl, readDeployment, saveDeployment, fetchDeploymentConfigText, DEPLOY_CACHE_KEY } from './deployment.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute, ADV_TYPE_REPEATER } from './meshpacket.js';
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
@@ -25,7 +26,7 @@ import { shareLog } from './sharelog.js';
 import { Queue } from './queue.js';
 import { Publisher, KEEPALIVE_SECS } from './publisher.js';
 import { drainOnce, serialiseDrain, stampRecord } from './drain.js';
-import { loadConfig, getConfig, featureEnabled } from './config.js';
+import { loadConfig, getConfig, featureEnabled, setConfigSource } from './config.js';
 import { createAccount, deviceNameFrom, transientError, signFailure } from './account.js';
 import { accountView } from './accountview.js';
 import { signWithCompanion } from './companionsign.js';
@@ -248,6 +249,51 @@ function switchView(v) {
   els('tabMap').classList.toggle('active', v === 'map');
   els('tabSettings').classList.toggle('active', v === 'settings');
   if (v === 'map' && state.localMap) state.localMap.invalidate();
+}
+
+// --- Deployment (native app only, src/deployment.js) ---
+// The app reads the config.json of the deployment the user chose. Until one is chosen
+// it captures and buffers like a web app without config, and loadConfig keeps failing
+// with a message that says what to do.
+function setupDeployment() {
+  const base = readDeployment(localStorage);
+  els('deployCard').style.display = '';
+  els('deployUrl').value = base;
+  if (base) {
+    setConfigSource(async () => {
+      const r = await fetchDeploymentConfigText({ base, httpGet: nativeHttpGet, storage: localStorage });
+      if (r.cached) dbg('deployment ' + base + ': ' + r.error.message + ', using its last good config.json', 'no');
+      return r.text;
+    });
+  } else {
+    setConfigSource(async () => { throw new Error('no deployment chosen yet, enter one under Settings'); });
+  }
+  els('btnDeploy').addEventListener('click', chooseDeployment);
+  return base;
+}
+
+// chooseDeployment checks the new deployment's config.json BEFORE switching to it, so a
+// typo never replaces a working deployment, then restarts the app on the new one.
+async function chooseDeployment() {
+  const msg = els('deployMsg');
+  const base = normalizeDeploymentUrl(els('deployUrl').value);
+  if (!base) { msg.textContent = 'Enter an https:// address, for example https://rx.example.org'; return; }
+  msg.style.color = '#9aa4b2';
+  msg.textContent = 'Checking ' + base + 'config.json ...';
+  els('btnDeploy').disabled = true;
+  try {
+    const mem = new Map();
+    const scratch = { getItem: (k) => mem.get(k) ?? null, setItem: (k, v) => mem.set(k, v), removeItem: (k) => mem.delete(k) };
+    const r = await fetchDeploymentConfigText({ base, httpGet: nativeHttpGet, storage: scratch });
+    saveDeployment(localStorage, base);
+    localStorage.setItem(DEPLOY_CACHE_KEY, JSON.stringify({ base, text: r.text }));
+    dbg('deployment set to ' + base, 'ok');
+    location.reload();
+  } catch (e) {
+    msg.style.color = '#ff8b7a';
+    msg.textContent = 'Not usable: ' + e.message;
+    els('btnDeploy').disabled = false;
+  }
 }
 
 // --- Discover (inbound: who can I hear?) ---
@@ -1911,6 +1957,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   // within minutes — two field logs arrived with no way to tell which version wrote
   // them, which sent a diagnosis down the wrong path entirely.
   dbg('CoreDrive RX v' + VERSION + ' started', 'st');
+  const deployment = isNativeApp() ? setupDeployment() : null;
+  if (deployment === '') switchView('settings');
+  if (deployment) dbg('deployment: ' + deployment, 'st');
   try {
     await loadConfig();
     applyConfigToSettings();
@@ -1920,12 +1969,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     // which connectAll then cleared with log('') — so the most consequential startup
     // fault in the app was invisible in the very log people share to report it.
     dbg('config.json failed to load: ' + e.message, 'no');
-    // config.json is deliberately never served from the offline cache, so starting
-    // the app needs a live connection ONCE. Say that here rather than leaving the
-    // user to infer it: capture and buffering are unaffected, only uploading waits.
-    dbg('the app needs an internet connection at startup to fetch config.json — capture and buffering still work, uploading waits; retrying every minute and as soon as the network returns', 'no');
-    log('Config error: ' + e.message + ' — needs internet to load settings; retrying automatically.');
-    applyConfigToSettings();
+    if (deployment === '') {
+      log('Choose your deployment under Settings to start uploading. Capture and buffering already work.');
+      applyConfigToSettings();
+    } else {
+      // config.json is deliberately never served from the offline cache, so starting
+      // the app needs a live connection ONCE. Say that here rather than leaving the
+      // user to infer it: capture and buffering are unaffected, only uploading waits.
+      dbg('the app needs an internet connection at startup to fetch config.json — capture and buffering still work, uploading waits; retrying every minute and as soon as the network returns', 'no');
+      log('Config error: ' + e.message + ' — needs internet to load settings; retrying automatically.');
+      applyConfigToSettings();
+    }
   }
   renderUplinkChip();
   setButton();
