@@ -66,4 +66,4 @@ under Settings, Companion, while it is connected).
 
 ## Contact
 
-ON8AR: CONTACT_EMAIL
+ON8AR: erwin@fiten.eu

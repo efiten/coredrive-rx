@@ -5,7 +5,7 @@
 - **App name** (max 30): CoreDrive RX
 - **Short description** (max 80): Map MeshCore radio coverage while you drive, with your companion radio.
 - **Category:** Tools
-- **Contact email:** CONTACT_EMAIL
+- **Contact email:** erwin@fiten.eu
 - **Website:** https://github.com/efiten/coredrive-rx
 - **Privacy policy:** https://github.com/efiten/coredrive-rx/blob/master/docs/play/privacy-policy.md
 
