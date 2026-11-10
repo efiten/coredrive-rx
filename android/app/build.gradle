@@ -1,5 +1,18 @@
 apply plugin: 'com.android.application'
 
+import groovy.json.JsonSlurper
+
+// Version from package.json, so the APK and the web app share one number.
+// versionCode = major*10000 + minor*100 + patch (1.24.0 -> 12400).
+def pkgVersion = new JsonSlurper().parse(file('../../package.json')).version
+def (vMajor, vMinor, vPatch) = pkgVersion.tokenize('.').collect { it.replaceAll(/[^0-9].*$/, '').toInteger() }
+
+// Release signing reads android/keystore.properties (gitignored; it names the keystore
+// and its passwords). Without that file a release build is left unsigned.
+def keystoreProps = new Properties()
+def keystorePropsFile = rootProject.file('keystore.properties')
+if (keystorePropsFile.exists()) keystorePropsFile.withInputStream { keystoreProps.load(it) }
+
 android {
     namespace = "eu.on8ar.coredriverx"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -7,8 +20,8 @@ android {
         applicationId "eu.on8ar.coredriverx"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode vMajor * 10000 + vMinor * 100 + vPatch
+        versionName pkgVersion
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,8 +29,19 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            if (keystorePropsFile.exists()) {
+                storeFile file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
     buildTypes {
         release {
+            if (keystorePropsFile.exists()) signingConfig signingConfigs.release
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
