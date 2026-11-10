@@ -3,6 +3,7 @@
 // of the app does not know which one it got.
 import { Capacitor, CapacitorHttp, registerPlugin } from '@capacitor/core';
 import { BleClient } from '@capacitor-community/bluetooth-le';
+import { BarcodeScanner } from '@capacitor-mlkit/barcode-scanning';
 import { WebBluetoothTransport } from './transport.js';
 import { CapacitorBleTransport } from './transport-native.js';
 import { Gps } from './gps.js';
@@ -21,6 +22,9 @@ export function createTransport() {
 export function nativeHttpGet(url) {
   return CapacitorHttp.get({ url, responseType: 'text', headers: { 'Cache-Control': 'no-cache' }, connectTimeout: 10000, readTimeout: 10000 });
 }
+
+// The Google code scanner plugin, for src/qrscan.js.
+export function qrScanner() { return BarcodeScanner; }
 
 export function createGps() {
   return isNativeApp() ? new NativeGps(registerPlugin('BackgroundGeolocation')) : new Gps();

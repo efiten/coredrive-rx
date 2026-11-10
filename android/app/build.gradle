@@ -22,6 +22,14 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
+    // The app only calls BarcodeScanner.scan(), which runs the Google code scanner in
+    // Play services. The bundled ML Kit detector (startScan, readBarcodesFromImage) is
+    // never used; its native library is about 20 MB over all ABIs.
+    packaging {
+        jniLibs {
+            excludes += ['lib/*/libbarhopper_v3.so']
+        }
+    }
 }
 
 repositories {

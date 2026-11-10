@@ -7,7 +7,8 @@
 // Home is a pure monitor (counters, status strip, last-reception SNR meter, recently
 // heard). Discover runs automatically with a traffic backoff (see monitor.js). Config
 // and diagnostics live on the Settings tab.
-import { createTransport, createGps, isNativeApp, nativeHttpGet } from './platform.js';
+import { createTransport, createGps, isNativeApp, nativeHttpGet, qrScanner } from './platform.js';
+import { scanDeployment } from './qrscan.js';
 import { normalizeDeploymentUrl, readDeployment, saveDeployment, fetchDeploymentConfigText, DEPLOY_CACHE_KEY } from './deployment.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute, ADV_TYPE_REPEATER } from './meshpacket.js';
@@ -269,7 +270,36 @@ function setupDeployment() {
     setConfigSource(async () => { throw new Error('no deployment chosen yet, enter one under Settings'); });
   }
   els('btnDeploy').addEventListener('click', chooseDeployment);
+  els('btnDeployScan').addEventListener('click', scanDeploymentQr);
   return base;
+}
+
+// scanDeploymentQr reads the deployment from a QR code and goes through the same check
+// as a typed URL.
+async function scanDeploymentQr() {
+  const msg = els('deployMsg');
+  msg.style.color = '#9aa4b2';
+  msg.textContent = '';
+  els('btnDeployScan').disabled = true;
+  try {
+    const r = await scanDeployment(qrScanner(), {
+      onProgress: (p) => { msg.textContent = 'Installing the QR scanner from Play services ... ' + p + '%'; },
+    });
+    if (r.cancelled) { msg.textContent = ''; return; }
+    if (!r.url) {
+      msg.style.color = '#ff8b7a';
+      msg.textContent = 'That QR code is not a CoreDrive RX address' + (r.raw ? ' (' + r.raw.slice(0, 60) + ')' : '');
+      return;
+    }
+    dbg('deployment QR scanned: ' + r.url, 'st');
+    els('deployUrl').value = r.url;
+    await chooseDeployment();
+  } catch (e) {
+    msg.style.color = '#ff8b7a';
+    msg.textContent = 'Scan failed: ' + e.message;
+  } finally {
+    els('btnDeployScan').disabled = false;
+  }
 }
 
 // chooseDeployment checks the new deployment's config.json BEFORE switching to it, so a
