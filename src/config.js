@@ -158,10 +158,26 @@ export function loadConfig(url = 'config.json') {
   return inFlight;
 }
 
+// The native app has no config.json of its own: it reads the one of the deployment
+// the user chose (src/deployment.js). setConfigSource hands loadConfig a function that
+// returns that file's text; null goes back to fetching `url`.
+let source = null;
+export function setConfigSource(fn) { source = fn; }
+
 async function fetchConfig(url) {
-  const r = await fetch(url, { cache: 'no-store' });
-  if (!r.ok) throw new Error('config.json not found (HTTP ' + r.status + ')');
-  const text = await r.text();
+  let text;
+  if (source) text = await source();
+  else {
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) throw new Error('config.json not found (HTTP ' + r.status + ')');
+    text = await r.text();
+  }
+  cfg = parseConfigText(text);
+  return cfg;
+}
+
+// parseConfigText turns the text of a config.json into a normalized config, or throws.
+export function parseConfigText(text) {
   // A 200 carrying HTML means something served the app shell instead of the config:
   // a web server with an SPA fallback (`try_files $uri /index.html`), or a service
   // worker answering a failed request with index.html. Read as JSON that produced
@@ -172,8 +188,7 @@ async function fetchConfig(url) {
   }
   let raw;
   try { raw = JSON.parse(text); } catch (e) { throw new Error('config.json: invalid JSON — ' + e.message); }
-  cfg = normalizeConfig(raw);
-  return cfg;
+  return normalizeConfig(raw);
 }
 
 export function getConfig() { return cfg; }

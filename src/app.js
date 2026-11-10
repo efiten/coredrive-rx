@@ -7,7 +7,9 @@
 // Home is a pure monitor (counters, status strip, last-reception SNR meter, recently
 // heard). Discover runs automatically with a traffic backoff (see monitor.js). Config
 // and diagnostics live on the Settings tab.
-import { WebBluetoothTransport } from './transport.js';
+import { createTransport, createGps, isNativeApp, nativeHttpGet, nativeShareFile, qrScanner } from './platform.js';
+import { scanDeployment } from './qrscan.js';
+import { normalizeDeploymentUrl, readDeployment, saveDeployment, fetchDeploymentConfigText, DEPLOY_CACHE_KEY } from './deployment.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute, ADV_TYPE_REPEATER } from './meshpacket.js';
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
@@ -22,11 +24,11 @@ import {
   discoverDecision, isOrganicHeard, snrToPct, decayPeak, pruneTimestamps, linkTransition,
 } from './monitor.js';
 import { shareLog } from './sharelog.js';
-import { Gps } from './gps.js';
+import { catchUpPlan } from './catchup.js';
 import { Queue } from './queue.js';
 import { Publisher, KEEPALIVE_SECS } from './publisher.js';
 import { drainOnce, serialiseDrain, stampRecord } from './drain.js';
-import { loadConfig, getConfig, featureEnabled } from './config.js';
+import { loadConfig, getConfig, featureEnabled, setConfigSource } from './config.js';
 import { createAccount, deviceNameFrom, transientError, signFailure } from './account.js';
 import { accountView } from './accountview.js';
 import { signWithCompanion } from './companionsign.js';
@@ -62,7 +64,7 @@ const LOG_LINE_CAP = 200; // dbg ring buffer; stated in the exported log header
 
 const els = (id) => document.getElementById(id);
 const state = {
-  transport: null, gps: new Gps(), queue: new Queue(), publisher: null,
+  transport: null, gps: createGps(), queue: new Queue(), publisher: null,
   companionPubkey: '', companionName: '', connected: false, recent: [],
   localMap: null, verbose: false, motion: null, paused: false, wakeLock: null,
   soundEnabled: false, beeper: null,
@@ -89,6 +91,9 @@ const state = {
   lastHeardAt: null, lastFireAt: 0, tick: null,
   // RF environment sampler
   rfTimer: null, lastRfSample: null, rfGen: 0,
+  // Timer catch-up (src/catchup.js): when each timed job last ran, and the pending
+  // RF sample (due time + its tick) so a frame can run it when the timer is frozen.
+  lastTickAt: null, lastDrainAt: null, lastKickAt: null, rfDueAt: null, rfTick: null,
   // linkQuiet: true while the BLE link is down, so the pause and the resume are each
   // said once instead of once per tick.
   linkQuiet: false,
@@ -249,6 +254,80 @@ function switchView(v) {
   els('tabMap').classList.toggle('active', v === 'map');
   els('tabSettings').classList.toggle('active', v === 'settings');
   if (v === 'map' && state.localMap) state.localMap.invalidate();
+}
+
+// --- Deployment (native app only, src/deployment.js) ---
+// The app reads the config.json of the deployment the user chose. Until one is chosen
+// it captures and buffers like a web app without config, and loadConfig keeps failing
+// with a message that says what to do.
+function setupDeployment() {
+  const base = readDeployment(localStorage);
+  els('deployCard').style.display = '';
+  els('deployUrl').value = base;
+  if (base) {
+    setConfigSource(async () => {
+      const r = await fetchDeploymentConfigText({ base, httpGet: nativeHttpGet, storage: localStorage });
+      if (r.cached) dbg('deployment ' + base + ': ' + r.error.message + ', using its last good config.json', 'no');
+      return r.text;
+    });
+  } else {
+    setConfigSource(async () => { throw new Error('no deployment chosen yet, enter one under Settings'); });
+  }
+  els('btnDeploy').addEventListener('click', chooseDeployment);
+  els('btnDeployScan').addEventListener('click', scanDeploymentQr);
+  return base;
+}
+
+// scanDeploymentQr reads the deployment from a QR code and goes through the same check
+// as a typed URL.
+async function scanDeploymentQr() {
+  const msg = els('deployMsg');
+  msg.style.color = '#9aa4b2';
+  msg.textContent = '';
+  els('btnDeployScan').disabled = true;
+  try {
+    const r = await scanDeployment(qrScanner(), {
+      onProgress: (p) => { msg.textContent = 'Installing the QR scanner from Play services ... ' + p + '%'; },
+    });
+    if (r.cancelled) { msg.textContent = ''; return; }
+    if (!r.url) {
+      msg.style.color = '#ff8b7a';
+      msg.textContent = 'That QR code is not a CoreDrive RX address' + (r.raw ? ' (' + r.raw.slice(0, 60) + ')' : '');
+      return;
+    }
+    dbg('deployment QR scanned: ' + r.url, 'st');
+    els('deployUrl').value = r.url;
+    await chooseDeployment();
+  } catch (e) {
+    msg.style.color = '#ff8b7a';
+    msg.textContent = 'Scan failed: ' + e.message;
+  } finally {
+    els('btnDeployScan').disabled = false;
+  }
+}
+
+// chooseDeployment checks the new deployment's config.json BEFORE switching to it, so a
+// typo never replaces a working deployment, then restarts the app on the new one.
+async function chooseDeployment() {
+  const msg = els('deployMsg');
+  const base = normalizeDeploymentUrl(els('deployUrl').value);
+  if (!base) { msg.textContent = 'Enter an https:// address, for example https://rx.example.org'; return; }
+  msg.style.color = '#9aa4b2';
+  msg.textContent = 'Checking ' + base + 'config.json ...';
+  els('btnDeploy').disabled = true;
+  try {
+    const mem = new Map();
+    const scratch = { getItem: (k) => mem.get(k) ?? null, setItem: (k, v) => mem.set(k, v), removeItem: (k) => mem.delete(k) };
+    const r = await fetchDeploymentConfigText({ base, httpGet: nativeHttpGet, storage: scratch });
+    saveDeployment(localStorage, base);
+    localStorage.setItem(DEPLOY_CACHE_KEY, JSON.stringify({ base, text: r.text }));
+    dbg('deployment set to ' + base, 'ok');
+    location.reload();
+  } catch (e) {
+    msg.style.color = '#ff8b7a';
+    msg.textContent = 'Not usable: ' + e.message;
+    els('btnDeploy').disabled = false;
+  }
 }
 
 // --- Discover (inbound: who can I hear?) ---
@@ -1232,11 +1311,38 @@ function noteLinkState(linkUp) {
   else dbg('companion link back — discover, RF sampling and region asks resumed', 'ok');
 }
 
+// catchUp runs timed jobs whose timer is overdue, from an incoming frame or GPS fix.
+// With the screen off the Android WebView stops running timers while frames and fixes
+// keep arriving (src/catchup.js has the field log); this keeps uploads, discover,
+// region asks, uplink pings and RF samples going while driving with the screen off.
+function catchUp() {
+  if (!state.connected) return;
+  const now = Date.now();
+  const plan = catchUpPlan({
+    now, lastTickAt: state.lastTickAt, lastDrainAt: state.lastDrainAt, rfDueAt: state.rfDueAt,
+    publisherDown: !!state.publisher && !state.publisher.connected(), lastKickAt: state.lastKickAt,
+  });
+  if (plan.tick) monitorTick();
+  if (plan.rf && state.rfTick) {
+    if (state.rfTimer) { clearTimeout(state.rfTimer); state.rfTimer = null; }
+    state.rfTick();
+  }
+  if (plan.reconnect) {
+    state.lastKickAt = now;
+    if (state.publisher.reconnect()) dbg('timers frozen (screen off?): reopening the CoreScope link from a reception', 'st');
+  }
+  if (plan.drain) {
+    state.lastDrainAt = now;
+    drain().then(refreshCounters).catch((e) => dbg('publish error (kept buffered): ' + e.message, 'no'));
+  }
+}
+
 // --- Per-second monitor tick: drives auto-discover, the SNR-meter decay, and the
 // time-relative labels (last-heard / last-upload / rate / discover countdown). Runs only
 // while connected.
 function monitorTick() {
   const now = Date.now();
+  state.lastTickAt = now;
   const linkUp = bleLinkUp();
   noteLinkState(linkUp);
   const dec = discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused, linkUp);
@@ -1623,6 +1729,7 @@ const drain = serialiseDrain(async () => {
 // publisher.publish now times out (rejecting), and rescheduling lives in `finally`, so a
 // stalled send can never kill the loop (the +60-pending-on-WiFi bug).
 async function drainLoop() {
+  state.lastDrainAt = Date.now();
   try {
     await drain();
     refreshCounters();
@@ -1676,10 +1783,11 @@ async function connectAll() {
   log('');
   const s1 = step('① Connecting to companion…', 'pending');
   try {
-    state.transport = new WebBluetoothTransport();
+    state.transport = createTransport();
     state.transport.onFrame(processFrame);
     state.transport.onFrame(onMsgWaitingFrame);
     state.transport.onFrame(onRegionsFrame); // no-op unless a region request is in flight
+    state.transport.onFrame(() => catchUp());
     state.transport.onStatus((s) => {
       state.bleEpoch++;
       dbg('BLE: ' + s);
@@ -1741,11 +1849,15 @@ async function connectAll() {
     applyConfigToSettings();
     noteRegionInert();
 
-    state.gps.start((fix) => {
+    // The native GPS starts asynchronously (permission prompt, foreground service);
+    // its failure is logged, as the browser's is not reported either beyond no fix.
+    const gpsStarted = state.gps.start((fix) => {
       if (state.localMap) state.localMap.setPosition(fix.lat, fix.lon);
       state.motion = updateMotion(state.motion, fix, Date.now());
       setPaused(state.motion.paused);
+      catchUp();
     });
+    if (gpsStarted && gpsStarted.catch) gpsStarted.catch((e) => dbg('GPS: ' + e.message, 'no'));
 
     const s3 = step('③ Connecting to CoreScope…', 'pending');
     // One more attempt at the fetch whose single startup failure used to sink the
@@ -1832,12 +1944,13 @@ function startRfSampler() {
   });
 
   const tick = async () => {
+    state.rfDueAt = null; // running now; catch-up must not start a second one
     if (!state.transport || !state.companionPubkey) return;
     // A sample taken over a dead link is three writes that throw and one
     // "rf sample incomplete — discarded" line. Reschedule and wait for the link.
     if (!bleLinkUp() || state.signing) {
       if (state.rfGen !== myGen) return;
-      state.rfTimer = setTimeout(tick, nextSampleDelay(state.motion ? state.motion.paused : false));
+      scheduleRf(tick);
       return;
     }
     const fix = currentFix();
@@ -1856,15 +1969,26 @@ function startRfSampler() {
       }
     }
     if (state.rfGen !== myGen) return; // superseded by a disconnect/reconnect during the await above
-    state.rfTimer = setTimeout(tick, nextSampleDelay(state.motion ? state.motion.paused : false));
+    scheduleRf(tick);
   };
 
-  state.rfTimer = setTimeout(tick, nextSampleDelay(state.motion ? state.motion.paused : false));
+  scheduleRf(tick);
+}
+
+// scheduleRf arms the next RF sample and records when it is due, so catchUp can run it
+// from a frame when the WebView has frozen the timer.
+function scheduleRf(tick) {
+  const delay = nextSampleDelay(state.motion ? state.motion.paused : false);
+  state.rfTick = tick;
+  state.rfDueAt = Date.now() + delay;
+  state.rfTimer = setTimeout(tick, delay);
 }
 
 function stopRfSampler() {
   state.rfGen += 1; // invalidate any tick currently mid-await so it will not reschedule itself
   if (state.rfTimer) { clearTimeout(state.rfTimer); state.rfTimer = null; }
+  state.rfDueAt = null;
+  state.rfTick = null;
 }
 
 async function disconnectAll(keepProgress) {
@@ -1909,6 +2033,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   // within minutes — two field logs arrived with no way to tell which version wrote
   // them, which sent a diagnosis down the wrong path entirely.
   dbg('CoreDrive RX v' + VERSION + ' started', 'st');
+  const deployment = isNativeApp() ? setupDeployment() : null;
+  if (deployment === '') switchView('settings');
+  if (deployment) dbg('deployment: ' + deployment, 'st');
   try {
     await loadConfig();
     applyConfigToSettings();
@@ -1918,12 +2045,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     // which connectAll then cleared with log('') — so the most consequential startup
     // fault in the app was invisible in the very log people share to report it.
     dbg('config.json failed to load: ' + e.message, 'no');
-    // config.json is deliberately never served from the offline cache, so starting
-    // the app needs a live connection ONCE. Say that here rather than leaving the
-    // user to infer it: capture and buffering are unaffected, only uploading waits.
-    dbg('the app needs an internet connection at startup to fetch config.json — capture and buffering still work, uploading waits; retrying every minute and as soon as the network returns', 'no');
-    log('Config error: ' + e.message + ' — needs internet to load settings; retrying automatically.');
-    applyConfigToSettings();
+    if (deployment === '') {
+      log('Choose your deployment under Settings to start uploading. Capture and buffering already work.');
+      applyConfigToSettings();
+    } else {
+      // config.json is deliberately never served from the offline cache, so starting
+      // the app needs a live connection ONCE. Say that here rather than leaving the
+      // user to infer it: capture and buffering are unaffected, only uploading waits.
+      dbg('the app needs an internet connection at startup to fetch config.json — capture and buffering still work, uploading waits; retrying every minute and as soon as the network returns', 'no');
+      log('Config error: ' + e.message + ' — needs internet to load settings; retrying automatically.');
+      applyConfigToSettings();
+    }
   }
   renderUplinkChip();
   setButton();
@@ -1938,7 +2070,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   els('chkMsgSound').checked = state.msg.sound;
   els('chkMsgSound').disabled = !state.msg.notify;
   // Web Bluetooth missing (e.g. iOS Safari) — point the user to a supported browser.
-  if (!navigator.bluetooth) els('btnotice').style.display = 'block';
+  if (!navigator.bluetooth && !isNativeApp()) els('btnotice').style.display = 'block';
   els('btnConnect').addEventListener('click', () => {
     if (state.connected) { disconnectAll(); return; }
     state.wakeLock.enable(); // acquire in the user gesture (iOS needs it for video.play())
@@ -2009,7 +2141,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       lineCap: LOG_LINE_CAP,
     });
     const text = header + (lines.join('\n') || '(empty log)');
-    try { await shareLog(text); } catch (e) { dbg('share failed: ' + e.message, 'no'); }
+    try { await shareLog(text, isNativeApp() ? nativeShareFile : null); } catch (e) { dbg('share failed: ' + e.message, 'no'); }
   });
   els('btnPingNow').addEventListener('click', pingNow);
   els('btnDbg').addEventListener('click', () => {
@@ -2032,6 +2164,10 @@ window.addEventListener('DOMContentLoaded', async () => {
   // cold start in a garage). Retry the config FIRST: this is the moment the fetch
   // that failed at startup can finally succeed, and draining before it is pointless
   // — with no config there is no publisher to drain into.
+  // Screen off/on in the log, so a field log shows what ran while the screen was off.
+  document.addEventListener('visibilitychange', () => {
+    dbg(document.hidden ? 'app hidden (screen off or in the background)' : 'app visible again', 'st');
+  });
   window.addEventListener('online', () => {
     retryConfig().finally(() => { drain().then(refreshCounters).catch(() => {}); });
     // A start without network never got an answer from CoreScope: ask once more now.
@@ -2039,7 +2175,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (state.account && !state.account.discovered) discoverAccount();
     else linkCurrentCompanion();
   });
-  if ('serviceWorker' in navigator) {
+  // The native app ships its files inside the APK; a service worker there would only
+  // pin an old copy over the one the app update installed.
+  if ('serviceWorker' in navigator && !isNativeApp()) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   }
 });

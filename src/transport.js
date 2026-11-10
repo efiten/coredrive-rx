@@ -1,11 +1,11 @@
-// BLE transport behind an interface so a future iOS Capacitor build only swaps
-// this class (a CapacitorBleTransport with the same connect()/onFrame API).
-// WebBluetoothTransport works on Android Chrome (Web Bluetooth).
+// BLE transport behind an interface: the native app (src/transport-native.js,
+// CapacitorBleTransport) has the same connect()/onFrame()/send() API, and
+// src/platform.js picks one. WebBluetoothTransport works on Android Chrome and Bluefy.
 
 // MeshCore companion uses the Nordic UART Service (NUS).
-const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-const NUS_WRITE = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // app → firmware (commands)
-const NUS_NOTIFY = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // firmware → app (frames)
+export const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+export const NUS_WRITE = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // app → firmware (commands)
+export const NUS_NOTIFY = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // firmware → app (frames)
 
 export class WebBluetoothTransport {
   constructor() {

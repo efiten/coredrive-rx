@@ -239,6 +239,29 @@ npm test         # node --test
 Web Bluetooth requires a secure context (HTTPS or `localhost`). For phone testing over LAN, serve via
 HTTPS (e.g. a dev tunnel) — Chrome blocks Web Bluetooth on plain HTTP origins.
 
+### Android app (experimental)
+
+The same code also builds as a native Android app with [Capacitor](https://capacitorjs.com/)
+(`android/`, `capacitor.config.json`). `src/platform.js` picks the native Bluetooth plugin and a
+background GPS watcher there, so mapping can continue with the screen off; a persistent
+notification shows while it runs. Not in any store yet: build and install it yourself.
+
+Needs JDK 21 and the Android SDK (Android Studio installs both).
+
+```bash
+npm run android:sync     # vite build + copy dist/ into android/ (without any config.json)
+npx cap open android     # build / run from Android Studio
+```
+
+The APK carries no deployment. On first start the app asks for the URL of a CoreDrive RX web
+deployment (for example `https://rx.on8ar.eu`) under Settings, reads that deployment's
+`config.json` and keeps the last good copy for starts without network (`src/deployment.js`).
+So one APK works for every deployment, and no broker login is ever built into it.
+
+For operators: the web deployment you already host is all the app needs. The app's origin is
+`https://localhost`, so add that to `corsAllowedOrigins` of your CoreScope (login and companion
+linking), and to any proxy in front of `resolveUrl` / `searchUrl`.
+
 ## Deploy
 
 Two optional SSH helpers — both leave the server's `config.json` intact:

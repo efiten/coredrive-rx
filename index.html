@@ -10,7 +10,16 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; background: #0f1115; color: #e6e6e6; }
+    /* System bars. The Android app draws under the status and navigation bars, and
+       Capacitor reports their size as --safe-area-inset-* (env() on older WebViews and
+       on iOS). In a desktop browser all four are 0. */
+    :root {
+      --inset-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
+      --inset-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+      --inset-left: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
+      --inset-right: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
+    }
+    body { font-family: system-ui, sans-serif; margin: 0; padding: calc(16px + var(--inset-top)) calc(16px + var(--inset-right)) 16px calc(16px + var(--inset-left)); background: #0f1115; color: #e6e6e6; }
     h1 { font-size: 18px; }
     .card { background: #1a1d24; border: 1px solid #2a2f3a; border-radius: 8px; padding: 12px; margin: 10px 0; }
     label { display: block; font-size: 12px; color: #9aa4b2; margin: 6px 0 2px; }
@@ -59,11 +68,11 @@
     .rgrow .rgregions.none { color: #e6a23c; }
     .rgrow .rgunscoped { margin-left: 6px; font-size: 10px; color: #9aa4b2; border: 1px solid #2a2f3a; border-radius: 4px; padding: 0 4px; white-space: nowrap; }
     .rgrow .rgwarn { font-size: 11px; color: #ff8b7a; margin-top: 2px; }
-    body { padding-bottom: 70px; }
-    .bottombar { position: fixed; bottom: 0; left: 0; right: 0; height: 56px; display: flex; background: #1a1d24; border-top: 1px solid #2a2f3a; z-index: 1000; }
+    body { padding-bottom: calc(70px + var(--inset-bottom)); }
+    .bottombar { position: fixed; bottom: 0; left: 0; right: 0; height: 56px; padding: 0 var(--inset-right) var(--inset-bottom) var(--inset-left); display: flex; background: #1a1d24; border-top: 1px solid #2a2f3a; z-index: 1000; }
     .bottombar .tab { flex: 1; background: transparent; color: #9aa4b2; border: 0; border-radius: 0; margin: 0; font-size: 14px; font-weight: 600; }
     .bottombar .tab.active { color: #2ecc71; }
-    #view-map #liveMap { height: calc(100vh - 140px); min-height: 300px; border: 1px solid #2a2f3a; border-radius: 6px; }
+    #view-map #liveMap { height: calc(100vh - 140px - var(--inset-top) - var(--inset-bottom)); min-height: 300px; border: 1px solid #2a2f3a; border-radius: 6px; }
   </style>
 </head>
 <body>
@@ -112,6 +121,16 @@
     <div id="liveMap"></div>
   </div>
   <div id="view-settings" style="display:none">
+    <!-- Native app only (src/deployment.js): which CoreDrive RX deployment's
+         config.json this app uses. The web app always uses its own. -->
+    <div class="card" id="deployCard" style="display:none">
+      <label for="deployUrl">Deployment</label>
+      <input id="deployUrl" class="txt" type="url" inputmode="url" autocapitalize="off" spellcheck="false" placeholder="https://rx.example.org">
+      <button id="btnDeploy" class="btn2" style="margin-top:8px">Use this deployment</button>
+      <button id="btnDeployScan" class="btn2" style="margin-top:8px">📷 Scan QR code</button>
+      <div class="muted" id="deployInfo">The address of the CoreDrive RX web version you upload to. A CoreScope that takes CoreDrive data shows it as a QR code on its Coverage page.</div>
+      <div class="muted" id="deployMsg" style="color:#ff8b7a"></div>
+    </div>
     <div class="card">
       <button id="btnConnect">Connect companion (BLE)</button>
       <div class="progress" id="progress"></div>

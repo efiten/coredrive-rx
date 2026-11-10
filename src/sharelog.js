@@ -8,9 +8,12 @@
 const MAILTO_BODY_MAX = 1800; // most clients/OS truncate long mailto bodies
 
 // pickShareMethod chooses the export path from the available capabilities.
-//   caps = { canShareFiles: bool, canDownload: bool }
-// Returns 'share' | 'download' | 'mailto'.
+//   caps = { native: bool, canShareFiles: bool, canDownload: bool }
+// Returns 'native' | 'share' | 'download' | 'mailto'.
+// The native app comes first: its Android WebView has no navigator.share and ignores a
+// download link, so both web paths did nothing there and the button looked dead.
 export function pickShareMethod(caps) {
+  if (caps.native) return 'native';
   if (caps.canShareFiles) return 'share';
   if (caps.canDownload) return 'download';
   return 'mailto';
@@ -23,8 +26,13 @@ export function buildMailto(text, subject = 'coredrive-rx debug log') {
 }
 
 // shareLog exports `text` using the best available method. Browser-only (touches
-// navigator/document); the pure decision lives in pickShareMethod above.
-export async function shareLog(text, filename = 'coredrive-rx-debug.txt') {
+// navigator/document); the pure decision lives in pickShareMethod above. nativeShare
+// (text, filename) is the native app's share sheet (src/platform.js), null on the web.
+export async function shareLog(text, nativeShare = null, filename = 'coredrive-rx-debug.txt') {
+  if (pickShareMethod({ native: !!nativeShare }) === 'native') {
+    await nativeShare(text, filename);
+    return 'native';
+  }
   const file = typeof File !== 'undefined' ? new File([text], filename, { type: 'text/plain' }) : null;
   const canShareFiles = !!(file && navigator.canShare && navigator.canShare({ files: [file] }));
   const caps = { canShareFiles, canDownload: typeof document !== 'undefined' };

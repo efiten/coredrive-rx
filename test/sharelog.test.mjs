@@ -8,6 +8,12 @@ test('prefers the Web Share API when files can be shared', () => {
   assert.strictEqual(pickShareMethod({ canShareFiles: true, canDownload: true }), 'share');
 });
 
+test('the native app uses its own share sheet, whatever the WebView claims', () => {
+  assert.strictEqual(pickShareMethod({ native: true, canShareFiles: false, canDownload: true }), 'native');
+  assert.strictEqual(pickShareMethod({ native: true, canShareFiles: true, canDownload: true }), 'native');
+  assert.strictEqual(pickShareMethod({ native: false, canShareFiles: true, canDownload: true }), 'share');
+});
+
 test('falls back to download when share is unavailable', () => {
   assert.strictEqual(pickShareMethod({ canShareFiles: false, canDownload: true }), 'download');
 });
