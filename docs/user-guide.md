@@ -77,6 +77,19 @@ Your position never goes over the mesh. It is only sent to CoreScope over the in
    the app switches to **Home**.
 5. Start moving. The screen stays awake while capturing.
 
+### Android app
+
+Besides the web app there is an Android app. It works the same, but it does not need Chrome and
+keeps capturing in the background. On first start it asks for the address of your CoreDrive RX
+deployment: type it, or scan the QR code on the CoreScope **Coverage** page.
+
+Use one of the two, not both. Only one app at a time can hold the Bluetooth link to the
+companion, and each keeps its own queue and login. If you installed the web app to the home
+screen earlier, remove that icon after installing the Android app: long-press it and choose
+uninstall or remove. The web app is called **CoreDrive RX Web** on the home screen, the Android
+app **CoreDrive RX**. A web app installed before that rename may keep its old name until Chrome
+refreshes it, so both icons can read "CoreDrive RX" for a while.
+
 ## The screens
 
 The screenshots below were made with made-up demo data, not a real drive.
