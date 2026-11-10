@@ -7,7 +7,7 @@
 // Home is a pure monitor (counters, status strip, last-reception SNR meter, recently
 // heard). Discover runs automatically with a traffic backoff (see monitor.js). Config
 // and diagnostics live on the Settings tab.
-import { createTransport, createGps, isNativeApp, nativeHttpGet, qrScanner } from './platform.js';
+import { createTransport, createGps, isNativeApp, nativeHttpGet, nativeShareFile, qrScanner } from './platform.js';
 import { scanDeployment } from './qrscan.js';
 import { normalizeDeploymentUrl, readDeployment, saveDeployment, fetchDeploymentConfigText, DEPLOY_CACHE_KEY } from './deployment.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
@@ -2095,7 +2095,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       lineCap: LOG_LINE_CAP,
     });
     const text = header + (lines.join('\n') || '(empty log)');
-    try { await shareLog(text); } catch (e) { dbg('share failed: ' + e.message, 'no'); }
+    try { await shareLog(text, isNativeApp() ? nativeShareFile : null); } catch (e) { dbg('share failed: ' + e.message, 'no'); }
   });
   els('btnPingNow').addEventListener('click', pingNow);
   els('btnDbg').addEventListener('click', () => {
