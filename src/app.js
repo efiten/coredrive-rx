@@ -24,6 +24,7 @@ import {
   discoverDecision, isOrganicHeard, snrToPct, decayPeak, pruneTimestamps, linkTransition,
 } from './monitor.js';
 import { shareLog } from './sharelog.js';
+import { catchUpPlan } from './catchup.js';
 import { Queue } from './queue.js';
 import { Publisher, KEEPALIVE_SECS } from './publisher.js';
 import { drainOnce, serialiseDrain, stampRecord } from './drain.js';
@@ -90,6 +91,9 @@ const state = {
   lastHeardAt: null, lastFireAt: 0, tick: null,
   // RF environment sampler
   rfTimer: null, lastRfSample: null, rfGen: 0,
+  // Timer catch-up (src/catchup.js): when each timed job last ran, and the pending
+  // RF sample (due time + its tick) so a frame can run it when the timer is frozen.
+  lastTickAt: null, lastDrainAt: null, lastKickAt: null, rfDueAt: null, rfTick: null,
   // linkQuiet: true while the BLE link is down, so the pause and the resume are each
   // said once instead of once per tick.
   linkQuiet: false,
@@ -1307,11 +1311,38 @@ function noteLinkState(linkUp) {
   else dbg('companion link back — discover, RF sampling and region asks resumed', 'ok');
 }
 
+// catchUp runs timed jobs whose timer is overdue, from an incoming frame or GPS fix.
+// With the screen off the Android WebView stops running timers while frames and fixes
+// keep arriving (src/catchup.js has the field log); this keeps uploads, discover,
+// region asks, uplink pings and RF samples going while driving with the screen off.
+function catchUp() {
+  if (!state.connected) return;
+  const now = Date.now();
+  const plan = catchUpPlan({
+    now, lastTickAt: state.lastTickAt, lastDrainAt: state.lastDrainAt, rfDueAt: state.rfDueAt,
+    publisherDown: !!state.publisher && !state.publisher.connected(), lastKickAt: state.lastKickAt,
+  });
+  if (plan.tick) monitorTick();
+  if (plan.rf && state.rfTick) {
+    if (state.rfTimer) { clearTimeout(state.rfTimer); state.rfTimer = null; }
+    state.rfTick();
+  }
+  if (plan.reconnect) {
+    state.lastKickAt = now;
+    if (state.publisher.reconnect()) dbg('timers frozen (screen off?): reopening the CoreScope link from a reception', 'st');
+  }
+  if (plan.drain) {
+    state.lastDrainAt = now;
+    drain().then(refreshCounters).catch((e) => dbg('publish error (kept buffered): ' + e.message, 'no'));
+  }
+}
+
 // --- Per-second monitor tick: drives auto-discover, the SNR-meter decay, and the
 // time-relative labels (last-heard / last-upload / rate / discover countdown). Runs only
 // while connected.
 function monitorTick() {
   const now = Date.now();
+  state.lastTickAt = now;
   const linkUp = bleLinkUp();
   noteLinkState(linkUp);
   const dec = discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused, linkUp);
@@ -1698,6 +1729,7 @@ const drain = serialiseDrain(async () => {
 // publisher.publish now times out (rejecting), and rescheduling lives in `finally`, so a
 // stalled send can never kill the loop (the +60-pending-on-WiFi bug).
 async function drainLoop() {
+  state.lastDrainAt = Date.now();
   try {
     await drain();
     refreshCounters();
@@ -1755,6 +1787,7 @@ async function connectAll() {
     state.transport.onFrame(processFrame);
     state.transport.onFrame(onMsgWaitingFrame);
     state.transport.onFrame(onRegionsFrame); // no-op unless a region request is in flight
+    state.transport.onFrame(() => catchUp());
     state.transport.onStatus((s) => {
       state.bleEpoch++;
       dbg('BLE: ' + s);
@@ -1822,6 +1855,7 @@ async function connectAll() {
       if (state.localMap) state.localMap.setPosition(fix.lat, fix.lon);
       state.motion = updateMotion(state.motion, fix, Date.now());
       setPaused(state.motion.paused);
+      catchUp();
     });
     if (gpsStarted && gpsStarted.catch) gpsStarted.catch((e) => dbg('GPS: ' + e.message, 'no'));
 
@@ -1910,12 +1944,13 @@ function startRfSampler() {
   });
 
   const tick = async () => {
+    state.rfDueAt = null; // running now; catch-up must not start a second one
     if (!state.transport || !state.companionPubkey) return;
     // A sample taken over a dead link is three writes that throw and one
     // "rf sample incomplete — discarded" line. Reschedule and wait for the link.
     if (!bleLinkUp() || state.signing) {
       if (state.rfGen !== myGen) return;
-      state.rfTimer = setTimeout(tick, nextSampleDelay(state.motion ? state.motion.paused : false));
+      scheduleRf(tick);
       return;
     }
     const fix = currentFix();
@@ -1934,15 +1969,26 @@ function startRfSampler() {
       }
     }
     if (state.rfGen !== myGen) return; // superseded by a disconnect/reconnect during the await above
-    state.rfTimer = setTimeout(tick, nextSampleDelay(state.motion ? state.motion.paused : false));
+    scheduleRf(tick);
   };
 
-  state.rfTimer = setTimeout(tick, nextSampleDelay(state.motion ? state.motion.paused : false));
+  scheduleRf(tick);
+}
+
+// scheduleRf arms the next RF sample and records when it is due, so catchUp can run it
+// from a frame when the WebView has frozen the timer.
+function scheduleRf(tick) {
+  const delay = nextSampleDelay(state.motion ? state.motion.paused : false);
+  state.rfTick = tick;
+  state.rfDueAt = Date.now() + delay;
+  state.rfTimer = setTimeout(tick, delay);
 }
 
 function stopRfSampler() {
   state.rfGen += 1; // invalidate any tick currently mid-await so it will not reschedule itself
   if (state.rfTimer) { clearTimeout(state.rfTimer); state.rfTimer = null; }
+  state.rfDueAt = null;
+  state.rfTick = null;
 }
 
 async function disconnectAll(keepProgress) {
@@ -2118,6 +2164,10 @@ window.addEventListener('DOMContentLoaded', async () => {
   // cold start in a garage). Retry the config FIRST: this is the moment the fetch
   // that failed at startup can finally succeed, and draining before it is pointless
   // — with no config there is no publisher to drain into.
+  // Screen off/on in the log, so a field log shows what ran while the screen was off.
+  document.addEventListener('visibilitychange', () => {
+    dbg(document.hidden ? 'app hidden (screen off or in the background)' : 'app visible again', 'st');
+  });
   window.addEventListener('online', () => {
     retryConfig().finally(() => { drain().then(refreshCounters).catch(() => {}); });
     // A start without network never got an answer from CoreScope: ask once more now.
