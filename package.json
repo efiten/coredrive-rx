@@ -1,6 +1,6 @@
 {
   "name": "coredrive-rx",
-  "version": "1.24.5",
+  "version": "1.25.0",
   "private": false,
   "license": "GPL-3.0-or-later",
   "type": "module",
