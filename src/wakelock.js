@@ -2,7 +2,9 @@
 // Screen Wake Lock API where available (Chrome Android/desktop, Safari 16.4+ tab),
 // and fall back to a hidden muted looping <video> (the "NoSleep" trick) where it
 // isn't (e.g. Bluefy / WKWebView on iOS). The native sentinel is auto-released when
-// the page is hidden, so it is re-acquired on visibilitychange.
+// the page is hidden, so it is re-acquired on visibilitychange. In the Android app the
+// page is never hidden (android AlwaysVisibleWebView), so MainActivity's appVisible
+// event does the same there.
 //
 // navigator/document are injectable so the native-vs-fallback selection is unit
 // testable without a real browser.
@@ -58,6 +60,8 @@ export function createWakeLock(deps = {}) {
 
   function onVisible() {
     // The OS releases the native sentinel when the page hides; re-acquire on return.
+    // One that is still held is left alone: a second request would orphan it.
+    if (sentinel && sentinel.released === false) return;
     if (active && native && doc && doc.visibilityState === 'visible') acquireNative();
   }
 
@@ -65,7 +69,10 @@ export function createWakeLock(deps = {}) {
     if (active) return; // idempotent — don't stack locks
     active = true;
     if (native) {
-      if (doc && doc.addEventListener) doc.addEventListener('visibilitychange', onVisible);
+      if (doc && doc.addEventListener) {
+        doc.addEventListener('visibilitychange', onVisible);
+        doc.addEventListener('appVisible', onVisible);
+      }
       await acquireNative();
     } else {
       startVideo();
@@ -75,7 +82,10 @@ export function createWakeLock(deps = {}) {
   async function disable() {
     if (!active) return; // no-op when not enabled
     active = false;
-    if (doc && doc.removeEventListener) doc.removeEventListener('visibilitychange', onVisible);
+    if (doc && doc.removeEventListener) {
+      doc.removeEventListener('visibilitychange', onVisible);
+      doc.removeEventListener('appVisible', onVisible);
+    }
     if (sentinel) { try { await sentinel.release(); } catch (e) {} sentinel = null; }
     if (video && video.pause) { try { video.pause(); } catch (e) {} }
   }

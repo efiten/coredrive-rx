@@ -2178,6 +2178,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   document.addEventListener('visibilitychange', () => {
     dbg(document.hidden ? 'app hidden (screen off or in the background)' : 'app visible again', 'st');
   });
+  // The Android app keeps the page visible so it runs with the screen off (android
+  // AlwaysVisibleWebView); MainActivity reports the real state. An 'app hidden' line
+  // between these two means the page was hidden after all.
+  document.addEventListener('appHidden', () => dbg('screen off or app in the background, capture goes on', 'st'));
+  document.addEventListener('appVisible', () => dbg('app on screen again', 'st'));
   window.addEventListener('online', () => {
     retryConfig().finally(() => { drain().then(refreshCounters).catch(() => {}); });
     // A start without network never got an answer from CoreScope: ask once more now.
