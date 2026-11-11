@@ -36,7 +36,7 @@ import { signWithCompanion } from './companionsign.js';
 import { buildRfLogRecord } from './capture.js';
 import { heardKeyAfterVerify } from './advertsig.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, resumeDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
-import { buildRegionsRequest, buildOwnerRequest, parseRegionsResponse, parseOwnerResponse, parseSentAck } from './regionreq.js';
+import { buildRegionsRequest, buildOwnerRequest, parseRegionsResponse, parseOwnerResponse, parseSentAck, parseSendRefusal } from './regionreq.js';
 import { nextAskKind, settledSet, settle } from './asknext.js';
 import {
   makeTag, pingText, buildChannelMessage, buildScopeFrame, scopeKeyName, buildGetChannel, buildSetChannel,
@@ -117,7 +117,7 @@ const state = {
     // replyWaiters: target -> release, for the one round holding a contact override open
     // until that repeater answers (see holdUntilReply)
     replyWaiters: new Map(),
-    heard: 0, queued: 0, asks: 0, replies: 0, flooded: 0, unmatched: 0, dropped: 0,
+    heard: 0, queued: 0, asks: 0, replies: 0, flooded: 0, refused: 0, unmatched: 0, dropped: 0,
     capped: 0, bonus: 0,
     // The signal each ask went out on, split by what came back. If these two ranges
     // do not overlap, a signal floor is worth having and this says where it sits.
@@ -138,7 +138,7 @@ const state = {
   //                bytes of the two are laid out identically
   names: {
     checked: new Set(), wanted: new Set(), named: new Map(), outstanding: new Map(),
-    asks: 0, replies: 0, flooded: 0, dropped: 0,
+    asks: 0, replies: 0, flooded: 0, refused: 0, dropped: 0,
   },
   // Uplink ping (src/uplinkping.js). Set up once per connection, when config turns it on.
   //   maxChannels  channel slots the companion has (DEVICE_INFO)
@@ -459,14 +459,16 @@ function regionTick(now) {
 }
 
 // sendAndReadTag sends one request and resolves with the companion's own
-// RESP_CODE_SENT ack: { tag, isFlood }, or null when the write failed or no ack came.
+// RESP_CODE_SENT ack: { tag, isFlood }, its refusal: { refused }, or null when the
+// write failed or no reply came.
 // Every later reply is matched against that tag, so an ask whose tag was never captured
 // is an ask whose answer could not be attributed to anyone — it is not counted.
 function sendAndReadTag(frame) {
   return new Promise((resolve) => {
     if (!state.transport) { resolve(null); return; }
     const onAck = (dv) => {
-      const ack = parseSentAck(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength));
+      const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+      const ack = parseSentAck(bytes) || parseSendRefusal(bytes);
       if (!ack) return;
       cleanup();
       resolve(ack);
@@ -516,6 +518,12 @@ async function askRepeater(target) {
     const ack = await sendAndReadTag(frame);
     if (ack == null) {
       dbg(k.label + ': no send-ack for ' + target.slice(0, 12) + '… — ask not counted', 'no');
+    } else if (ack.refused) {
+      // Nothing went on the air. Up to companion v1.16 this is a full contact list and a
+      // repeater that is not a contact (src/regionreq.js parseSendRefusal).
+      k.counts.refused++;
+      dbg(k.label + ': companion refused the ask to ' + target.slice(0, 12) + '… (table full: contact list full'
+        + ' and this repeater is not a contact, fixed in companion firmware v1.17) — ask not counted', 'no');
     } else if (ack.isFlood) {
       // The companion floods whenever the target is a contact whose out_path is
       // unknown, and a repeater ignores a flooded request without any error. Saying so
@@ -2144,7 +2152,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         heard: state.regions.heard, seen: state.regions.targets.size,
         asks: state.regions.asks, replies: state.regions.replies,
         answered: state.regions.answered.size, queue: state.regions.queue.length,
-        outstanding: state.regions.outstanding.size, flooded: state.regions.flooded,
+        outstanding: state.regions.outstanding.size, flooded: state.regions.flooded, refused: state.regions.refused,
         unmatched: state.regions.unmatched, dropped: state.regions.dropped,
         capped: state.regions.capped, bonus: state.regions.bonus,
         sigAnswered: state.regions.sigAnswered, sigSilent: state.regions.sigSilent,

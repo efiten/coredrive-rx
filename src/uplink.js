@@ -178,7 +178,9 @@ export function buildLogHeader(info) {
     lines.push(row('asks', asks.answered + ' of ' + asks.seen + ' repeaters answered — '
       + asks.asks + ' asks sent, ' + asks.replies + ' answered, over ' + asks.heard + ' receptions'));
     lines.push(row('asks q', asks.queue + ' queued, ' + asks.outstanding + ' awaiting a reply, '
-      + asks.dropped + ' timed out, ' + asks.unmatched + ' unmatched replies, ' + asks.flooded + ' sent as FLOOD'));
+      + asks.dropped + ' timed out, ' + asks.unmatched + ' unmatched replies, ' + asks.flooded + ' sent as FLOOD'
+      // Omitted at 0: only a companion with a full contact list (up to firmware v1.16) refuses.
+      + (asks.refused > 0 ? ', ' + asks.refused + ' refused by the companion (contact list full)' : '')));
     lines.push(row('asks cap', asks.capped + ' receptions ignored (this encounter had spent its asks), '
       + asks.bonus + ' extra asks earned by a much stronger reception'));
     // Is there a signal below which asking is pointless? Two ranges, one for the
