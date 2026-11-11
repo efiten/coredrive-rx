@@ -86,3 +86,35 @@ test('double enable does not stack; disable when idle is a no-op', async () => {
   assert.deepStrictEqual(nav.calls, ['screen']);
   await createWakeLock({ navigator: nav, document: fakeDoc() }).disable(); // no throw
 });
+
+// The Android app's WebView never reports the page hidden (AlwaysVisibleWebView), so
+// no visibilitychange fires there: MainActivity sends appVisible instead.
+test('appVisible re-acquires a native lock the system released', async () => {
+  const nav = nativeNav();
+  const doc = fakeDoc();
+  await createWakeLock({ navigator: nav, document: doc }).enable();
+  doc.fire('appVisible');
+  await Promise.resolve();
+  assert.deepStrictEqual(nav.calls, ['screen', 'screen']);
+});
+
+test('appVisible leaves a native lock that is still held alone', async () => {
+  const calls = [];
+  const nav = { wakeLock: { async request(type) { calls.push(type); return { released: false, async release() {} }; } } };
+  const doc = fakeDoc();
+  await createWakeLock({ navigator: nav, document: doc }).enable();
+  doc.fire('appVisible');
+  await Promise.resolve();
+  assert.deepStrictEqual(calls, ['screen']);
+});
+
+test('disable stops listening for appVisible', async () => {
+  const nav = nativeNav();
+  const doc = fakeDoc();
+  const wl = createWakeLock({ navigator: nav, document: doc });
+  await wl.enable();
+  await wl.disable();
+  doc.fire('appVisible');
+  await Promise.resolve();
+  assert.deepStrictEqual(nav.calls, ['screen']);
+});
