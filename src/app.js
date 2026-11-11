@@ -35,7 +35,7 @@ import { accountView } from './accountview.js';
 import { signWithCompanion } from './companionsign.js';
 import { buildRfLogRecord } from './capture.js';
 import { heardKeyAfterVerify } from './advertsig.js';
-import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
+import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, resumeDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
 import { buildRegionsRequest, buildOwnerRequest, parseRegionsResponse, parseOwnerResponse, parseSentAck } from './regionreq.js';
 import { nextAskKind, settledSet, settle } from './asknext.js';
 import {
@@ -961,6 +961,14 @@ function setPaused(paused) {
   state.paused = paused;
   renderPauseChip();
   dbg(paused ? 'stationary — capture/upload paused' : 'moving again — capture/upload resumed', paused ? 'no' : 'ok');
+  if (!paused && state.rfTick) {
+    const delay = resumeDelay(state.rfDueAt, Date.now());
+    if (delay != null) {
+      if (state.rfTimer) clearTimeout(state.rfTimer);
+      state.rfDueAt = Date.now() + delay;
+      state.rfTimer = setTimeout(state.rfTick, delay);
+    }
+  }
 }
 
 // --- Uplink health + config recovery (pure decisions in src/uplink.js) ---
