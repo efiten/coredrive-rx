@@ -262,6 +262,15 @@ For operators: the web deployment you already host is all the app needs. The app
 `https://localhost`, so add that to `corsAllowedOrigins` of your CoreScope (login and companion
 linking), and to any proxy in front of `resolveUrl` / `searchUrl`.
 
+For the maintainer: `scripts/play-upload.mjs` puts a signed bundle on a Google Play track as a
+draft; rolling it out stays a click in Play Console. It needs a service account key with Play
+access (default `~/.coredrive-rx-signing/play-api.json`, or `PLAY_API_KEY`).
+
+```bash
+node scripts/play-upload.mjs tracks                          # list tracks, changes nothing
+node scripts/play-upload.mjs upload app.aab --track alpha    # draft with docs/releases notes
+```
+
 ## Deploy
 
 Two optional SSH helpers — both leave the server's `config.json` intact:
