@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildStatsRequest, parseStats, mergeSample, nextSampleDelay, MOVING_MS, PARKED_MS,
+  buildStatsRequest, parseStats, mergeSample, nextSampleDelay, resumeDelay, MOVING_MS, PARKED_MS,
   CMD_GET_STATS, STATS_CORE, STATS_RADIO, STATS_PACKETS,
 } from '../src/rfstats.js';
 
@@ -77,4 +77,12 @@ test('cadence is 15s moving, 5min parked', () => {
   assert.equal(PARKED_MS, 300000);
   assert.equal(nextSampleDelay(false), MOVING_MS);
   assert.equal(nextSampleDelay(true), PARKED_MS);
+});
+
+test('moving again re-arms a parked-cadence sample to the moving cadence', () => {
+  const now = 1_000_000;
+  assert.equal(resumeDelay(now + PARKED_MS - 20000, now), MOVING_MS); // seen: 4 min 19 s left
+  assert.equal(resumeDelay(now + MOVING_MS, now), null); // due soon anyway: leave it
+  assert.equal(resumeDelay(now + 3000, now), null);
+  assert.equal(resumeDelay(null, now), null); // none armed, or one running
 });

@@ -111,3 +111,11 @@ export const PARKED_MS = 300000;
 export function nextSampleDelay(paused) {
   return paused ? PARKED_MS : MOVING_MS;
 }
+
+// resumeDelay: on moving again, a sample still armed on the parked cadence would leave the
+// first minutes of the drive unsampled (seen: 4 min 19 s). Returns the moving delay to
+// re-arm with, or null when the armed sample is due sooner anyway or none is armed.
+export function resumeDelay(dueAt, now) {
+  if (dueAt == null || dueAt - now <= MOVING_MS) return null;
+  return MOVING_MS;
+}
