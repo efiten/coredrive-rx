@@ -1,6 +1,6 @@
 {
   "name": "coredrive-rx",
-  "version": "1.24.1",
+  "version": "1.24.2",
   "private": false,
   "license": "GPL-3.0-or-later",
   "type": "module",
@@ -25,6 +25,7 @@
     "@capacitor-mlkit/barcode-scanning": "8.2.1",
     "@capacitor/core": "8.6.0",
     "@capacitor/filesystem": "8.1.5",
+    "@capacitor/local-notifications": "8.3.1",
     "@capacitor/share": "8.0.3",
     "@noble/ciphers": "2.0.1",
     "@noble/ed25519": "^3.2.0",

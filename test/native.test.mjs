@@ -127,6 +127,22 @@ test('native GPS starts a background watcher and keeps the latest fix', async ()
   assert.deepEqual(removed, { id: 'w1' });
 });
 
+test('native GPS asks for notifications before the foreground service starts', async () => {
+  const order = [];
+  const plugin = { async addWatcher() { order.push('watch'); return 'w1'; }, async removeWatcher() {} };
+  const notifications = { async requestPermissions() { order.push('notify'); return { display: 'granted' }; } };
+  await new NativeGps(plugin, notifications).start();
+  assert.deepEqual(order, ['notify', 'watch']);
+});
+
+test('native GPS still starts when the notification request fails', async () => {
+  let started = false;
+  const plugin = { async addWatcher() { started = true; return 'w1'; }, async removeWatcher() {} };
+  const notifications = { async requestPermissions() { throw new Error('denied'); } };
+  await new NativeGps(plugin, notifications).start();
+  assert.equal(started, true);
+});
+
 test('isNativeApp follows Capacitor.isNativePlatform', () => {
   assert.equal(isNativeApp({ isNativePlatform: () => true }), true);
   assert.equal(isNativeApp({ isNativePlatform: () => false }), false);

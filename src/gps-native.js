@@ -8,9 +8,13 @@ export const BACKGROUND_TITLE = 'CoreDrive RX is mapping';
 export const BACKGROUND_MESSAGE = 'Recording coverage. Disconnect in the app to stop.';
 
 export class NativeGps {
-  constructor(plugin) { this.plugin = plugin; this._last = null; this._watchId = null; }
+  constructor(plugin, notifications) { this.plugin = plugin; this.notifications = notifications; this._last = null; this._watchId = null; }
 
   async start(onFix) {
+    // Android 13+ hides the foreground service notification until the user allows
+    // notifications, and the location plugin does not ask. A refusal must not stop
+    // capture: the service runs either way.
+    if (this.notifications) await this.notifications.requestPermissions().catch(() => {});
     this._watchId = await this.plugin.addWatcher(
       {
         backgroundTitle: BACKGROUND_TITLE,
