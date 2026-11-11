@@ -9,6 +9,7 @@
 // and diagnostics live on the Settings tab.
 import { createTransport, createGps, isNativeApp, nativeHttpGet, nativeShareFile, qrScanner } from './platform.js';
 import { needsBatteryTip, markBatteryTipSeen } from './batterytip.js';
+import { usableFix, startSpell, endSpell, spellText } from './background.js';
 import { scanDeployment } from './qrscan.js';
 import { normalizeDeploymentUrl, readDeployment, saveDeployment, fetchDeploymentConfigText, DEPLOY_CACHE_KEY } from './deployment.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
@@ -92,6 +93,8 @@ const state = {
   lastHeardAt: null, lastFireAt: 0, tick: null,
   // RF environment sampler
   rfTimer: null, lastRfSample: null, rfGen: 0,
+  // bgSpell: the current stretch in the background while connected (src/background.js)
+  bgSpell: null,
   // Timer catch-up (src/catchup.js): when each timed job last ran, and the pending
   // RF sample (due time + its tick) so a frame can run it when the timer is frozen.
   lastTickAt: null, lastDrainAt: null, lastKickAt: null, rfDueAt: null, rfTick: null,
@@ -1527,7 +1530,8 @@ function step(msg, cls) {
   return d;
 }
 
-function currentFix() { return state.gps.latest(); }
+// A hidden page only uses a fresh fix: see src/background.js.
+function currentFix() { return usableFix(state.gps.latest(), Date.now(), document.hidden); }
 
 async function processFrame(dv) {
   const f = parseFrame(dv);
@@ -1665,7 +1669,13 @@ async function processFrame(dv) {
   renderLastHeard();
 
   const fix = currentFix();
-  if (!fix) { dbg('heard ' + hk.heardKey + ' (' + hk.src + ')' + sig + ' — no GPS, not queued', 'no'); return; }
+  if (!fix) {
+    const stale = !!state.gps.latest();
+    if (stale && state.bgSpell) state.bgSpell.skipped++;
+    dbg('heard ' + hk.heardKey + ' (' + hk.src + ')' + sig
+      + (stale ? ' — GPS fix too old while in the background, not queued' : ' — no GPS, not queued'), 'no');
+    return;
+  }
   // Wake-on-packet (issue #9): a heard packet advances the idle gate too, so movement
   // resumes capture even when the GPS callback cadence stalled while backgrounded /
   // screen-off. A packet from a moved position unpauses; one still at the parked
@@ -1679,6 +1689,7 @@ async function processFrame(dv) {
   renderCounters();
   const rec = { rx_at: new Date().toISOString(), raw: rawHex, snr: f.snr, rssi: f.rssi, lat: fix.lat, lon: fix.lon, acc_m: fix.acc_m };
   await state.queue.add(queued(rec));
+  if (state.bgSpell) state.bgSpell.saved++;
   if (state.soundEnabled && state.beeper) state.beeper.beep(); // audio cue per mapped node (#7)
   if (state.localMap) state.localMap.addPoint(fix.lat, fix.lon, f.snr); // live hex on the map
   refreshCounters();
@@ -2193,7 +2204,15 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Screen off/on in the log, so a field log shows what ran while the screen was off.
   document.addEventListener('visibilitychange', () => {
     dbg(document.hidden ? 'app hidden (screen off or in the background)' : 'app visible again', 'st');
+    if (document.hidden) { state.bgSpell = state.connected ? startSpell(Date.now()) : null; return; }
+    const s = endSpell(state.bgSpell, Date.now());
+    state.bgSpell = null;
+    if (!s) return;
+    dbg('background ' + Math.round(s.ms / 1000) + 's: ' + s.saved + ' saved, ' + s.skipped + ' not saved (GPS fix too old)', s.skipped ? 'no' : 'st');
+    els('bgchip').textContent = spellText(s);
+    els('bgchip').style.display = 'block';
   });
+  els('bgchip').addEventListener('click', () => { els('bgchip').style.display = 'none'; });
   // The Android app keeps the page visible so it runs with the screen off (android
   // AlwaysVisibleWebView); MainActivity reports the real state. An 'app hidden' line
   // between these two means the page was hidden after all.

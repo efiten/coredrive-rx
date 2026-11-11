@@ -25,7 +25,7 @@ export class NativeGps {
       },
       (loc, err) => {
         if (err || !loc) return;
-        this._last = { lat: loc.latitude, lon: loc.longitude, acc_m: loc.accuracy };
+        this._last = { lat: loc.latitude, lon: loc.longitude, acc_m: loc.accuracy, at: Date.now() };
         if (onFix) onFix(this._last);
       },
     );

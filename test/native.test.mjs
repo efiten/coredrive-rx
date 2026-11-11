@@ -120,8 +120,11 @@ test('native GPS starts a background watcher and keeps the latest fix', async ()
   assert.equal(g.latest(), null);
   cb({ latitude: 50.9, longitude: 4.7, accuracy: 8 });
   cb(undefined, Object.assign(new Error('denied'), { code: 'NOT_AUTHORIZED' }));
-  assert.deepEqual(g.latest(), { lat: 50.9, lon: 4.7, acc_m: 8 });
-  assert.deepEqual(fixes, [{ lat: 50.9, lon: 4.7, acc_m: 8 }]);
+  const { at, ...pos } = g.latest();
+  assert.deepEqual(pos, { lat: 50.9, lon: 4.7, acc_m: 8 });
+  assert.ok(Math.abs(Date.now() - at) < 1000, 'the fix carries when it arrived');
+  assert.equal(fixes.length, 1);
+  assert.equal(fixes[0], g.latest());
   g.stop();
   await new Promise((r) => setTimeout(r, 1));
   assert.deepEqual(removed, { id: 'w1' });
