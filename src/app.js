@@ -8,6 +8,7 @@
 // heard). Discover runs automatically with a traffic backoff (see monitor.js). Config
 // and diagnostics live on the Settings tab.
 import { createTransport, createGps, isNativeApp, nativeHttpGet, nativeShareFile, qrScanner } from './platform.js';
+import { needsBatteryTip, markBatteryTipSeen } from './batterytip.js';
 import { scanDeployment } from './qrscan.js';
 import { normalizeDeploymentUrl, readDeployment, saveDeployment, fetchDeploymentConfigText, DEPLOY_CACHE_KEY } from './deployment.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
@@ -2071,11 +2072,20 @@ window.addEventListener('DOMContentLoaded', async () => {
   els('chkMsgSound').disabled = !state.msg.notify;
   // Web Bluetooth missing (e.g. iOS Safari) — point the user to a supported browser.
   if (!navigator.bluetooth && !isNativeApp()) els('btnotice').style.display = 'block';
-  els('btnConnect').addEventListener('click', () => {
-    if (state.connected) { disconnectAll(); return; }
+  const startConnect = () => {
     state.wakeLock.enable(); // acquire in the user gesture (iOS needs it for video.play())
     if (state.soundEnabled || state.msg.sound) state.beeper.ensure(); // unlock audio in the same gesture
     connectAll();
+  };
+  els('btnConnect').addEventListener('click', () => {
+    if (state.connected) { disconnectAll(); return; }
+    if (needsBatteryTip(localStorage, isNativeApp())) { els('batteryTip').showModal(); return; }
+    startConnect();
+  });
+  els('btnBatteryTipOk').addEventListener('click', () => {
+    markBatteryTipSeen(localStorage);
+    els('batteryTip').close();
+    startConnect();
   });
   els('btnClear').addEventListener('click', () => { els('log').textContent = ''; });
   els('chkVerbose').addEventListener('change', (e) => { state.verbose = e.target.checked; });

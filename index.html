@@ -18,7 +18,16 @@
       --inset-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
       --inset-left: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
       --inset-right: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
+      --tip-bg: #1a1d24;
+      --tip-border: #2a2f3a;
+      --tip-text: #e6e6e6;
+      --tip-backdrop: rgba(0, 0, 0, .6);
     }
+    dialog.tip { max-width: 420px; width: calc(100% - 48px); box-sizing: border-box; background: var(--tip-bg); color: var(--tip-text); border: 1px solid var(--tip-border); border-radius: 10px; padding: 16px; font-size: 14px; line-height: 1.45; }
+    dialog.tip::backdrop { background: var(--tip-backdrop); }
+    dialog.tip h2 { font-size: 16px; margin: 0 0 8px; }
+    dialog.tip p { margin: 0 0 10px; }
+    dialog.tip a { color: inherit; text-decoration: underline; }
     body { font-family: system-ui, sans-serif; margin: 0; padding: calc(16px + var(--inset-top)) calc(16px + var(--inset-right)) 16px calc(16px + var(--inset-left)); background: #0f1115; color: #e6e6e6; }
     h1 { font-size: 18px; }
     .card { background: #1a1d24; border: 1px solid #2a2f3a; border-radius: 8px; padding: 12px; margin: 10px 0; }
@@ -79,6 +88,16 @@
 <body>
   <h1>📡 CoreDrive RX <span id="appver" style="font-size:11px;font-weight:400;color:#9aa4b2"></span></h1>
   <div class="muted" style="margin-top:-6px;margin-bottom:8px">Mobile RX coverage for CoreScope</div>
+  <dialog id="batteryTip" class="tip">
+    <h2>Keep capturing with the screen off</h2>
+    <p>Some phones, OnePlus for one, close apps in the background to save battery, even while the
+      capture notification shows. Capture then stops without a warning.</p>
+    <p>Before you drive, open the phone's <b>Settings &gt; Apps &gt; CoreDrive RX &gt; Battery</b> and
+      choose <b>Unrestricted</b>, or turn off battery optimisation and allow background activity.
+      The names differ per brand; <a href="https://dontkillmyapp.com" target="_blank" rel="noopener">dontkillmyapp.com</a>
+      shows them for yours.</p>
+    <button id="btnBatteryTipOk">OK, connect</button>
+  </dialog>
   <div id="btnotice" style="display:none;background:#3a1414;color:#ff8b7a;border:1px solid #6b2020;border-radius:8px;padding:10px 12px;margin:10px 0;font-size:13px">⚠️ Web Bluetooth isn't available in this browser. On <b>iOS</b>, open this page in the <b>Bluefy</b> browser; on <b>Android</b>, use <b>Chrome</b>.</div>
   <div id="view-home">
   <div class="card">

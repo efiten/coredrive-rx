@@ -90,6 +90,13 @@ uninstall or remove. The web app is called **CoreDrive RX Web** on the home scre
 app **CoreDrive RX**. A web app installed before that rename may keep its old name until Chrome
 refreshes it, so both icons can read "CoreDrive RX" for a while.
 
+Some phones close apps in the background to save battery, even while the capture notification
+shows. A OnePlus did that during a test walk, and capture stopped without a warning. Before you
+drive, open the phone's **Settings > Apps > CoreDrive RX > Battery** and choose **Unrestricted**,
+or turn off battery optimisation and allow background activity. The names differ per brand;
+[dontkillmyapp.com](https://dontkillmyapp.com) shows them for yours. The app shows this once,
+before your first **Connect**.
+
 ## The screens
 
 The screenshots below were made with made-up demo data, not a real drive.
@@ -198,5 +205,6 @@ On connect the app also switches the companion to 2-byte path hashes if it was o
 | "Web Bluetooth isn't available" | Wrong browser: use Chrome on Android, Bluefy on iOS. |
 | Companion not in the Bluetooth list | Disconnect it in the MeshCore app first, or close that app. |
 | Nothing is recorded | GPS fix (Home status strip), and whether you are paused as stationary. |
+| Android app stopped while the screen was off | Battery setting for CoreDrive RX: **Unrestricted** (see [Android app](#android-app)). |
 | Pending count keeps growing | Mobile data, then **Push pending now** in Settings. |
 | Anything else | **Share / mail debug log** in Settings and send it to the operator of your deployment. |
