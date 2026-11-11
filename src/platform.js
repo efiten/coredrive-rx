@@ -6,6 +6,7 @@ import { BleClient } from '@capacitor-community/bluetooth-le';
 import { BarcodeScanner } from '@capacitor-mlkit/barcode-scanning';
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
+import { LocalNotifications } from '@capacitor/local-notifications';
 import { WebBluetoothTransport } from './transport.js';
 import { CapacitorBleTransport } from './transport-native.js';
 import { Gps } from './gps.js';
@@ -36,5 +37,5 @@ export async function nativeShareFile(text, filename) {
 export function qrScanner() { return BarcodeScanner; }
 
 export function createGps() {
-  return isNativeApp() ? new NativeGps(registerPlugin('BackgroundGeolocation')) : new Gps();
+  return isNativeApp() ? new NativeGps(registerPlugin('BackgroundGeolocation'), LocalNotifications) : new Gps();
 }
