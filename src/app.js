@@ -297,6 +297,9 @@ async function checkForUpdate(base) {
     } catch (e) { /* no network: the next start asks again */ }
   }
   const n = updateNotice({ appVersion: VERSION, play, deployVersion });
+  // One line per start either way, so a log shows that the check ran and what it saw.
+  dbg('update check: ' + (play ? 'Google Play availability ' + play.updateAvailability + ', its version ' + (play.availableVersionCode || '-')
+    : 'deployment has ' + (deployVersion || 'no version.json')) + ', this app ' + VERSION + (n ? '' : ', no update'), 'st');
   if (!n) return;
   dbg('update: ' + n.text, 'st');
   const el = els('updchip');

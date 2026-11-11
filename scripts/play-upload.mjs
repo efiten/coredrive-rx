@@ -7,7 +7,8 @@
 //
 // Usage:
 //   node scripts/play-upload.mjs tracks                       list tracks and their releases
-//   node scripts/play-upload.mjs upload <file.aab> [--track alpha] [--notes vX.Y.Z]
+//   node scripts/play-upload.mjs upload <file.aab> [--track alpha] [--notes vX.Y.Z] [--mapping mapping.txt]
+// --mapping uploads R8's mapping file with the bundle, so Play's crash reports show real names.
 // The notes default to the one-line summary of docs/releases/v<package.json version>.md.
 import { createSign } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -44,6 +45,11 @@ export function draftRelease(versionCode, versionName, notes) {
     status: 'draft',
     releaseNotes: [{ language: 'en-US', text: notes }],
   };
+}
+
+// mappingPath is where R8's mapping file for one versionCode goes (edits.deobfuscationfiles).
+export function mappingPath(versionCode) {
+  return '/apks/' + versionCode + '/deobfuscationFiles/proguard?uploadType=media';
 }
 
 const b64url = (s) => Buffer.from(s).toString('base64url');
@@ -107,7 +113,7 @@ async function main(argv) {
       }
       return;
     }
-    if (argv[0] !== 'upload' || !argv[1]) throw new Error('usage: play-upload.mjs tracks | upload <file.aab> [--track alpha] [--notes vX.Y.Z]');
+    if (argv[0] !== 'upload' || !argv[1]) throw new Error('usage: play-upload.mjs tracks | upload <file.aab> [--track alpha] [--notes vX.Y.Z] [--mapping mapping.txt]');
 
     const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
     const tag = opt('--notes', 'v' + version);
@@ -116,6 +122,11 @@ async function main(argv) {
 
     const bundle = await call('POST', e + '/bundles?uploadType=media', { upload: true, raw: readFileSync(argv[1]) });
     console.log('uploaded versionCode', bundle.versionCode);
+    const mapping = opt('--mapping');
+    if (mapping) {
+      await call('POST', e + mappingPath(bundle.versionCode), { upload: true, raw: readFileSync(mapping) });
+      console.log('uploaded mapping file for', bundle.versionCode);
+    }
     const current = await call('GET', e + '/tracks/' + track);
     const draft = draftRelease(bundle.versionCode, tag.replace(/^v/, ''), notes);
     await call('PUT', e + '/tracks/' + track, { body: { track, releases: withDraft(current.releases, draft) } });
