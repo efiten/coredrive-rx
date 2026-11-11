@@ -9,7 +9,7 @@ export class Gps {
     if (!navigator.geolocation) throw new Error('geolocation unavailable');
     this._watchId = navigator.geolocation.watchPosition(
       (p) => {
-        this._last = { lat: p.coords.latitude, lon: p.coords.longitude, acc_m: p.coords.accuracy };
+        this._last = { lat: p.coords.latitude, lon: p.coords.longitude, acc_m: p.coords.accuracy, at: Date.now() };
         if (onFix) onFix(this._last);
       },
       () => {},
