@@ -31,7 +31,9 @@ CoreScope's AGENTS.md — this repo has its own conventions below.
   data/config migration). So anyone reading the tag sees what changed without diffing.
 - Notes are CUMULATIVE, and that is now mechanical rather than remembered:
   `scripts/release-notes.mjs <tag>` concatenates every release file from that tag downwards, newest
-  first, and `.github/workflows/release.yml` publishes the result as the body. A tag whose file is
+  first, and `.github/workflows/release.yml` publishes the result as the body. Only the tag's own
+  file is shown in full; every older one is folded into a closed `<details>` block under
+  "Earlier releases", so the assets below the body stay within reach. A tag whose file is
   missing FAILS the release job instead of shipping a changelog link. This rule was a human
   convention for nine tags in a row and was missed on every one of them, which left v1.5.0 as the
   last release anyone could read while region discovery landed unannounced.
