@@ -12,7 +12,7 @@ import { updateNotice, parseVersionJson } from './appupdate.js';
 import { needsBatteryTip, markBatteryTipSeen } from './batterytip.js';
 import { usableFix, startSpell, endSpell, spellText } from './background.js';
 import { scanDeployment } from './qrscan.js';
-import { normalizeDeploymentUrl, readDeployment, saveDeployment, fetchDeploymentConfigText, DEPLOY_CACHE_KEY } from './deployment.js';
+import { normalizeDeploymentUrl, readDeployment, saveDeployment, fetchDeploymentConfigText, deploymentChoice, DEPLOY_CACHE_KEY } from './deployment.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute, ADV_TYPE_REPEATER } from './meshpacket.js';
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
@@ -345,6 +345,12 @@ async function chooseDeployment() {
   const base = normalizeDeploymentUrl(els('deployUrl').value);
   if (!base) { msg.textContent = 'Enter an https:// address, for example https://rx.example.org'; return; }
   msg.style.color = '#9aa4b2';
+  const choice = deploymentChoice(readDeployment(localStorage), base, state.connected);
+  if (choice === 'same') { msg.textContent = 'Already using ' + base + ', nothing changed.'; return; }
+  if (choice === 'confirm' && !window.confirm('Switching to ' + base + ' restarts the app: the companion disconnects and the debug log starts over. Switch?')) {
+    msg.textContent = '';
+    return;
+  }
   msg.textContent = 'Checking ' + base + 'config.json ...';
   els('btnDeploy').disabled = true;
   try {

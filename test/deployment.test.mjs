@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeDeploymentUrl, deploymentConfigUrl, readDeployment, saveDeployment,
-  fetchDeploymentConfigText, DEPLOY_KEY, DEPLOY_CACHE_KEY,
+  fetchDeploymentConfigText, deploymentChoice, DEPLOY_KEY, DEPLOY_CACHE_KEY,
 } from '../src/deployment.js';
 import { loadConfig, setConfig, setConfigSource } from '../src/config.js';
 
@@ -122,4 +122,13 @@ test('loadConfig reads from a config source when one is set', async () => {
     setConfigSource(null);
     setConfig(null);
   }
+});
+
+// Scanning the QR code of the deployment already in use restarted the app, which dropped
+// the companion link and cleared the debug log (seen on a phone, 2026-11-11).
+test('choosing the deployment already in use changes nothing', () => {
+  assert.equal(deploymentChoice('https://rx.on8ar.eu/', 'https://rx.on8ar.eu/', true), 'same');
+  assert.equal(deploymentChoice('https://rx.on8ar.eu/', 'https://rx.example.org/', true), 'confirm');
+  assert.equal(deploymentChoice('https://rx.on8ar.eu/', 'https://rx.example.org/', false), 'switch');
+  assert.equal(deploymentChoice('', 'https://rx.on8ar.eu/', false), 'switch'); // first choice
 });
