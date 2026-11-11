@@ -33,6 +33,15 @@ export function readDeployment(storage) {
   try { return normalizeDeploymentUrl(storage.getItem(DEPLOY_KEY)); } catch (e) { return ''; }
 }
 
+// deploymentChoice decides what choosing `next` does. Switching restarts the app, which
+// drops the companion link and clears the log, so the same deployment changes nothing
+// and a different one asks first while connected.
+//   'same' | 'confirm' | 'switch'
+export function deploymentChoice(current, next, connected) {
+  if (current && current === next) return 'same';
+  return connected ? 'confirm' : 'switch';
+}
+
 // saveDeployment stores the chosen deployment. A different one drops the cached
 // config, so the old deployment's broker can never be used as the new one's fallback.
 export function saveDeployment(storage, base) {
