@@ -5,6 +5,8 @@
 // NOTE: the app sends NO timestamp. sendAnonReq (BaseChatMesh.cpp) prepends a
 // 4-byte tag itself from getCurrentTimeUnique(), which the repeater echoes back.
 
+import { RESP_CODE_ERR } from './contactpath.js';
+
 export const CMD_SEND_ANON_REQ = 57;
 export const PUSH_CODE_BINARY_RESPONSE = 0x8c;
 export const ANON_REQ_TYPE_REGIONS = 0x01;
@@ -98,6 +100,19 @@ export function parseRegionsResponse(bytes) {
     // not part of the repeater's answer and must not count toward the ceiling.
     truncated: payload.length >= TRUNCATION_WARN_BYTES,
   };
+}
+
+// parseSendRefusal reads the companion's refusal of CMD_SEND_ANON_REQ: [0x01][err_code]
+// (writeErrFrame, companion_radio/MyMesh.cpp). Only ERR_CODE_TABLE_FULL is taken as a
+// refusal of THIS ask: it is the only error that handler writes, and accepting any
+// other code would claim an error frame from an unrelated command. Up to companion
+// v1.16 a repeater that is not a contact needs a free contact slot to be asked, so a
+// full contact list refuses it every time (BaseChatMesh::allocateContactSlot); v1.17
+// reserves 8 slots for this. A failed packet allocation gives the same code.
+export const ERR_CODE_TABLE_FULL = 3;
+export function parseSendRefusal(bytes) {
+  if (!bytes || bytes.length < 2 || bytes[0] !== RESP_CODE_ERR || bytes[1] !== ERR_CODE_TABLE_FULL) return null;
+  return { refused: bytes[1] };
 }
 
 // parseSentAck reads the tag from the immediate ack for CMD_SEND_ANON_REQ:

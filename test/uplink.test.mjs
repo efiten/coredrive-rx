@@ -270,6 +270,12 @@ test('buildLogHeader reports the ask counters', () => {
   });
   assert.match(h, /asks {7}7 of 22 repeaters answered — 61 asks sent, 7 answered, over 340 receptions/);
   assert.match(h, /asks q {5}3 queued, 5 awaiting a reply, 12 timed out, 2 unmatched replies, 1 sent as FLOOD/);
+  assert.doesNotMatch(h, /refused/); // 0 refusals is no news
+  const r = buildLogHeader({ version: '1.15.0', nowISO: 'now', config: null, fwVer: 13, regionsSupported: true,
+    uplink: 'ok', pending: 0, lineCount: 1, lineCap: 200,
+    asks: { heard: 1, seen: 1, asks: 0, replies: 0, answered: 0, queue: 0, outstanding: 0, flooded: 0, refused: 4,
+      unmatched: 0, dropped: 0, capped: 0, bonus: 0, sigAnswered: { n: 0 }, sigSilent: { n: 0 } } });
+  assert.match(r, /0 sent as FLOOD, 4 refused by the companion \(contact list full\)/);
   assert.match(h, /asks cap {3}96 receptions ignored \(this encounter had spent its asks\), 2 extra asks earned/);
   assert.match(h, /asks sig {3}answered 7: rssi -109 … -78dBm, snr 1.75 … 12.25dB \| silent 12: rssi -125 … -111dBm/);
 });

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildRegionsRequest, parseRegionsResponse, CMD_SEND_ANON_REQ,
   buildOwnerRequest, parseOwnerResponse,
-  parseSentAck, RESP_CODE_SENT, TRUNCATION_WARN_BYTES,
+  parseSentAck, parseSendRefusal, ERR_CODE_TABLE_FULL, RESP_CODE_SENT, TRUNCATION_WARN_BYTES,
 } from '../src/regionreq.js';
 
 const PK = 'aa'.repeat(32);
@@ -155,4 +155,15 @@ test('parseOwnerResponse: empty owner_info, a UTF-8 name, and a foreign frame', 
   assert.equal(parseOwnerResponse(bytes).name, 'Brüssel-RPT');
   assert.equal(parseOwnerResponse(new Uint8Array([0x8b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 65])), null);
   assert.equal(parseOwnerResponse(new Uint8Array([0x8c, 0, 0])), null);
+});
+
+// A companion up to firmware v1.16 with a full contact list answers an ask to a
+// repeater that is not a contact with ERR_CODE_TABLE_FULL instead of RESP_CODE_SENT.
+// Reading it turns a 4-second "no send-ack" into a named cause.
+test('parseSendRefusal reads only the table-full error of the anon request', () => {
+  assert.deepEqual(parseSendRefusal(new Uint8Array([0x01, ERR_CODE_TABLE_FULL])), { refused: 3 });
+  assert.equal(parseSendRefusal(new Uint8Array([0x01, 0x02])), null); // not-found belongs to another command
+  assert.equal(parseSendRefusal(new Uint8Array([0x06, 0x00, 1, 2, 3, 4])), null);
+  assert.equal(parseSendRefusal(new Uint8Array([0x01])), null);
+  assert.equal(parseSentAck(new Uint8Array([0x01, ERR_CODE_TABLE_FULL])), null); // not mistaken for an ack
 });
