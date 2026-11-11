@@ -268,7 +268,8 @@ access (default `~/.coredrive-rx-signing/play-api.json`, or `PLAY_API_KEY`).
 
 ```bash
 node scripts/play-upload.mjs tracks                          # list tracks, changes nothing
-node scripts/play-upload.mjs upload app.aab --track alpha    # draft with docs/releases notes
+node scripts/play-upload.mjs upload app.aab --track alpha \
+  --mapping android/app/build/outputs/mapping/release/mapping.txt   # draft with notes + R8 mapping
 ```
 
 ## Deploy

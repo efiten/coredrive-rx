@@ -42,8 +42,15 @@ android {
     buildTypes {
         release {
             if (keystorePropsFile.exists()) signingConfig signingConfigs.release
-            minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            // R8: shrinks and optimises the code (Play flagged "DEX optimisation: low").
+            // Plugins survive through Capacitor's own consumer rules, which keep every
+            // @CapacitorPlugin class and @PluginMethod. mapping.txt goes to Play with the
+            // bundle (scripts/play-upload.mjs) so crash reports stay readable.
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Symbols of the bundled native libraries go into the bundle for Play's crash reports.
+            ndk { debugSymbolLevel 'SYMBOL_TABLE' }
         }
     }
     // The app only calls BarcodeScanner.scan(), which runs the Google code scanner in

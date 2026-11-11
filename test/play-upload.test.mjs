@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { generateKeyPairSync, createVerify } from 'node:crypto';
-import { releaseSummary, withDraft, draftRelease, signedJwt, NOTES_MAX } from '../scripts/play-upload.mjs';
+import { releaseSummary, withDraft, draftRelease, signedJwt, mappingPath, NOTES_MAX } from '../scripts/play-upload.mjs';
 
 test('the notes are the summary line, without markdown', () => {
   const md = '# CoreDrive RX v1.2.3\r\n\r\nThe **Android app** keeps\n`capturing`.\r\n\r\n## What\'s new\n\n- x\n';
@@ -38,4 +38,8 @@ test('the token request is a JWT signed with the service account key', () => {
     aud: key.token_uri, iat: 1000, exp: 4600 });
   assert.equal(JSON.parse(Buffer.from(h, 'base64url')).alg, 'RS256');
   assert.ok(createVerify('RSA-SHA256').update(h + '.' + c).verify(publicKey, s, 'base64url'));
+});
+
+test('the mapping file goes to the deobfuscation slot of its versionCode', () => {
+  assert.equal(mappingPath(12501), '/apks/12501/deobfuscationFiles/proguard?uploadType=media');
 });
