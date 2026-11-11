@@ -47,6 +47,9 @@ CoreScope's AGENTS.md — this repo has its own conventions below.
   Google's review and updates every tester, so one release per batch, not per fix. Exception:
   a fix for something that breaks capture now gets its own release right away. A fix that must
   be live between releases goes to `/beta`, never to the live root without a cache bump.
+- Every fix PR body starts with one line: `Release: now` when the bug stops capture or upload, or
+  records wrong data, so users must update; otherwise `Release: next batch`. The maintainer can
+  ask for a release at any time.
 - PWA cache discipline: the service worker is network-first; `index.html`, `sw.js`, `manifest`, and
   `config.json` must be served `no-cache`; `/assets/` is immutable.
 - Web Bluetooth needs a secure context — test over HTTPS or `localhost`.
