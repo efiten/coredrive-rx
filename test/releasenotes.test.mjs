@@ -48,6 +48,12 @@ test('a folded release keeps its whole text, drops its heading and names itself 
   assert.match(out, /\n\n<\/details>$/);
 });
 
+test('a folded summary keeps only the first sentence of a long paragraph', () => {
+  const out = foldEntry(E('v1.13.0', '# CoreDrive RX v1.13.0\n\nOne ask per minute, one answer.\nThe cause was not v1.2 radio. Two defects were.'));
+  assert.match(out, /<summary><b>v1\.13\.0<\/b>: One ask per minute, one answer\.<\/summary>/);
+  assert.ok(out.includes('Two defects were.'));
+});
+
 test('a folded release without a summary line shows only its tag', () => {
   assert.match(foldEntry(E('v1.0.1', '# CoreDrive RX v1.0.1\n\n- fix')), /<summary><b>v1\.0\.1<\/b><\/summary>/);
 });

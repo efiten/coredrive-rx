@@ -49,7 +49,7 @@ export function assembleBody(entries, tag) {
 }
 
 // foldEntry renders one older release as a closed <details> block. The summary is the
-// tag plus the file's one-line summary; the "# CoreDrive RX vX.Y.Z" heading is dropped
+// tag plus the first sentence of the file's summary paragraph; the "# CoreDrive RX vX.Y.Z" heading is dropped
 // because the summary already names the version. Backticks and asterisks are removed
 // from the summary because GitHub does not render Markdown inside <summary>.
 export function foldEntry(e) {
@@ -57,7 +57,8 @@ export function foldEntry(e) {
   if (/^#\s/.test(lines[0])) lines.shift();
   const rest = lines.join('\n').trim();
   const firstPara = rest.split(/\n\s*\n/)[0];
-  const blurb = /^[#-]/.test(firstPara) ? '' : firstPara.replace(/\s+/g, ' ').replace(/[`*]/g, '').trim();
+  const para = /^[#-]/.test(firstPara) ? '' : firstPara.replace(/\s+/g, ' ').replace(/[`*]/g, '').trim();
+  const blurb = para.split(/(?<=[.:!?])\s+(?=[A-Z0-9])/)[0];
   const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const summary = '<b>' + e.tag + '</b>' + (blurb ? ': ' + esc(blurb) : '');
   return '<details>\n<summary>' + summary + '</summary>\n\n' + rest + '\n\n</details>';
