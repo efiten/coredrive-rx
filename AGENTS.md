@@ -39,6 +39,17 @@ CoreScope's AGENTS.md — this repo has its own conventions below.
 - To change a published body, edit the file under `docs/releases/` and re-post it:
   `node scripts/release-notes.mjs vX.Y.Z | gh release edit vX.Y.Z --repo efiten/coredrive-rx --notes-file -`.
 - Commit AND push every change, with a descriptive message. Keep GitHub mirrored.
+- Releases are batched. A fix or feature PR carries no version bump, no `docs/releases/` file,
+  no SW cache bump and no tag; it lands on master with its tests. A separate release PR bumps
+  the version, writes `docs/releases/vX.Y.Z.md` covering everything since the last tag, bumps
+  the SW cache, and is then tagged, deployed to rx.on8ar.eu, built (APK on the GitHub release)
+  and uploaded to Play as a draft (`scripts/play-upload.mjs`). Each Play upload goes through
+  Google's review and updates every tester, so one release per batch, not per fix. Exception:
+  a fix for something that breaks capture now gets its own release right away. A fix that must
+  be live between releases goes to `/beta`, never to the live root without a cache bump.
+- Every fix PR body starts with one line: `Release: now` when the bug stops capture or upload, or
+  records wrong data, so users must update; otherwise `Release: next batch`. The maintainer can
+  ask for a release at any time.
 - PWA cache discipline: the service worker is network-first; `index.html`, `sw.js`, `manifest`, and
   `config.json` must be served `no-cache`; `/assets/` is immutable.
 - Web Bluetooth needs a secure context — test over HTTPS or `localhost`.
