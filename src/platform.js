@@ -7,6 +7,7 @@ import { BarcodeScanner } from '@capacitor-mlkit/barcode-scanning';
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { LocalNotifications } from '@capacitor/local-notifications';
+import { AppUpdate } from '@capawesome/capacitor-app-update';
 import { WebBluetoothTransport } from './transport.js';
 import { CapacitorBleTransport } from './transport-native.js';
 import { Gps } from './gps.js';
@@ -32,6 +33,9 @@ export async function nativeShareFile(text, filename) {
   const { uri } = await Filesystem.writeFile({ path: filename, data: text, directory: Directory.Cache, encoding: Encoding.UTF8 });
   await Share.share({ title: filename, text: 'CoreDrive RX debug log', files: [uri] });
 }
+
+// Google Play's in-app update check, for src/appupdate.js.
+export function appUpdater() { return AppUpdate; }
 
 // The Google code scanner plugin, for src/qrscan.js.
 export function qrScanner() { return BarcodeScanner; }

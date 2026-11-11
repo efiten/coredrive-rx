@@ -7,7 +7,8 @@
 // Home is a pure monitor (counters, status strip, last-reception SNR meter, recently
 // heard). Discover runs automatically with a traffic backoff (see monitor.js). Config
 // and diagnostics live on the Settings tab.
-import { createTransport, createGps, isNativeApp, nativeHttpGet, nativeShareFile, qrScanner } from './platform.js';
+import { createTransport, createGps, isNativeApp, nativeHttpGet, nativeShareFile, qrScanner, appUpdater } from './platform.js';
+import { updateNotice, parseVersionJson } from './appupdate.js';
 import { needsBatteryTip, markBatteryTipSeen } from './batterytip.js';
 import { usableFix, startSpell, endSpell, spellText } from './background.js';
 import { scanDeployment } from './qrscan.js';
@@ -280,6 +281,33 @@ function setupDeployment() {
   els('btnDeploy').addEventListener('click', chooseDeployment);
   els('btnDeployScan').addEventListener('click', scanDeploymentQr);
   return base;
+}
+
+// checkForUpdate shows the update note on Home when a newer version exists
+// (src/appupdate.js decides). Android app only; runs once per start, never blocks it.
+async function checkForUpdate(base) {
+  const up = appUpdater();
+  let play = null;
+  try { play = await up.getAppUpdateInfo(); } catch (e) { dbg('update check: Google Play not asked (' + e.message + ')', 'st'); }
+  let deployVersion = null;
+  if (!play && base) {
+    try {
+      const r = await nativeHttpGet(base + 'version.json');
+      if (r.status === 200) deployVersion = parseVersionJson(typeof r.data === 'string' ? r.data : JSON.stringify(r.data));
+    } catch (e) { /* no network: the next start asks again */ }
+  }
+  const n = updateNotice({ appVersion: VERSION, play, deployVersion });
+  if (!n) return;
+  dbg('update: ' + n.text, 'st');
+  const el = els('updchip');
+  el.textContent = n.text;
+  el.style.display = 'block';
+  el.onclick = () => {
+    el.style.display = 'none';
+    if (n.kind !== 'play') return;
+    const go = play.immediateUpdateAllowed ? up.performImmediateUpdate() : up.openAppStore();
+    go.catch((e) => dbg('update: Google Play did not start the update (' + e.message + ')', 'no'));
+  };
 }
 
 // scanDeploymentQr reads the deployment from a QR code and goes through the same check
@@ -2064,6 +2092,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   const deployment = isNativeApp() ? setupDeployment() : null;
   if (deployment === '') switchView('settings');
   if (deployment) dbg('deployment: ' + deployment, 'st');
+  if (isNativeApp()) checkForUpdate(deployment); // not awaited
   try {
     await loadConfig();
     applyConfigToSettings();
