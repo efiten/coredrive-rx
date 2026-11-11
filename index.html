@@ -32,6 +32,7 @@
     .stats div { flex: 1; text-align: center; }
     .stats small { display: block; font-size: 11px; color: #9aa4b2; font-weight: 400; }
     .muted { font-size: 12px; color: #9aa4b2; margin-top: 6px; }
+    .muted a { color: inherit; text-decoration: underline; }
     .progress { margin-top: 10px; font: 12px/1.7 ui-monospace, monospace; }
     .progress div { color: #9fe6b8; }
     .progress div.pending { color: #9aa4b2; }
@@ -186,6 +187,10 @@
       <button id="btnShareLog" class="btn2" style="margin-top:8px">📤 Share / mail debug log</button>
       <button id="btnPingNow" class="btn2" style="margin-top:8px;display:none">📡 Uplink ping now</button>
       <pre id="log" style="display:none"></pre>
+    </div>
+    <div class="card">
+      <label>About</label>
+      <div class="muted"><a href="https://github.com/efiten/coredrive-rx/blob/master/docs/play/privacy-policy.md" target="_blank" rel="noopener">Privacy policy</a> &middot; <a href="https://github.com/efiten/coredrive-rx/blob/master/docs/user-guide.md" target="_blank" rel="noopener">User guide</a> &middot; <a href="https://github.com/efiten/coredrive-rx" target="_blank" rel="noopener">Source code</a></div>
     </div>
   </div>
   <nav class="bottombar">
