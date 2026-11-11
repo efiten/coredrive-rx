@@ -14,7 +14,7 @@ jobs:
           node-version: '20'
       # Before the build, so a tag with no release notes fails in seconds instead of
       # publishing a body that is only a changelog link (AGENTS.md, issue #12).
-      - name: Assemble cumulative release notes
+      - name: Assemble release notes
         run: node scripts/release-notes.mjs "$GITHUB_REF_NAME" > RELEASE_BODY.md
       - run: npm ci
       - run: npm run build

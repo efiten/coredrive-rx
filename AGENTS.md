@@ -29,12 +29,13 @@ CoreScope's AGENTS.md — this repo has its own conventions below.
   commit as the version bump. One file, one release: a `# CoreDrive RX vX.Y.Z` heading, a one-line
   summary, a "What's new" bullet list (user-facing changes), and "Upgrade notes" (SW cache bump, any
   data/config migration). So anyone reading the tag sees what changed without diffing.
-- Notes are CUMULATIVE, and that is now mechanical rather than remembered:
-  `scripts/release-notes.mjs <tag>` concatenates every release file from that tag downwards, newest
-  first, and `.github/workflows/release.yml` publishes the result as the body. A tag whose file is
-  missing FAILS the release job instead of shipping a changelog link. This rule was a human
-  convention for nine tags in a row and was missed on every one of them, which left v1.5.0 as the
-  last release anyone could read while region discovery landed unannounced.
+- The release job enforces this: `.github/workflows/release.yml` runs
+  `scripts/release-notes.mjs <tag>`, which publishes that tag's own file plus one link to the
+  releases list as the body. A tag whose file is missing FAILS the release job instead of shipping
+  a changelog link. This rule was a human convention for nine tags in a row and was missed on
+  every one of them, which left v1.5.0 as the last release anyone could read while region
+  discovery landed unannounced. Bodies used to repeat every older release too; that was dropped
+  because GitHub shows the assets below the body and the releases list already shows them all.
 - To change a published body, edit the file under `docs/releases/` and re-post it:
   `node scripts/release-notes.mjs vX.Y.Z | gh release edit vX.Y.Z --repo efiten/coredrive-rx --notes-file -`.
 - Commit AND push every change, with a descriptive message. Keep GitHub mirrored.
