@@ -310,8 +310,10 @@ async function checkForUpdate(base) {
   const el = els('updchip');
   el.textContent = n.text;
   el.style.display = 'block';
+  document.body.classList.add('has-updchip'); // room under the content for the fixed note
   el.onclick = () => {
     el.style.display = 'none';
+    document.body.classList.remove('has-updchip');
     if (n.kind !== 'play') return;
     const go = play.immediateUpdateAllowed ? up.performImmediateUpdate() : up.openAppStore();
     go.catch((e) => dbg('update: Google Play did not start the update (' + e.message + ')', 'no'));

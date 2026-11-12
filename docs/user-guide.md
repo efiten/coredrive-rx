@@ -109,7 +109,7 @@ app **CoreDrive RX**. A web app installed before that rename may keep its old na
 refreshes it, so both icons can read "CoreDrive RX" for a while.
 
 Google Play updates apps by itself, often only a day later, and without a message. So the app
-checks at start: when a newer version exists, a blue note on Home says so. Tap it to update
+checks at start: when a newer version exists, a blue note above the tabs says so, on every screen. Tap it to update
 through Google Play. An APK from GitHub gets the same note, with a link to the releases page.
 
 Some phones close apps in the background to save battery, even while the capture notification
