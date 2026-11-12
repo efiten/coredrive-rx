@@ -63,7 +63,7 @@ import {
   RESTORE_STORAGE_KEY,
 } from './contactpath.js';
 
-const LOG_LINE_CAP = 200; // dbg ring buffer; stated in the exported log header
+const LOG_LINE_CAP = 2000; // dbg ring buffer; stated in the exported log header
 
 const els = (id) => document.getElementById(id);
 const state = {
@@ -81,7 +81,7 @@ const state = {
   rxTotal: 0, rfLogged: 0, nodeKeys: [], hexCells: new Set(), rxTimes: [],
   lastUploadAt: null, brokerState: 'offline',
   // Diagnostics carried into the exported log header (src/uplink.js): a startup
-  // dbg line rolls out of the 200-line buffer within minutes, a header cannot.
+  // dbg line rolls out of the 2000-line buffer within minutes, a header cannot.
   fwVer: null, uplink: 'no-config', lastUplinkLogged: null, lastRegionInertLogged: null,
   pendingCount: 0, lastConfigTryAt: null,
   // pubFailures: consecutive publish failures per queue id, so one unpublishable
@@ -1031,7 +1031,7 @@ function currentUplink() {
 }
 
 // renderUplinkChip keeps an unhealthy uplink permanently on screen, and logs each
-// TRANSITION once — a per-tick line would flood the 200-line buffer and push out
+// TRANSITION once — a per-tick line would flood the 2000-line buffer and push out
 // exactly the history needed to diagnose it.
 // --- Message-waiting notice (src/msgwait.js has the firmware reasoning) ---------
 const PUSH_CODE_MSG_WAITING = 0x83;
@@ -2094,7 +2094,7 @@ async function disconnectAll(keepProgress) {
 window.addEventListener('DOMContentLoaded', async () => {
   els('appver').textContent = 'v' + VERSION;
   // First line of every session names the build. The exported log also carries it in
-  // a header (buildLogHeader) because this line rolls out of the 200-line buffer
+  // a header (buildLogHeader) because this line rolls out of the 2000-line buffer
   // within minutes — two field logs arrived with no way to tell which version wrote
   // them, which sent a diagnosis down the wrong path entirely.
   dbg('CoreDrive RX v' + VERSION + ' started', 'st');

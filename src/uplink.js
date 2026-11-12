@@ -171,7 +171,7 @@ export function buildLogHeader(info) {
   }
 
   // Region discovery reports its own ratios, because its per-ask lines are the first
-  // thing the 200-line ring buffer rolls out on a long drive. Three denominators, and
+  // thing the 2000-line ring buffer rolls out on a long drive. Three denominators, and
   // conflating any two makes the result unreadable: repeaters SEEN is distinct nodes,
   // asks SENT is transmissions, receptions is how often those nodes were heard at all.
   if (asks) {
@@ -210,7 +210,7 @@ export function buildLogHeader(info) {
 
   // A full buffer means the session started earlier than the oldest line shown, so
   // the absence of a startup line proves nothing about what happened at startup.
-  const cap = lineCap ?? 200;
+  const cap = lineCap ?? 2000;
   lines.push(row('log lines', lineCount + (lineCount >= cap ? ' (buffer full — older lines have rolled out)' : '')));
 
   lines.push('==============================', '');
