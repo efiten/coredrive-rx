@@ -1393,7 +1393,7 @@ function catchUp() {
   }
   if (plan.reconnect) {
     state.lastKickAt = now;
-    if (state.publisher.reconnect()) dbg('timers frozen (screen off?): reopening the CoreScope link from a reception', 'st');
+    if (state.publisher.reconnect()) dbg('reopening the CoreScope link from a reception', 'st');
   }
   if (plan.drain) {
     state.lastDrainAt = now;
