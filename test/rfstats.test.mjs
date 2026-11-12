@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildStatsRequest, parseStats, mergeSample, nextSampleDelay, resumeDelay, MOVING_MS, PARKED_MS,
+  buildStatsRequest, parseStats, mergeSample, nextSampleDelay, resumeDelay, rfSampleDue, MOVING_MS, PARKED_MS, RF_STEP_M, RF_CHECK_MS,
   CMD_GET_STATS, STATS_CORE, STATS_RADIO, STATS_PACKETS,
 } from '../src/rfstats.js';
 
@@ -72,17 +72,32 @@ test('mergeSample requires all three parts', () => {
   assert.equal('recv_errors' in s, false, 'absent upstream stays absent downstream');
 });
 
-test('cadence is 15s moving, 5min parked', () => {
+test('cadence: checked every 2 s moving, 5 min parked', () => {
   assert.equal(MOVING_MS, 15000);
   assert.equal(PARKED_MS, 300000);
-  assert.equal(nextSampleDelay(false), MOVING_MS);
+  assert.equal(RF_STEP_M, 100);
+  assert.equal(RF_CHECK_MS, 2000);
+  assert.equal(nextSampleDelay(false), RF_CHECK_MS);
   assert.equal(nextSampleDelay(true), PARKED_MS);
 });
 
-test('moving again re-arms a parked-cadence sample to the moving cadence', () => {
+// 0.001 degree of latitude is about 111 m.
+test('moving: a sample is due every 100 m or every 15 s, whichever comes first', () => {
+  const last = { at: 1_000_000, lat: 51.0, lon: 4.0 };
+  const near = { lat: 51.0005, lon: 4.0 }; // ~56 m
+  const far = { lat: 51.001, lon: 4.0 };   // ~111 m
+  assert.equal(rfSampleDue({ now: last.at + 4000, last, fix: far, paused: false }), true, '90 km/h: 100 m in 4 s');
+  assert.equal(rfSampleDue({ now: last.at + 4000, last, fix: near, paused: false }), false, 'slow: not yet');
+  assert.equal(rfSampleDue({ now: last.at + MOVING_MS, last, fix: near, paused: false }), true, '15 s passed');
+  assert.equal(rfSampleDue({ now: last.at + 2000, last: null, fix: near, paused: false }), true, 'first sample');
+  assert.equal(rfSampleDue({ now: last.at + 2000, last, fix: null, paused: false }), false, 'no fix, no distance');
+  assert.equal(rfSampleDue({ now: last.at + 2000, last, fix: near, paused: true }), true, 'parked: the 5 min timer decides');
+});
+
+test('moving again re-arms a parked-cadence sample to the moving check', () => {
   const now = 1_000_000;
-  assert.equal(resumeDelay(now + PARKED_MS - 20000, now), MOVING_MS); // seen: 4 min 19 s left
-  assert.equal(resumeDelay(now + MOVING_MS, now), null); // due soon anyway: leave it
-  assert.equal(resumeDelay(now + 3000, now), null);
+  assert.equal(resumeDelay(now + PARKED_MS - 20000, now), RF_CHECK_MS); // seen: 4 min 19 s left
+  assert.equal(resumeDelay(now + RF_CHECK_MS, now), null); // due soon anyway: leave it
+  assert.equal(resumeDelay(now + 1000, now), null);
   assert.equal(resumeDelay(null, now), null); // none armed, or one running
 });
