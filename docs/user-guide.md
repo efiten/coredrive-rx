@@ -81,7 +81,25 @@ Your position never goes over the mesh. It is only sent to CoreScope over the in
 
 Besides the web app there is an Android app. It works the same, but it does not need Chrome and
 keeps capturing in the background. On first start it asks for the address of your CoreDrive RX
-deployment: type it, or scan the QR code on the CoreScope **Coverage** page.
+deployment: see the next section.
+
+### Choosing a deployment (Android app)
+
+The web app always uploads to the CoreScope it came from. The Android app comes from Google Play
+and does not know which CoreScope you use, so on first start you tell it, under **Settings >
+Deployment**:
+
+1. On a computer or another phone, open the CoreScope your MeshCore community uses in a browser.
+2. In its menu, open **Coverage**. That page shows a QR code with an address under it.
+3. In the app, tap **Scan QR code** and point the camera at it. With only one phone, type the
+   address under the QR code into the field and tap **Use this deployment**.
+
+The app checks that address before it switches. Scanning the deployment you already use changes
+nothing; switching to another one while connected asks first, because the app restarts and the
+companion disconnects.
+
+No **Coverage** in the menu, or no QR code on that page? Then that CoreScope does not take
+CoreDrive data. Ask whoever runs it.
 
 Use one of the two, not both. Only one app at a time can hold the Bluetooth link to the
 companion, and each keeps its own queue and login. If you installed the web app to the home
@@ -91,7 +109,7 @@ app **CoreDrive RX**. A web app installed before that rename may keep its old na
 refreshes it, so both icons can read "CoreDrive RX" for a while.
 
 Google Play updates apps by itself, often only a day later, and without a message. So the app
-checks at start: when a newer version exists, a blue note on Home says so. Tap it to update
+checks at start: when a newer version exists, a blue note above the tabs says so, on every screen. Tap it to update
 through Google Play. An APK from GitHub gets the same note, with a link to the releases page.
 
 Some phones close apps in the background to save battery, even while the capture notification

@@ -12,7 +12,7 @@ import { updateNotice, parseVersionJson } from './appupdate.js';
 import { needsBatteryTip, markBatteryTipSeen } from './batterytip.js';
 import { usableFix, startSpell, endSpell, spellText } from './background.js';
 import { scanDeployment } from './qrscan.js';
-import { normalizeDeploymentUrl, readDeployment, saveDeployment, fetchDeploymentConfigText, deploymentChoice, DEPLOY_CACHE_KEY } from './deployment.js';
+import { normalizeDeploymentUrl, readDeployment, saveDeployment, fetchDeploymentConfigText, deploymentChoice, deploymentCardText, DEPLOY_CACHE_KEY } from './deployment.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute, ADV_TYPE_REPEATER } from './meshpacket.js';
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
@@ -37,7 +37,7 @@ import { accountView } from './accountview.js';
 import { signWithCompanion } from './companionsign.js';
 import { buildRfLogRecord } from './capture.js';
 import { heardKeyAfterVerify } from './advertsig.js';
-import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, resumeDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
+import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, resumeDelay, rfSampleDue, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
 import { buildRegionsRequest, buildOwnerRequest, parseRegionsResponse, parseOwnerResponse, parseSentAck, parseSendRefusal } from './regionreq.js';
 import { nextAskKind, settledSet, settle } from './asknext.js';
 import {
@@ -93,7 +93,7 @@ const state = {
   // auto-discover
   lastHeardAt: null, lastFireAt: 0, tick: null,
   // RF environment sampler
-  rfTimer: null, lastRfSample: null, rfGen: 0,
+  rfTimer: null, lastRfSample: null, rfGen: 0, rfLastAt: null,
   // bgSpell: the current stretch in the background while connected (src/background.js)
   bgSpell: null,
   // Timer catch-up (src/catchup.js): when each timed job last ran, and the pending
@@ -269,6 +269,11 @@ function setupDeployment() {
   const base = readDeployment(localStorage);
   els('deployCard').style.display = '';
   els('deployUrl').value = base;
+  const t = deploymentCardText(base);
+  els('deployCard').classList.toggle('setup', t.setup);
+  els('deployTitle').textContent = t.title;
+  els('deploySteps').style.display = t.setup ? '' : 'none';
+  els('deployInfo').textContent = t.info;
   if (base) {
     setConfigSource(async () => {
       const r = await fetchDeploymentConfigText({ base, httpGet: nativeHttpGet, storage: localStorage });
@@ -305,8 +310,10 @@ async function checkForUpdate(base) {
   const el = els('updchip');
   el.textContent = n.text;
   el.style.display = 'block';
+  document.body.classList.add('has-updchip'); // room under the content for the fixed note
   el.onclick = () => {
     el.style.display = 'none';
+    document.body.classList.remove('has-updchip');
     if (n.kind !== 'play') return;
     const go = play.immediateUpdateAllowed ? up.performImmediateUpdate() : up.openAppStore();
     go.catch((e) => dbg('update: Google Play did not start the update (' + e.message + ')', 'no'));
@@ -2019,11 +2026,13 @@ function startRfSampler() {
       return;
     }
     const fix = currentFix();
-    if (fix) {
+    const paused = state.motion ? state.motion.paused : false;
+    if (fix && rfSampleDue({ now: Date.now(), last: state.rfLastAt, fix, paused })) {
+      state.rfLastAt = { at: Date.now(), lat: fix.lat, lon: fix.lon };
       const core = await ask(STATS_CORE);
       const radio = await ask(STATS_RADIO);
       const packets = await ask(STATS_PACKETS);
-      const sample = mergeSample(core, radio, packets, fix, new Date().toISOString(), state.motion ? state.motion.paused : false);
+      const sample = mergeSample(core, radio, packets, fix, new Date().toISOString(), paused);
       if (sample) {
         await state.queue.add(queued(sample));
         state.lastRfSample = sample; // Settings diagnostics line

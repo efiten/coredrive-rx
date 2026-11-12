@@ -33,6 +33,23 @@ export function readDeployment(storage) {
   try { return normalizeDeploymentUrl(storage.getItem(DEPLOY_KEY)); } catch (e) { return ''; }
 }
 
+// deploymentCardText is what the Settings card says. Without a deployment the card
+// stands out and shows the steps (index.html #deploySteps); with one it is a single line.
+export function deploymentCardText(base) {
+  if (!base) {
+    return {
+      setup: true,
+      title: 'First step: choose where your data goes',
+      info: 'No Coverage in the menu, or no QR code on it? Then that CoreScope does not take CoreDrive data: ask whoever runs it.',
+    };
+  }
+  return {
+    setup: false,
+    title: 'Deployment: where your data goes',
+    info: 'Uploads to ' + base + '. To change it, scan the QR code on another CoreScope\'s Coverage page.',
+  };
+}
+
 // deploymentChoice decides what choosing `next` does. Switching restarts the app, which
 // drops the companion link and clears the log, so the same deployment changes nothing
 // and a different one asks first while connected.

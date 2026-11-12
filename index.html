@@ -28,8 +28,19 @@
       --updchip-bg: #10283a;
       --updchip-border: #1d4a6b;
       --updchip-text: #8cc8ff;
+      --updchip-shadow: rgba(0, 0, 0, .5);
+      --setup-bg: #10283a;
+      --setup-border: #2d6fa3;
+      --setup-text: #cfe6ff;
     }
-    .updchip { display: none; cursor: pointer; background: var(--updchip-bg); color: var(--updchip-text); border: 1px solid var(--updchip-border); border-radius: 8px; padding: 10px 12px; margin: 10px 0; font-size: 13px; overflow-wrap: anywhere; }
+    .card.setup { background: var(--setup-bg); border: 2px solid var(--setup-border); }
+    .card.setup label { color: var(--setup-text); font-size: 16px; font-weight: 600; }
+    .deploysteps { color: var(--setup-text); font-size: 14px; line-height: 1.45; margin: 6px 0 4px; }
+    .deploysteps ol { margin: 6px 0 0 20px; padding: 0; }
+    .deploysteps li { margin: 4px 0; }
+    .updchip { display: none; cursor: pointer; background: var(--updchip-bg); color: var(--updchip-text); border: 1px solid var(--updchip-border); border-radius: 8px; padding: 10px 12px; font-size: 13px; overflow-wrap: anywhere;
+      position: fixed; z-index: 1000; left: calc(12px + var(--inset-left)); right: calc(12px + var(--inset-right)); bottom: calc(64px + var(--inset-bottom)); box-shadow: 0 2px 10px var(--updchip-shadow); }
+    body.has-updchip { padding-bottom: calc(130px + var(--inset-bottom)); }
     .bgchip { display: none; cursor: pointer; background: var(--bgchip-bg); color: var(--bgchip-text); border: 1px solid var(--bgchip-border); border-radius: 8px; padding: 10px 12px; margin: 10px 0; font-size: 13px; }
     dialog.tip { max-width: 420px; width: calc(100% - 48px); box-sizing: border-box; background: var(--tip-bg); color: var(--tip-text); border: 1px solid var(--tip-border); border-radius: 10px; padding: 16px; font-size: 14px; line-height: 1.45; }
     dialog.tip::backdrop { background: var(--tip-backdrop); }
@@ -137,8 +148,6 @@
   <!-- After a minute or more in the background while connected: how long, and how many
        receptions were not saved because the browser paused GPS (src/background.js). -->
   <div id="bgchip" class="bgchip"></div>
-  <!-- Android app: a newer version exists (src/appupdate.js). -->
-  <div id="updchip" class="updchip"></div>
   <div id="msgchip" style="display:none;cursor:pointer;background:#10283a;color:#8cc8ff;border:1px solid #1d4a6b;border-radius:8px;padding:10px 12px;margin:10px 0;font-size:13px"></div>
   <div class="card">
     <label>Recently heard nodes (latest SNR)</label>
@@ -156,12 +165,22 @@
   <div id="view-settings" style="display:none">
     <!-- Native app only (src/deployment.js): which CoreDrive RX deployment's
          config.json this app uses. The web app always uses its own. -->
+    <!-- Until a deployment is chosen the card carries .setup and shows the steps; testers
+         did not know what to enter here, and nobody opens the user guide for it. -->
     <div class="card" id="deployCard" style="display:none">
-      <label for="deployUrl">Deployment</label>
-      <input id="deployUrl" class="txt" type="url" inputmode="url" autocapitalize="off" spellcheck="false" placeholder="https://rx.example.org">
-      <button id="btnDeploy" class="btn2" style="margin-top:8px">Use this deployment</button>
+      <label for="deployUrl" id="deployTitle">Deployment: where your data goes</label>
+      <div class="deploysteps" id="deploySteps" style="display:none">
+        The app needs to know which CoreScope receives your data. You do this once:
+        <ol>
+          <li>On a computer or another phone, open the CoreScope of your MeshCore group in a browser.</li>
+          <li>In its menu, open <b>Coverage</b>. That page shows a QR code with an address under it.</li>
+          <li>Tap <b>Scan QR code</b> below and point the camera at it.<br>Only this phone? Type the address under the QR code into the field and tap <b>Use this deployment</b>.</li>
+        </ol>
+      </div>
       <button id="btnDeployScan" class="btn2" style="margin-top:8px">📷 Scan QR code</button>
-      <div class="muted" id="deployInfo">The address of the CoreDrive RX web version you upload to. A CoreScope that takes CoreDrive data shows it as a QR code on its Coverage page.</div>
+      <input id="deployUrl" class="txt" type="url" inputmode="url" autocapitalize="off" spellcheck="false" placeholder="https://rx.example.org" style="margin-top:8px">
+      <button id="btnDeploy" class="btn2" style="margin-top:8px">Use this deployment</button>
+      <div class="muted" id="deployInfo"></div>
       <div class="muted" id="deployMsg" style="color:#ff8b7a"></div>
     </div>
     <div class="card">
@@ -225,6 +244,9 @@
       <div class="muted"><a href="https://github.com/efiten/coredrive-rx/blob/master/docs/play/privacy-policy.md" target="_blank" rel="noopener">Privacy policy</a> &middot; <a href="https://github.com/efiten/coredrive-rx/blob/master/docs/user-guide.md" target="_blank" rel="noopener">User guide</a> &middot; <a href="https://github.com/efiten/coredrive-rx" target="_blank" rel="noopener">Source code</a></div>
     </div>
   </div>
+  <!-- Android app: a newer version exists (src/appupdate.js). Fixed above the tabs, so it
+       shows on every screen: the app opens on Settings until connected. -->
+  <div id="updchip" class="updchip"></div>
   <nav class="bottombar">
     <button id="tabHome" class="tab active">🏠 Home</button>
     <button id="tabMap" class="tab">🗺️ Map</button>
