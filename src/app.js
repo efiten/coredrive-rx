@@ -12,7 +12,7 @@ import { updateNotice, parseVersionJson } from './appupdate.js';
 import { needsBatteryTip, markBatteryTipSeen } from './batterytip.js';
 import { usableFix, startSpell, endSpell, spellText } from './background.js';
 import { scanDeployment } from './qrscan.js';
-import { normalizeDeploymentUrl, readDeployment, saveDeployment, fetchDeploymentConfigText, deploymentChoice, DEPLOY_CACHE_KEY } from './deployment.js';
+import { normalizeDeploymentUrl, readDeployment, saveDeployment, fetchDeploymentConfigText, deploymentChoice, deploymentCardText, DEPLOY_CACHE_KEY } from './deployment.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute, ADV_TYPE_REPEATER } from './meshpacket.js';
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
@@ -269,6 +269,11 @@ function setupDeployment() {
   const base = readDeployment(localStorage);
   els('deployCard').style.display = '';
   els('deployUrl').value = base;
+  const t = deploymentCardText(base);
+  els('deployCard').classList.toggle('setup', t.setup);
+  els('deployTitle').textContent = t.title;
+  els('deploySteps').style.display = t.setup ? '' : 'none';
+  els('deployInfo').textContent = t.info;
   if (base) {
     setConfigSource(async () => {
       const r = await fetchDeploymentConfigText({ base, httpGet: nativeHttpGet, storage: localStorage });
