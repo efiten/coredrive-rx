@@ -37,7 +37,7 @@ import { accountView } from './accountview.js';
 import { signWithCompanion } from './companionsign.js';
 import { buildRfLogRecord } from './capture.js';
 import { heardKeyAfterVerify } from './advertsig.js';
-import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, resumeDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
+import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, resumeDelay, rfSampleDue, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
 import { buildRegionsRequest, buildOwnerRequest, parseRegionsResponse, parseOwnerResponse, parseSentAck, parseSendRefusal } from './regionreq.js';
 import { nextAskKind, settledSet, settle } from './asknext.js';
 import {
@@ -93,7 +93,7 @@ const state = {
   // auto-discover
   lastHeardAt: null, lastFireAt: 0, tick: null,
   // RF environment sampler
-  rfTimer: null, lastRfSample: null, rfGen: 0,
+  rfTimer: null, lastRfSample: null, rfGen: 0, rfLastAt: null,
   // bgSpell: the current stretch in the background while connected (src/background.js)
   bgSpell: null,
   // Timer catch-up (src/catchup.js): when each timed job last ran, and the pending
@@ -2019,11 +2019,13 @@ function startRfSampler() {
       return;
     }
     const fix = currentFix();
-    if (fix) {
+    const paused = state.motion ? state.motion.paused : false;
+    if (fix && rfSampleDue({ now: Date.now(), last: state.rfLastAt, fix, paused })) {
+      state.rfLastAt = { at: Date.now(), lat: fix.lat, lon: fix.lon };
       const core = await ask(STATS_CORE);
       const radio = await ask(STATS_RADIO);
       const packets = await ask(STATS_PACKETS);
-      const sample = mergeSample(core, radio, packets, fix, new Date().toISOString(), state.motion ? state.motion.paused : false);
+      const sample = mergeSample(core, radio, packets, fix, new Date().toISOString(), paused);
       if (sample) {
         await state.queue.add(queued(sample));
         state.lastRfSample = sample; // Settings diagnostics line

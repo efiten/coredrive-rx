@@ -2,6 +2,7 @@
 // Frame layouts are fixed by meshcore-firmware/docs/stats_binary_frames.md —
 // all multi-byte integers little-endian. These are LOCAL BLE queries: reading
 // them puts nothing on the air.
+import { distanceM } from './motion.js';
 
 export const CMD_GET_STATS = 56;
 export const RESP_CODE_STATS = 24;
@@ -105,17 +106,32 @@ export function mergeSample(core, radio, packets, fix, atISO, stationary) {
 // reception is — the noise floor at one spot genuinely changes over the day —
 // so the sampler slows down instead of stopping. The `stationary` flag on each
 // sample keeps a long park from swamping its hex cell's median.
+// While moving, a sample is due every RF_STEP_M of travel or every MOVING_MS, whichever
+// comes first: at 90 km/h a 15 s cadence left 375 m between samples, more than one
+// CoreScope hex at zoom 13 (about 340 m), so the map showed gaps along a road. The timer
+// checks every RF_CHECK_MS; a check that is not due sends nothing to the companion.
+// An RF sample is a stats query over Bluetooth, never an on-air packet.
 export const MOVING_MS = 15000;
 export const PARKED_MS = 300000;
+export const RF_STEP_M = 100;
+export const RF_CHECK_MS = 2000;
 
 export function nextSampleDelay(paused) {
-  return paused ? PARKED_MS : MOVING_MS;
+  return paused ? PARKED_MS : RF_CHECK_MS;
+}
+
+// rfSampleDue: last is the previous sample ({at, lat, lon}) or null, fix the current
+// position or null. A parked sample runs on the PARKED_MS timer and is always due.
+export function rfSampleDue({ now, last, fix, paused }) {
+  if (paused || !last) return true;
+  if (now - last.at >= MOVING_MS) return true;
+  return !!fix && distanceM(last, fix) >= RF_STEP_M;
 }
 
 // resumeDelay: on moving again, a sample still armed on the parked cadence would leave the
 // first minutes of the drive unsampled (seen: 4 min 19 s). Returns the moving delay to
 // re-arm with, or null when the armed sample is due sooner anyway or none is armed.
 export function resumeDelay(dueAt, now) {
-  if (dueAt == null || dueAt - now <= MOVING_MS) return null;
-  return MOVING_MS;
+  if (dueAt == null || dueAt - now <= RF_CHECK_MS) return null;
+  return RF_CHECK_MS;
 }
