@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeDeploymentUrl, deploymentConfigUrl, readDeployment, saveDeployment,
-  fetchDeploymentConfigText, deploymentChoice, DEPLOY_KEY, DEPLOY_CACHE_KEY,
+  fetchDeploymentConfigText, deploymentChoice, deploymentCardText, DEPLOY_KEY, DEPLOY_CACHE_KEY,
 } from '../src/deployment.js';
 import { loadConfig, setConfig, setConfigSource } from '../src/config.js';
 
@@ -131,4 +131,15 @@ test('choosing the deployment already in use changes nothing', () => {
   assert.equal(deploymentChoice('https://rx.on8ar.eu/', 'https://rx.example.org/', true), 'confirm');
   assert.equal(deploymentChoice('https://rx.on8ar.eu/', 'https://rx.example.org/', false), 'switch');
   assert.equal(deploymentChoice('', 'https://rx.on8ar.eu/', false), 'switch'); // first choice
+});
+
+// Testers did not know what to enter under Settings > Deployment (2026-11-12).
+test('the deployment card shows the steps until a deployment is chosen', () => {
+  const none = deploymentCardText('');
+  assert.equal(none.setup, true);
+  assert.match(none.title, /First step/);
+  assert.match(none.info, /Coverage/);
+  const set = deploymentCardText('https://rx.on8ar.eu/');
+  assert.equal(set.setup, false);
+  assert.equal(set.info, "Uploads to https://rx.on8ar.eu/. To change it, scan the QR code on another CoreScope's Coverage page.");
 });
