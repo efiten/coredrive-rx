@@ -2152,7 +2152,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     connectAll();
   };
   els('btnConnect').addEventListener('click', () => {
-    if (state.connected) { disconnectAll(); return; }
+    if (state.connected) { dbg('Disconnect pressed: capture stopped', 'st'); disconnectAll(); return; }
     if (needsBatteryTip(localStorage, isNativeApp())) { els('batteryTip').showModal(); return; }
     startConnect();
   });
