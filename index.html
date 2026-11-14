@@ -157,6 +157,9 @@
     <label>Last 5 declared scopes (region discovery)</label>
     <div id="regionsList" class="rg"></div>
   </div>
+  <!-- Android app only (src/appexit.js): Back or Home keeps capturing in the background,
+       and Disconnect sits on Settings, so testers had no easy way to end the app. -->
+  <button id="btnStopClose" class="danger" style="display:none;margin-top:6px">⏻ Stop &amp; close</button>
   </div><!-- /view-home -->
   <div id="view-map" style="display:none">
     <label>Live coverage (this session) — hexes persist until you reload</label>

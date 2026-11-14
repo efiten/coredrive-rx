@@ -7,7 +7,8 @@
 // Home is a pure monitor (counters, status strip, last-reception SNR meter, recently
 // heard). Discover runs automatically with a traffic backoff (see monitor.js). Config
 // and diagnostics live on the Settings tab.
-import { createTransport, createGps, isNativeApp, nativeHttpGet, nativeShareFile, qrScanner, appUpdater } from './platform.js';
+import { createTransport, createGps, isNativeApp, nativeHttpGet, nativeShareFile, qrScanner, appUpdater, exitNativeApp } from './platform.js';
+import { stopAndClose } from './appexit.js';
 import { updateNotice, parseVersionJson } from './appupdate.js';
 import { needsBatteryTip, markBatteryTipSeen } from './batterytip.js';
 import { usableFix, startSpell, endSpell, spellText } from './background.js';
@@ -2151,6 +2152,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (state.soundEnabled || state.msg.sound) state.beeper.ensure(); // unlock audio in the same gesture
     connectAll();
   };
+  if (isNativeApp()) {
+    els('btnStopClose').style.display = 'block';
+    els('btnStopClose').addEventListener('click', () => {
+      stopAndClose({
+        connected: state.connected,
+        confirm: (text) => window.confirm(text),
+        disconnect: () => { dbg('Stop & close pressed', 'st'); return disconnectAll(); },
+        exitApp: exitNativeApp,
+      }).catch((e) => dbg('Stop & close failed: ' + e.message, 'no'));
+    });
+  }
   els('btnConnect').addEventListener('click', () => {
     if (state.connected) { disconnectAll(); return; }
     if (needsBatteryTip(localStorage, isNativeApp())) { els('batteryTip').showModal(); return; }
