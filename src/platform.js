@@ -8,6 +8,7 @@ import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { AppUpdate } from '@capawesome/capacitor-app-update';
+import { App } from '@capacitor/app';
 import { WebBluetoothTransport } from './transport.js';
 import { CapacitorBleTransport } from './transport-native.js';
 import { Gps } from './gps.js';
@@ -33,6 +34,9 @@ export async function nativeShareFile(text, filename) {
   const { uri } = await Filesystem.writeFile({ path: filename, data: text, directory: Directory.Cache, encoding: Encoding.UTF8 });
   await Share.share({ title: filename, text: 'CoreDrive RX debug log', files: [uri] });
 }
+
+// Closes the Android app (finishes the activity), for src/appexit.js.
+export function exitNativeApp() { return App.exitApp(); }
 
 // Google Play's in-app update check, for src/appupdate.js.
 export function appUpdater() { return AppUpdate; }

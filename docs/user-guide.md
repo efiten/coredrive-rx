@@ -119,6 +119,11 @@ or turn off battery optimisation and allow background activity. The names differ
 [dontkillmyapp.com](https://dontkillmyapp.com) shows them for yours. The app shows this once,
 before your first **Connect**.
 
+The Back and Home buttons of the phone leave the app capturing in the background. To end it,
+tap **Stop & close** at the bottom of Home: the app disconnects from the companion and
+CoreScope, stops GPS and closes. While connected it asks first. Receptions not uploaded yet
+are kept and go out the next time you connect.
+
 ## The screens
 
 The screenshots below were made with made-up demo data, not a real drive.
@@ -136,6 +141,7 @@ The screenshots below were made with made-up demo data, not a real drive.
 - A red warning when receptions are queued but not uploading, and a "Paused, stationary" line when
   you stand still (see below).
 - **Last 5 declared scopes:** the regions the most recently asked repeaters said they serve.
+- **Stop & close** (Android app only): stops capturing and closes the app.
 
 **Map**
 
