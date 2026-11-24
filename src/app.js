@@ -25,7 +25,7 @@ import { createBeeper } from './beeper.js';
 import { createLocalMap } from './localmap.js';
 import { hexCellAt } from './hexgrid.js';
 import {
-  discoverDecision, isOrganicHeard, snrToPct, decayPeak, pruneTimestamps, linkTransition,
+  discoverDecision, isOrganicHeard, snrToPct, decayPeak, pruneTimestamps, linkTransition, linkDownWarning,
 } from './monitor.js';
 import { shareLog } from './sharelog.js';
 import { catchUpPlan } from './catchup.js';
@@ -103,6 +103,8 @@ const state = {
   // linkQuiet: true while the BLE link is down, so the pause and the resume are each
   // said once instead of once per tick.
   linkQuiet: false,
+  // linkDownAt: when the tick first saw the link down, for the red banner; null while up.
+  linkDownAt: null,
   // Region discovery (ANON_REQ_TYPE_REGIONS) — purely reception-driven: a repeater is
   // asked while we are hearing it, never on a clock (src/regionsched.js holds the
   // rules). supported reflects the FIRMWARE_VER_CODE gate.
@@ -1122,6 +1124,13 @@ function renderMsgChip() {
   el.style.display = 'block';
 }
 
+function renderLinkChip(now) {
+  const warn = linkDownWarning(state.linkDownAt, now);
+  const el = els('linkchip');
+  el.textContent = warn;
+  el.style.display = warn ? 'block' : 'none';
+}
+
 function renderUplinkChip() {
   state.uplink = currentUplink();
   const warn = uplinkWarning(state.uplink, state.connected);
@@ -1372,6 +1381,7 @@ function noteLinkState(linkUp) {
   const edge = linkTransition(state.linkQuiet, linkUp);
   if (!edge) return;
   state.linkQuiet = !linkUp;
+  state.linkDownAt = linkUp ? null : Date.now();
   if (edge === 'down') dbg('companion link down — discover, RF sampling and region asks held until it is back', 'no');
   else dbg('companion link back — discover, RF sampling and region asks resumed', 'ok');
 }
@@ -1415,18 +1425,22 @@ function monitorTick() {
   // tell from its own. The sweep fires on the first tick after signing ends.
   if (dec.fire && !state.signing) { fireDiscover(now); renderDiscoverStatus(discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused, linkUp)); }
   else renderDiscoverStatus(dec);
-  if (!linkUp) return; // nothing below this can reach the radio
-  // The only region-discovery work left on the clock: free a timed-out ask, so the
-  // slot is available to the very next repeater heard instead of one tick later. The
-  // asking itself happens on receptions (noteRepeaterHeard), never on a timer.
-  regionTick(now);
-  pingTick(now);
-  msgTick();
-  // A session that started without config must be able to heal without a restart:
-  // retry once a minute (not per tick) for as long as it is missing.
-  if (!getConfig() && (state.lastConfigTryAt == null || now - state.lastConfigTryAt >= 60000)) {
-    state.lastConfigTryAt = now;
-    retryConfig();
+  renderLinkChip(now);
+  // Only the radio work waits for the link. The renders below keep running, so the
+  // time-relative labels keep counting instead of freezing at the moment of the drop.
+  if (linkUp) {
+    // The only region-discovery work left on the clock: free a timed-out ask, so the
+    // slot is available to the very next repeater heard instead of one tick later. The
+    // asking itself happens on receptions (noteRepeaterHeard), never on a timer.
+    regionTick(now);
+    pingTick(now);
+    msgTick();
+    // A session that started without config must be able to heal without a restart:
+    // retry once a minute (not per tick) for as long as it is missing.
+    if (!getConfig() && (state.lastConfigTryAt == null || now - state.lastConfigTryAt >= 60000)) {
+      state.lastConfigTryAt = now;
+      retryConfig();
+    }
   }
   renderUplinkChip();
   state.snrPeakPct = decayPeak(state.snrPeakPct, state.snrBarPct, 1000);
@@ -2076,6 +2090,8 @@ async function disconnectAll(keepProgress) {
   state.paused = false;
   renderPauseChip();
   clearInterval(state.tick); state.tick = null;
+  state.linkDownAt = null; state.linkQuiet = false; // a link the user closed is not a link that dropped
+  renderLinkChip(Date.now());
   stopRfSampler();
   // Outstanding requests die with the transport: no reply can arrive on a link that is
   // gone, and a tag from this session must never match one from the next.

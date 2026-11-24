@@ -29,6 +29,9 @@
       --updchip-border: #1d4a6b;
       --updchip-text: #8cc8ff;
       --updchip-shadow: rgba(0, 0, 0, .5);
+      --linkchip-bg: #5c1212;
+      --linkchip-border: #e74c3c;
+      --linkchip-text: #ffd6d1;
       --setup-bg: #10283a;
       --setup-border: #2d6fa3;
       --setup-text: #cfe6ff;
@@ -40,6 +43,8 @@
     .deploysteps li { margin: 4px 0; }
     .updchip { display: none; cursor: pointer; background: var(--updchip-bg); color: var(--updchip-text); border: 1px solid var(--updchip-border); border-radius: 8px; padding: 10px 12px; font-size: 13px; overflow-wrap: anywhere;
       position: fixed; z-index: 1000; left: calc(12px + var(--inset-left)); right: calc(12px + var(--inset-right)); bottom: calc(64px + var(--inset-bottom)); box-shadow: 0 2px 10px var(--updchip-shadow); }
+    .linkchip { display: none; background: var(--linkchip-bg); color: var(--linkchip-text); border: 2px solid var(--linkchip-border); border-radius: 8px; padding: 12px 14px; font-size: 15px; font-weight: 700; line-height: 1.35;
+      position: fixed; z-index: 1001; left: calc(12px + var(--inset-left)); right: calc(12px + var(--inset-right)); top: calc(8px + var(--inset-top)); box-shadow: 0 2px 12px var(--updchip-shadow); }
     body.has-updchip { padding-bottom: calc(130px + var(--inset-bottom)); }
     .bgchip { display: none; cursor: pointer; background: var(--bgchip-bg); color: var(--bgchip-text); border: 1px solid var(--bgchip-border); border-radius: 8px; padding: 10px 12px; margin: 10px 0; font-size: 13px; }
     dialog.tip { max-width: 420px; width: calc(100% - 48px); box-sizing: border-box; background: var(--tip-bg); color: var(--tip-text); border: 1px solid var(--tip-border); border-radius: 10px; padding: 16px; font-size: 14px; line-height: 1.45; }
@@ -250,6 +255,8 @@
   <!-- Android app: a newer version exists (src/appupdate.js). Fixed above the tabs, so it
        shows on every screen: the app opens on Settings until connected. -->
   <div id="updchip" class="updchip"></div>
+  <!-- Red banner on every tab while the companion link is down (renderLinkChip). -->
+  <div id="linkchip" class="linkchip" role="alert"></div>
   <nav class="bottombar">
     <button id="tabHome" class="tab active">🏠 Home</button>
     <button id="tabMap" class="tab">🗺️ Map</button>

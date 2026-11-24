@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   discoverDecision, isOrganicHeard, snrToPct, decayPeak, pruneTimestamps,
-  DISCOVER_INTERVAL_MS, DISCOVER_BACKOFF_MS, linkTransition } from '../src/monitor.js';
+  DISCOVER_INTERVAL_MS, DISCOVER_BACKOFF_MS, linkTransition, linkDownWarning } from '../src/monitor.js';
 
 test('discover fires immediately when never fired and channel quiet', () => {
   const d = discoverDecision(1000, null, 0, false);
@@ -146,4 +146,19 @@ test('a full drop/return cycle over per-second ticks announces exactly two edges
     if (edge) { said.push(edge); quiet = !up; }
   }
   assert.deepEqual(said, ['down', 'back']);
+});
+
+test('link-down banner is empty while the link is up', () => {
+  assert.equal(linkDownWarning(null, 5000), '');
+});
+
+test('link-down banner counts seconds, then minutes', () => {
+  assert.match(linkDownWarning(1000, 1000), /down for 0 s\./);
+  assert.match(linkDownWarning(1000, 60_000), /down for 59 s\./);
+  assert.match(linkDownWarning(1000, 61_000), /down for 1 min\./);
+  assert.match(linkDownWarning(0, 10 * 60_000 + 59_000), /down for 10 min\./);
+});
+
+test('link-down banner never shows a negative duration', () => {
+  assert.match(linkDownWarning(5000, 1000), /down for 0 s\./);
 });

@@ -87,3 +87,14 @@ export function linkTransition(prevQuiet, linkUp) {
   if (prevQuiet !== linkUp) return null; // steady: the flag already holds the inverse
   return linkUp ? 'back' : 'down';
 }
+
+// linkDownWarning is the text of the red banner shown while the companion link is
+// down, or '' when it is up. The banner exists because a field drive (2026-11-24,
+// log debug9) lost the companion twice for 10 and 4+ minutes and nothing on screen
+// said so: the Home view kept showing the last reception as recent.
+export function linkDownWarning(downAt, now) {
+  if (downAt == null) return '';
+  const s = Math.max(0, Math.round((now - downAt) / 1000));
+  const dur = s < 60 ? s + ' s' : Math.floor(s / 60) + ' min';
+  return '⚠️ Companion link down for ' + dur + '. Nothing is being received. Restart the companion if it does not come back.';
+}
