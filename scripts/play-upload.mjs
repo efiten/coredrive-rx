@@ -1,4 +1,5 @@
-// Uploads a signed Android App Bundle to a Google Play test track as a DRAFT release.
+// Uploads a signed Android App Bundle to a Google Play test track as a DRAFT release, or
+// puts a bundle that is already on Play on another track (promote), also as a DRAFT.
 //
 // The draft holds the bundle and English release notes; rolling it out stays a click in
 // Play Console. Auth is a service account JSON key kept outside the repo (default
@@ -8,6 +9,9 @@
 // Usage:
 //   node scripts/play-upload.mjs tracks                       list tracks and their releases
 //   node scripts/play-upload.mjs upload <file.aab> [--track alpha] [--notes vX.Y.Z] [--mapping mapping.txt]
+//   node scripts/play-upload.mjs promote <versionCode> [--track production] [--notes vX.Y.Z]
+// promote reuses the name and release notes the versionCode has on the track it is on now;
+// --notes replaces them with the summary of that docs/releases file.
 // --mapping uploads R8's mapping file with the bundle, so Play's crash reports show real names.
 // The notes default to the one-line summary of docs/releases/v<package.json version>.md.
 import { createSign } from 'node:crypto';
@@ -45,6 +49,17 @@ export function draftRelease(versionCode, versionName, notes) {
     status: 'draft',
     releaseNotes: [{ language: 'en-US', text: notes }],
   };
+}
+
+// promotedDraft builds the draft for `versionCode` on another track from the release
+// that already holds it (tracks as GET /tracks returns them), keeping its name and notes.
+export function promotedDraft(tracks, versionCode) {
+  const code = String(versionCode);
+  for (const t of tracks || []) {
+    const r = (t.releases || []).find((x) => (x.versionCodes || []).includes(code));
+    if (r) return { name: r.name, versionCodes: [code], status: 'draft', releaseNotes: r.releaseNotes || [] };
+  }
+  throw new Error('versionCode ' + code + ' is on no track; upload it first');
 }
 
 // mappingPath is where R8's mapping file for one versionCode goes (edits.deobfuscationfiles).
@@ -113,11 +128,28 @@ async function main(argv) {
       }
       return;
     }
-    if (argv[0] !== 'upload' || !argv[1]) throw new Error('usage: play-upload.mjs tracks | upload <file.aab> [--track alpha] [--notes vX.Y.Z] [--mapping mapping.txt]');
+    const usage = 'usage: play-upload.mjs tracks | upload <file.aab> [--track alpha] [--notes vX.Y.Z] [--mapping mapping.txt]'
+      + ' | promote <versionCode> [--track production] [--notes vX.Y.Z]';
+    if (!['upload', 'promote'].includes(argv[0]) || !argv[1]) throw new Error(usage);
+    const summaryOf = (tag) => releaseSummary(readFileSync(join(root, 'docs', 'releases', tag + '.md'), 'utf8'));
+
+    if (argv[0] === 'promote') {
+      const track = opt('--track', 'production');
+      const { tracks } = await call('GET', e + '/tracks');
+      const draft = promotedDraft(tracks, argv[1]);
+      if (opt('--notes')) draft.releaseNotes = [{ language: 'en-US', text: summaryOf(opt('--notes')) }];
+      const current = (tracks || []).find((t) => t.track === track) || { releases: [] };
+      await call('PUT', e + '/tracks/' + track, { body: { track, releases: withDraft(current.releases, draft) } });
+      await call('POST', e + ':commit');
+      committed = true;
+      console.log('draft "' + draft.name + '" on track ' + track + ', notes: ' + draft.releaseNotes.map((n) => n.text).join(' | '));
+      console.log('roll it out in Play Console > Testen en releasen');
+      return;
+    }
 
     const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
     const tag = opt('--notes', 'v' + version);
-    const notes = releaseSummary(readFileSync(join(root, 'docs', 'releases', tag + '.md'), 'utf8'));
+    const notes = summaryOf(tag);
     const track = opt('--track', 'alpha');
 
     const bundle = await call('POST', e + '/bundles?uploadType=media', { upload: true, raw: readFileSync(argv[1]) });

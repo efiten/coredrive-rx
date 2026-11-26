@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { generateKeyPairSync, createVerify } from 'node:crypto';
-import { releaseSummary, withDraft, draftRelease, signedJwt, mappingPath, NOTES_MAX } from '../scripts/play-upload.mjs';
+import { releaseSummary, withDraft, draftRelease, signedJwt, mappingPath, promotedDraft, NOTES_MAX } from '../scripts/play-upload.mjs';
 
 test('the notes are the summary line, without markdown', () => {
   const md = '# CoreDrive RX v1.2.3\r\n\r\nThe **Android app** keeps\n`capturing`.\r\n\r\n## What\'s new\n\n- x\n';
@@ -42,4 +42,23 @@ test('the token request is a JWT signed with the service account key', () => {
 
 test('the mapping file goes to the deobfuscation slot of its versionCode', () => {
   assert.equal(mappingPath(12501), '/apks/12501/deobfuscationFiles/proguard?uploadType=media');
+});
+
+test('promote copies name and notes of the release that holds the versionCode', () => {
+  const tracks = [
+    { track: 'production', releases: [] },
+    { track: 'alpha', releases: [
+      { name: '12700 (1.27.0)', versionCodes: ['12700'], status: 'completed', releaseNotes: [{ language: 'en-US', text: 'old' }] },
+      { name: '12800 (1.28.0)', versionCodes: ['12800'], status: 'completed', releaseNotes: [{ language: 'en-US', text: 'banner' }] },
+    ] },
+  ];
+  assert.deepStrictEqual(promotedDraft(tracks, 12800), {
+    name: '12800 (1.28.0)', versionCodes: ['12800'], status: 'draft',
+    releaseNotes: [{ language: 'en-US', text: 'banner' }],
+  });
+});
+
+test('promote refuses a versionCode that is on no track', () => {
+  assert.throws(() => promotedDraft([{ track: 'alpha', releases: [] }], '99999'), /on no track/);
+  assert.throws(() => promotedDraft(undefined, '12800'), /on no track/);
 });
